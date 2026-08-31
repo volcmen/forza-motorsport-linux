@@ -1,0 +1,12 @@
+[Unit]
+Description=Xodus service for one Forza Motorsport session
+
+[Service]
+Type=simple
+ExecStart=%h/.local/libexec/xodus-forza/xodus-service
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t/xodus.sock

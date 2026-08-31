@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+set -u
+
+service_name=xodus-forza.service
+systemctl_bin=${FORZA_SYSTEMCTL:-systemctl}
+runtime_dir=${XDG_RUNTIME_DIR:-}
+started_here=0
+
+cleanup() {
+    if ((started_here)); then
+        started_here=0
+        "$systemctl_bin" --user stop "$service_name" || true
+    fi
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if (($# == 0)); then
+    printf 'error: game command is required\n' >&2
+    exit 2
+fi
+
+if [[ -z $runtime_dir ]]; then
+    printf 'error: XDG_RUNTIME_DIR is required\n' >&2
+    exit 1
+fi
+
+if [[ -n ${PAM_KWALLET5_LOGIN:-} && -S ${PAM_KWALLET5_LOGIN} ]]; then
+    "$systemctl_bin" --user start plasma-kwallet-pam.service || true
+fi
+
+if "$systemctl_bin" --user is-active --quiet "$service_name"; then
+    :
+else
+    activity_status=$?
+    if ((activity_status != 3)); then
+        printf 'error: cannot determine whether %s is active\n' "$service_name" >&2
+        exit 1
+    fi
+    if ! "$systemctl_bin" --user start "$service_name"; then
+        printf 'error: cannot start %s\n' "$service_name" >&2
+        exit 1
+    fi
+    started_here=1
+fi
+
+socket_path="$runtime_dir/xodus.sock"
+deadline=$((SECONDS + 5))
+until [[ -S $socket_path ]]; do
+    if ((SECONDS >= deadline)); then
+        printf 'error: timed out waiting for %s\n' "$socket_path" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+
+"$@"
+game_status=$?
+exit "$game_status"
