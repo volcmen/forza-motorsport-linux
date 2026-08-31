@@ -85,7 +85,11 @@ make_ready_installation() {
     : > "$steam/steamapps/compatdata/2440510/pfx/drive_c/windows/system32/xgameruntime.dll.threading"
     : > "$TEST_ROOT/.local/libexec/xodus-forza/xodus-service"
     chmod +x -- "$TEST_ROOT/.local/libexec/xodus-forza/xodus-service"
-    printf '%s\n' '[D-BUS Service]' 'Exec=/usr/bin/ksecretd6' > \
+    mkdir -p -- "$TEST_ROOT/providers"
+    : > "$TEST_ROOT/providers/ksecretd"
+    chmod +x -- "$TEST_ROOT/providers/ksecretd"
+    printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
+        "Exec=$TEST_ROOT/providers/ksecretd" > \
         "$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
     write_fake_patcher
 }
@@ -166,6 +170,27 @@ test_xodus_service_binary_must_be_executable() {
     tear_down
 }
 
+test_xodus_service_binary_rejects_directories_and_symlinks() {
+    local service
+    set_up
+    service="$TEST_ROOT/.local/libexec/xodus-forza/xodus-service"
+    rm -- "$service"
+    mkdir -- "$service"
+    run_doctor
+    assert_contains "$output" 'FAIL Xodus service binary'
+    tear_down
+
+    set_up
+    service="$TEST_ROOT/.local/libexec/xodus-forza/xodus-service"
+    rm -- "$service"
+    : > "$WORK_ROOT/real-xodus-service"
+    chmod +x -- "$WORK_ROOT/real-xodus-service"
+    ln -s -- "$WORK_ROOT/real-xodus-service" "$service"
+    run_doctor
+    assert_contains "$output" 'FAIL Xodus service binary'
+    tear_down
+}
+
 test_secret_service_accepts_owner_or_kde_provider_and_fails_without_either() {
     set_up
     export FORZA_FAKE_SECRET_OWNER=1
@@ -175,6 +200,25 @@ test_secret_service_accepts_owner_or_kde_provider_and_fails_without_either() {
 
     set_up
     rm -- "$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+    run_doctor
+    assert_contains "$output" 'FAIL Secret Service'
+    tear_down
+}
+
+test_secret_service_rejects_non_definition_text_and_malformed_exec() {
+    local definition
+    set_up
+    definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+    printf '%s\n' '[D-BUS Service]' '# Name=org.freedesktop.secrets' \
+        "Exec=$TEST_ROOT/providers/ksecretd" > "$definition"
+    run_doctor
+    assert_contains "$output" 'FAIL Secret Service'
+    tear_down
+
+    set_up
+    definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+    printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
+        "Exec=$TEST_ROOT/providers/ksecretd --daemon" > "$definition"
     run_doctor
     assert_contains "$output" 'FAIL Secret Service'
     tear_down
@@ -238,7 +282,9 @@ run_test() {
 run_test test_ready_installation_reports_each_check_and_does_not_mutate
 run_test test_each_required_file_check_fails_when_its_input_is_missing
 run_test test_xodus_service_binary_must_be_executable
+run_test test_xodus_service_binary_rejects_directories_and_symlinks
 run_test test_secret_service_accepts_owner_or_kde_provider_and_fails_without_either
+run_test test_secret_service_rejects_non_definition_text_and_malformed_exec
 run_test test_service_and_known_build_states_distinguish_pass_warn_and_fail
 run_test test_free_disk_space_has_pass_warn_and_fail_thresholds
 

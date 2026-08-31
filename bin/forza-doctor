@@ -41,7 +41,7 @@ report_file() {
 
 report_executable() {
     local check=$1 path=$2
-    if [[ -x $path ]]; then
+    if [[ -f $path && ! -L $path && -x $path ]]; then
         report PASS "$check" present
     else
         report FAIL "$check" missing-or-not-executable
@@ -58,15 +58,40 @@ report_directory() {
 }
 
 has_kde_secret_service_provider() {
-    local candidate content
-    for candidate in \
-        "$data_root/dbus-1/services/org.freedesktop.secrets.service" \
-        /usr/share/dbus-1/services/org.freedesktop.secrets.service; do
+    local candidate data_dir line name= exec= name_count exec_count
+    local -a service_dirs=("$data_root/dbus-1/services")
+    if [[ -z $test_root ]]; then
+        local -a xdg_data_dirs
+        IFS=: read -r -a xdg_data_dirs <<< "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+        for data_dir in "${xdg_data_dirs[@]}"; do
+            service_dirs+=("$data_dir/dbus-1/services")
+        done
+    fi
+    for data_dir in "${service_dirs[@]}"; do
+        candidate="$data_dir/org.freedesktop.secrets.service"
         [[ -f $candidate ]] || continue
-        content=$(<"$candidate")
-        case "$content" in
-            *ksecretd* | *kwallet*) return 0 ;;
-        esac
+        name=
+        exec=
+        name_count=0
+        exec_count=0
+        while IFS= read -r line || [[ -n $line ]]; do
+            case "$line" in
+                Name=*)
+                    name=${line#Name=}
+                    ((name_count += 1))
+                    ;;
+                Exec=*)
+                    exec=${line#Exec=}
+                    ((exec_count += 1))
+                    ;;
+            esac
+        done < "$candidate"
+        if ((name_count == 1 && exec_count == 1)) && [[ $name == org.freedesktop.secrets ]] && \
+            [[ $exec == /* ]] && [[ -f $exec && -x $exec ]]; then
+            case "${exec##*/}" in
+                ksecretd | ksecretd5 | ksecretd6 | kwalletd | kwalletd5 | kwalletd6) return 0 ;;
+            esac
+        fi
     done
     return 1
 }

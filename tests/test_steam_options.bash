@@ -25,6 +25,7 @@ set_up() {
 exit 0
 EOF
     chmod +x -- "$TEST_ROOT/.local/bin/forza-linux"
+    unset FORZA_TEST_UID
     export FORZA_TEST_ROOT="$TEST_ROOT"
 }
 
@@ -59,6 +60,31 @@ test_test_uid_override_and_bash_quoting_keep_injected_launcher_path_inert() {
     tear_down
 }
 
+test_invalid_test_uid_or_id_output_is_rejected_without_an_option_line() {
+    set_up
+    local output_file="$WORK_ROOT/options" error_file="$WORK_ROOT/error"
+    export FORZA_TEST_UID="1234; touch $SENTINEL"
+    if "$GENERATOR" > "$output_file" 2> "$error_file"; then
+        fail 'invalid FORZA_TEST_UID was accepted'
+    fi
+    [[ ! -s $output_file ]] || fail 'invalid FORZA_TEST_UID produced an option line'
+    [[ ! -e $SENTINEL ]] || fail 'invalid FORZA_TEST_UID was evaluated'
+    tear_down
+
+    set_up
+    output_file="$WORK_ROOT/options"
+    error_file="$WORK_ROOT/error"
+    local fake_id="$WORK_ROOT/id"
+    printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' '1234; touch $SENTINEL'" > "$fake_id"
+    chmod +x -- "$fake_id"
+    unset FORZA_TEST_UID
+    PATH="$WORK_ROOT:$PATH" "$GENERATOR" > "$output_file" 2> "$error_file" && \
+        fail 'invalid id -u output was accepted'
+    [[ ! -s $output_file ]] || fail 'invalid id -u output produced an option line'
+    [[ ! -e $SENTINEL ]] || fail 'invalid id -u output was evaluated'
+    tear_down
+}
+
 run_test() {
     ((tests_run += 1))
     current_test_failed=0
@@ -73,6 +99,7 @@ run_test() {
 
 run_test test_options_use_runtime_uid_and_installed_launcher_path
 run_test test_test_uid_override_and_bash_quoting_keep_injected_launcher_path_inert
+run_test test_invalid_test_uid_or_id_output_is_rejected_without_an_option_line
 
 printf '%s tests run, %s failed\n' "$tests_run" "$tests_failed"
 exit "$status"

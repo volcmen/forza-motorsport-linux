@@ -8,7 +8,15 @@ else
     home_root=${HOME:?HOME is required}
 fi
 
-uid=${FORZA_TEST_UID:-$(id -u)}
+if [[ -v FORZA_TEST_UID ]]; then
+    uid=$FORZA_TEST_UID
+else
+    uid=$(id -u)
+fi
+if [[ ! $uid =~ ^[0-9]+$ ]]; then
+    printf 'error: numeric UID required\n' >&2
+    exit 2
+fi
 launcher="$home_root/.local/bin/forza-linux"
 printf -v quoted_launcher '%q' "$launcher"
 
