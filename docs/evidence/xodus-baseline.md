@@ -44,7 +44,12 @@ copied here.
 
 The local source commit is
 `baa811b1d6d08b0cdd7e73a6a202d9b9e6616aec` (`feat: expose title-scoped Xbox
-authorization`). It is local and unpublished.
+authorization`). Review then found that its call to pinned XAL
+`get_xsts_token()` inherited request/response debug middleware that could emit
+the device, title, user, XSTS, UHS, and XUID values. Local source commit
+`c4491c0ce8107b79de284062163191008772346c` (`fix: keep Xbox authorization
+secrets out of logs`) replaces that exchange and hardens the preceding error
+paths. Both commits are local and unpublished.
 
 The plan's stable `TitleAuthorization` interface is implemented in the Xodus
 core with public authorization, user-hash, XUID, and signer fields. Private raw
@@ -58,22 +63,49 @@ XUID, and expiry; it does not export private proof-key material.
 left unchanged. No friends, invite, join, RTA, incoming-notification, or UI code
 is included in this commit.
 
+## Credential logging audit
+
+The complete production path reached by `mint_title_xsts()` was reviewed:
+
+| Reachable step | Credential handling and log result |
+| --- | --- |
+| `TokenManager` STS reads | Reads the stored user/device credentials without logging their values. |
+| Xodus `exchange_device_token()` / `exchange_user_token()` | RST2 requests log fixed processing stages only, never SOAP request/response bodies. The former raw-Debug `unimplemented!` fallback was replaced by a fixed `UnexpectedResponse` error. Persistence warnings format only `TokenStoreError`. |
+| XAL `get_device_token_rps()` | Sends the RPS ticket and proof key without request/response `.log()` middleware. Any returned XAL error is consumed at the fixed `Authentication` boundary. |
+| XAL `sisu_authorize_rps()` | Sends the matching user/device claims without `.log()` middleware. The former `expect()` was replaced by ordinary error propagation so an error containing a response body cannot be panic-formatted. |
+| Title XSTS exchange | Does not call XAL `get_xsts_token()`. A local signed reqwest transport constructs the same public XAL request model with the same device/title/user tokens, sandbox, correlation vector, and cloned signer. It logs only `POST`, the fixed `title-xsts` service label, and numeric response status; it parses through reqwest without logging either body. |
+| Service boundary | Converts all authentication/exchange failures into fixed `TitleAuthorizationError` variants and the bounded XML response; raw transport errors are not logged or returned. |
+
+Pinned XAL implements its working signer extension for reqwest 0.11 while the
+workspace uses reqwest 0.13. The source therefore names XAL's already-resolved
+0.11 version as `reqwest-xal`; it does not add another resolved release. Its
+public `RequestSigning<http::Request<Vec<u8>>>` route was evaluated but is not a
+correct substitute in this revision because it drops the generated Signature
+header when rebuilding the request. No dependency was forked or patched, and
+private proof-key material remains inaccessible.
+
 ## Verification
 
 | Check | Status | Result |
 | --- | --- | --- |
-| Required RED | PASS | The first `title_xsts_bundle` run failed because `TitleTokenBundle`, `mint_title_xsts_bundle_with`, and `TitleAuthorization` were absent. |
-| Focused prerequisite test | PASS | 2 title-bundle tests passed with synthetic tokens and no Xbox request. |
-| Safe Xodus/Xodus-service suite | PASS | With the pre-existing live device-token test explicitly skipped: Xodus 15 passed, 0 failed, 1 ignored, 1 filtered; xodus-service 2 passed, 0 failed; doc tests 0. |
+| Original required RED | PASS | The first `title_xsts_bundle` run failed because `TitleTokenBundle`, `mint_title_xsts_bundle_with`, and `TitleAuthorization` were absent. |
+| Privacy-fix RED | PASS | `cargo test -p xodus safe_title_xsts_exchange_never_logs_credentials_and_preserves_identity -- --exact` failed to compile because `safe_title_xsts_exchange` did not exist. |
+| Focused privacy and identity tests | PASS | Four named synthetic runs each passed 1 test with 18 filtered: safe transport/log capture, exact `MissingUserHash`, exact `MissingXuid`, and one-device/signer identity. The transport test used only a loopback HTTP server. |
+| Safe Xodus/Xodus-service suite | PASS | `cargo test -p xodus -p xodus-service -- --skip test_get_xbox_live_dev_token`: 19 passed, 0 failed, 1 ignored, 1 filtered across 3 suites. |
 | Formatting | PASS | `cargo fmt --check` exited 0. |
 | Lints | PASS | `cargo clippy -p xodus -p xodus-service --all-targets -- -D warnings` exited 0. |
 | Diff integrity | PASS | `git diff --check` exited 0 before commit. |
 | Integration repository gate | PASS | `just verify` exited 0 with the repository's ignored local ShellCheck/shfmt tools on `PATH`: 45 Python, 27 launcher, 13 doctor, 3 Steam-options, 35 installation, and 7 policy tests passed; systemd, ShellCheck, shfmt, Ruff, REUSE, privacy, and diff checks passed. |
 
-All tests added by this change use fixed synthetic values. They do not read
+All tests added by these changes use fixed synthetic values. They do not read
 Xodus credentials, call Xbox endpoints, start the service, or launch the game.
-No authorization header, token, XUID, proof key, gamertag, or invite URI is
-logged by the new path.
+The privacy test passes sentinel device/title/user/XSTS/UHS/XUID values through
+the signed loopback exchange and captures enabled Rust logs; none of those
+values appears in the captured records. The returned signer has the same proof
+key as the input signer, and the captured HTTP body contains the exact synthetic
+device/title/user values, proving the same bundle was sent. Production code and
+custom `Debug` output do not emit authorization headers, tokens, per-token
+identity, or proof-key material.
 
 During the first unfiltered workspace verification, the pre-existing upstream
 `test_get_xbox_live_dev_token` test was unintentionally included. Source review
