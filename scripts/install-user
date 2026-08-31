@@ -3,86 +3,14 @@
 set -u
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-install_root=${FORZA_INSTALL_ROOT:-${HOME:?HOME is required}}
+HELPER="$ROOT/scripts/secure-user-files"
+install_root=${FORZA_INSTALL_ROOT:-}
 xodus_build=
-stage=
-transaction_active=0
-published_count=0
-declare -a published_paths=()
-
-readonly -a destination_paths=(
-    '.local/bin/forza-linux'
-    '.local/bin/forza-doctor'
-    '.local/libexec/forza-motorsport-linux/patch-known-build'
-    '.local/share/forza-motorsport-linux/supported-builds.toml'
-    '.local/libexec/xodus-forza/xodus-service'
-    '.local/libexec/xodus-forza/xodus-cli'
-    '.local/libexec/xodus-forza/xodus-overlay'
-    '.config/systemd/user/xodus-forza.service'
-)
-readonly manifest_relative_path='.local/state/forza-motorsport-linux/install-manifest'
-
-die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+explicit_root=0
 
 usage() {
     printf '%s\n' "usage: $0 [--root PATH] --xodus-build-dir PATH" >&2
     exit 64
-}
-
-require_regular_file() {
-    local path=$1 label=$2
-    [[ -f $path && ! -L $path ]] || die "$label must be a non-symlink regular file: $path"
-}
-
-require_executable_file() {
-    local path=$1 label=$2
-    require_regular_file "$path" "$label"
-    [[ -x $path ]] || die "$label must be executable: $path"
-}
-
-sha256() { sha256sum -- "$1" | awk '{print $1}'; }
-
-check_existing_parent_components() {
-    local relative=$1 path=$install_root component
-    IFS=/ read -r -a components <<< "${relative%/*}"
-    for component in "${components[@]}"; do
-        path="$path/$component"
-        [[ ! -L $path ]] || die "refusing symlinked destination parent: $path"
-        [[ ! -e $path || -d $path ]] || die "destination parent is not a directory: $path"
-    done
-}
-
-make_destination_parent() {
-    local relative=$1 parent
-    parent="$install_root/${relative%/*}"
-    check_existing_parent_components "$relative"
-    mkdir -p -- "$parent" || die "cannot create destination parent: $parent"
-    check_existing_parent_components "$relative"
-}
-
-remove_empty_owned_directories() {
-    local relative path
-    for relative in \
-        '.local/state/forza-motorsport-linux' \
-        '.local/share/forza-motorsport-linux' \
-        '.local/libexec/forza-motorsport-linux' \
-        '.local/libexec/xodus-forza'; do
-        path="$install_root/$relative"
-        [[ -d $path && ! -L $path ]] && rmdir -- "$path" 2>/dev/null || true
-    done
-}
-
-cleanup() {
-    local exit_status=$? path
-    if ((transaction_active)); then
-        for path in "${published_paths[@]}"; do
-            [[ -f $path && ! -L $path ]] && rm -f -- "$path"
-        done
-        remove_empty_owned_directories
-    fi
-    [[ -n $stage && -d $stage && ! -L $stage ]] && rm -rf -- "$stage"
-    trap - EXIT
-    exit "$exit_status"
 }
 
 while (($#)); do
@@ -90,6 +18,7 @@ while (($#)); do
         --root)
             (($# >= 2)) || usage
             install_root=$2
+            explicit_root=1
             shift 2
             ;;
         --xodus-build-dir)
@@ -102,96 +31,29 @@ while (($#)); do
     esac
 done
 
+[[ -n $install_root ]] || install_root=${HOME:?HOME is required}
 [[ -n $xodus_build ]] || usage
-[[ -d $install_root && ! -L $install_root ]] || die "install root must be a non-symlink directory: $install_root"
-[[ -d $xodus_build && ! -L $xodus_build ]] || die "Xodus build directory must be a non-symlink directory: $xodus_build"
+[[ $install_root == /* && $xodus_build == /* ]] || {
+    printf '%s\n' 'error: root and Xodus build directory must be absolute paths' >&2
+    exit 1
+}
 
-declare -a source_paths=(
-    "$ROOT/bin/forza-linux"
-    "$ROOT/bin/forza-doctor"
-    "$ROOT/scripts/patch-known-build"
-    "$ROOT/manifests/supported-builds.toml"
-    "$xodus_build/xodus-service"
-    "$xodus_build/xodus-cli"
-    "$xodus_build/xodus-overlay"
-    "$ROOT/config/xodus-forza.service"
+arguments=(install --root "$install_root")
+((explicit_root)) && arguments+=(--explicit-root)
+arguments+=(
+    --source ".local/bin/forza-linux=$ROOT/bin/forza-linux"
+    --source ".local/bin/forza-doctor=$ROOT/bin/forza-doctor"
+    --source ".local/libexec/forza-motorsport-linux/patch-known-build=$ROOT/scripts/patch-known-build"
+    --source ".local/share/forza-motorsport-linux/supported-builds.toml=$ROOT/manifests/supported-builds.toml"
+    --source ".local/libexec/xodus-forza/xodus-service=$xodus_build/xodus-service"
+    --source ".local/libexec/xodus-forza/xodus-cli=$xodus_build/xodus-cli"
+    --source ".local/libexec/xodus-forza/xodus-overlay=$xodus_build/xodus-overlay"
+    --source ".config/systemd/user/xodus-forza.service=$ROOT/config/xodus-forza.service"
 )
 
-for index in "${!source_paths[@]}"; do
-    case "${destination_paths[index]}" in
-        .local/bin/* | .local/libexec/*/patch-known-build | .local/libexec/xodus-forza/*)
-            require_executable_file "${source_paths[index]}" "source artifact"
-            ;;
-        *) require_regular_file "${source_paths[index]}" "source artifact" ;;
-    esac
-done
-
-stage=$(mktemp -d "$install_root/.forza-install.XXXXXX") || die 'cannot create staging directory'
-trap cleanup EXIT
-
-for index in "${!source_paths[@]}"; do
-    staged="$stage/${destination_paths[index]}"
-    mkdir -p -- "${staged%/*}" || die "cannot stage destination: $staged"
-    cp --preserve=mode -- "${source_paths[index]}" "$staged" || die "cannot stage source: ${source_paths[index]}"
-    require_regular_file "$staged" 'staged artifact'
-done
-
-manifest_stage="$stage/$manifest_relative_path"
-mkdir -p -- "${manifest_stage%/*}" || die 'cannot stage install manifest'
-{
-    printf '%s\n' 'forza-motorsport-linux-install-v1'
-    for index in "${!destination_paths[@]}"; do
-        staged="$stage/${destination_paths[index]}"
-        printf '%s\t%s\t%s\n' "${destination_paths[index]}" \
-            "$(stat -c '%a' -- "$staged")" "$(sha256 "$staged")"
-    done
-} > "$manifest_stage" || die 'cannot write staged install manifest'
-chmod 600 -- "$manifest_stage"
-
-for index in "${!destination_paths[@]}"; do
-    destination="$install_root/${destination_paths[index]}"
-    check_existing_parent_components "${destination_paths[index]}"
-    if [[ -e $destination || -L $destination ]]; then
-        require_regular_file "$destination" "existing destination"
-        [[ $(sha256 "$destination") == $(sha256 "$stage/${destination_paths[index]}") ]] &&
-            [[ $(stat -c '%a' -- "$destination") == $(stat -c '%a' -- "$stage/${destination_paths[index]}") ]] ||
-            die "refusing conflicting destination: $destination"
-    fi
-done
-
-check_existing_parent_components "$manifest_relative_path"
-manifest="$install_root/$manifest_relative_path"
-if [[ -e $manifest || -L $manifest ]]; then
-    require_regular_file "$manifest" 'existing install manifest'
-    cmp -s -- "$manifest_stage" "$manifest" || die "refusing conflicting destination: $manifest"
-fi
-
-transaction_active=1
-for index in "${!destination_paths[@]}"; do
-    destination="$install_root/${destination_paths[index]}"
-    if [[ ! -e $destination && ! -L $destination ]]; then
-        make_destination_parent "${destination_paths[index]}"
-        [[ ! -e $destination && ! -L $destination ]] || die "destination appeared during publish: $destination"
-        mv -T -- "$stage/${destination_paths[index]}" "$destination" || die "cannot publish destination: $destination"
-        published_paths+=("$destination")
-        ((published_count += 1))
-        if [[ ${FORZA_INSTALL_FAIL_AFTER_PUBLISH:-} =~ ^[0-9]+$ ]] &&
-            ((published_count == FORZA_INSTALL_FAIL_AFTER_PUBLISH)); then
-            die 'simulated publish interruption'
-        fi
-    fi
-done
-
-if [[ ${FORZA_INSTALL_FAIL_BEFORE_MANIFEST:-0} == 1 ]]; then
-    die 'simulated failure before manifest publication'
-fi
-
-if [[ ! -e $manifest && ! -L $manifest ]]; then
-    make_destination_parent "$manifest_relative_path"
-    [[ ! -e $manifest && ! -L $manifest ]] || die "manifest appeared during publish: $manifest"
-    mv -T -- "$manifest_stage" "$manifest" || die "cannot publish install manifest"
-fi
-
-transaction_active=0
-systemctl --user daemon-reload || die 'cannot reload user systemd daemon'
-printf 'installed Forza Motorsport Linux user integration\n'
+"$HELPER" "${arguments[@]}" || exit $?
+systemctl --user daemon-reload || {
+    printf '%s\n' 'error: cannot reload user systemd daemon' >&2
+    exit 1
+}
+printf '%s\n' 'installed Forza Motorsport Linux user integration'

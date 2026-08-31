@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""No-follow user-local file transaction primitives for the installer."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import secrets
+import stat
+import sys
+import time
+from collections.abc import Iterable
+
+
+PAYLOADS = (
+    ".local/bin/forza-linux",
+    ".local/bin/forza-doctor",
+    ".local/libexec/forza-motorsport-linux/patch-known-build",
+    ".local/share/forza-motorsport-linux/supported-builds.toml",
+    ".local/libexec/xodus-forza/xodus-service",
+    ".local/libexec/xodus-forza/xodus-cli",
+    ".local/libexec/xodus-forza/xodus-overlay",
+    ".config/systemd/user/xodus-forza.service",
+)
+MANIFEST = ".local/state/forza-motorsport-linux/install-manifest"
+HEADER = "forza-motorsport-linux-install-v1"
+DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+class SecureFilesError(RuntimeError):
+    """A filesystem path failed the fail-closed user-install policy."""
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def relative_parts(relative: str) -> list[str]:
+    parts = relative.split("/")
+    if not relative or relative.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+        raise SecureFilesError(f"unsafe relative path: {relative}")
+    return parts
+
+
+def open_absolute_directory(path: str) -> int:
+    if not os.path.isabs(path):
+        raise SecureFilesError(f"path must be absolute: {path}")
+    fd = os.open("/", DIRECTORY)
+    try:
+        for part in relative_parts(path[1:]) if path != "/" else []:
+            next_fd = os.open(part, DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def open_parent(root_fd: int, relative: str, *, create: bool) -> tuple[int, str]:
+    parts = relative_parts(relative)
+    fd = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            try:
+                next_fd = os.open(part, DIRECTORY, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o755, dir_fd=fd)
+                next_fd = os.open(part, DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd, parts[-1]
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def read_regular_at(parent_fd: int, leaf: str, *, executable: bool = False) -> tuple[bytes, int, os.stat_result]:
+    fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SecureFilesError(f"not a regular file: {leaf}")
+        mode = stat.S_IMODE(info.st_mode)
+        if executable and not mode & 0o111:
+            raise SecureFilesError(f"not executable: {leaf}")
+        chunks: list[bytes] = []
+        while block := os.read(fd, 1024 * 1024):
+            chunks.append(block)
+        return b"".join(chunks), mode, info
+    finally:
+        os.close(fd)
+
+
+def read_regular_absolute(path: str, *, executable: bool) -> tuple[bytes, int]:
+    parent, leaf = os.path.split(path)
+    parent_fd = open_absolute_directory(parent)
+    try:
+        data, mode, _ = read_regular_at(parent_fd, leaf, executable=executable)
+        return data, mode
+    finally:
+        os.close(parent_fd)
+
+
+def lstat_at(parent_fd: int, leaf: str) -> os.stat_result | None:
+    try:
+        return os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def write_new_at(parent_fd: int, leaf: str, data: bytes, mode: int) -> None:
+    fd = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent_fd)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
+def read_root_file(root_fd: int, relative: str) -> tuple[bytes, int, os.stat_result]:
+    parent_fd, leaf = open_parent(root_fd, relative, create=False)
+    try:
+        return read_regular_at(parent_fd, leaf)
+    finally:
+        os.close(parent_fd)
+
+
+def remove_tree(directory_fd: int) -> None:
+    for name in os.listdir(directory_fd):
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(info.st_mode):
+            child_fd = os.open(name, DIRECTORY, dir_fd=directory_fd)
+            try:
+                remove_tree(child_fd)
+            finally:
+                os.close(child_fd)
+            os.rmdir(name, dir_fd=directory_fd)
+        else:
+            os.unlink(name, dir_fd=directory_fd)
+
+
+def parse_manifest(data: bytes) -> dict[str, tuple[int, str]]:
+    try:
+        lines = data.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise SecureFilesError("install manifest is not UTF-8") from error
+    if not lines or lines[0] != HEADER:
+        raise SecureFilesError("unrecognized install manifest")
+    records: dict[str, tuple[int, str]] = {}
+    for line in lines[1:]:
+        fields = line.split("\t")
+        if len(fields) != 3:
+            raise SecureFilesError("malformed install manifest entry")
+        relative, mode_text, file_hash = fields
+        if relative not in PAYLOADS or relative in records:
+            raise SecureFilesError(f"install manifest path is not allowed: {relative}")
+        if not mode_text.isdigit() or any(char not in "01234567" for char in mode_text):
+            raise SecureFilesError(f"invalid install manifest mode: {relative}")
+        if len(file_hash) != 64 or any(char not in "0123456789abcdef" for char in file_hash):
+            raise SecureFilesError(f"invalid install manifest digest: {relative}")
+        records[relative] = (int(mode_text, 8), file_hash)
+    if set(records) != set(PAYLOADS):
+        raise SecureFilesError("install manifest does not list every installed file")
+    return records
+
+
+def current_matches(root_fd: int, records: dict[str, tuple[int, str]]) -> bool:
+    try:
+        for relative, (mode, file_hash) in records.items():
+            data, actual_mode, _ = read_root_file(root_fd, relative)
+            if actual_mode != mode or digest(data) != file_hash:
+                return False
+    except (FileNotFoundError, OSError, SecureFilesError):
+        return False
+    return True
+
+
+def manifest_bytes(records: dict[str, tuple[int, str]]) -> bytes:
+    lines = [HEADER]
+    for relative in PAYLOADS:
+        mode, file_hash = records[relative]
+        lines.append(f"{relative}\t{mode:o}\t{file_hash}")
+    return ("\n".join(lines) + "\n").encode()
+
+
+def stage_name(root_fd: int) -> tuple[str, int]:
+    for _ in range(100):
+        name = f".forza-install-{secrets.token_hex(12)}"
+        try:
+            os.mkdir(name, 0o700, dir_fd=root_fd)
+        except FileExistsError:
+            continue
+        return name, os.open(name, DIRECTORY, dir_fd=root_fd)
+    raise SecureFilesError("cannot create unique staging directory")
+
+
+def stage_file(stage_fd: int, relative: str, data: bytes, mode: int) -> None:
+    parent_fd, leaf = open_parent(stage_fd, relative, create=True)
+    try:
+        write_new_at(parent_fd, leaf, data, mode)
+    finally:
+        os.close(parent_fd)
+
+
+def publish(stage_fd: int, root_fd: int, relative: str) -> os.stat_result:
+    source_parent, leaf = open_parent(stage_fd, relative, create=False)
+    destination_parent, destination_leaf = open_parent(root_fd, relative, create=True)
+    try:
+        if lstat_at(destination_parent, destination_leaf) is not None:
+            raise SecureFilesError(f"refusing conflicting destination: {relative}")
+        os.rename(leaf, destination_leaf, src_dir_fd=source_parent, dst_dir_fd=destination_parent)
+        info = os.stat(destination_leaf, dir_fd=destination_parent, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode):
+            raise SecureFilesError(f"published destination is not regular: {relative}")
+        return info
+    finally:
+        os.close(source_parent)
+        os.close(destination_parent)
+
+
+def rollback(root_fd: int, published: Iterable[tuple[str, int, int, int, str]]) -> None:
+    for relative, device, inode, mode, expected_hash in reversed(tuple(published)):
+        try:
+            parent_fd, leaf = open_parent(root_fd, relative, create=False)
+            try:
+                data, actual_mode, info = read_regular_at(parent_fd, leaf)
+                if (info.st_dev, info.st_ino, actual_mode, digest(data)) == (device, inode, mode, expected_hash):
+                    os.unlink(leaf, dir_fd=parent_fd)
+                else:
+                    print(f"warning: preserving replaced file during rollback: {relative}", file=sys.stderr)
+            finally:
+                os.close(parent_fd)
+        except (FileNotFoundError, OSError, SecureFilesError):
+            print(f"warning: preserving unavailable file during rollback: {relative}", file=sys.stderr)
+
+
+def numeric_environment(name: str) -> int:
+    value = os.environ.get(name, "")
+    if not value:
+        return 0
+    if not value.isdigit():
+        raise SecureFilesError(f"{name} must be numeric")
+    return int(value)
+
+
+def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
+    root_fd = open_absolute_directory(root)
+    stage_fd = -1
+    stage = ""
+    stage_info: os.stat_result | None = None
+    published: list[tuple[str, int, int, int, str]] = []
+    try:
+        stage, stage_fd = stage_name(root_fd)
+        stage_info = os.fstat(stage_fd)
+        records: dict[str, tuple[int, str]] = {}
+        for relative in PAYLOADS:
+            source = sources[relative]
+            executable = relative.startswith(".local/bin/") or "/libexec/" in relative
+            data, mode = read_regular_absolute(source, executable=executable)
+            stage_file(stage_fd, relative, data, mode)
+            records[relative] = (mode, digest(data))
+        staged_manifest = manifest_bytes(records)
+        stage_file(stage_fd, MANIFEST, staged_manifest, 0o600)
+
+        try:
+            installed_manifest, _, _ = read_root_file(root_fd, MANIFEST)
+        except FileNotFoundError:
+            installed_manifest = None
+        destinations_exist = False
+        for relative in PAYLOADS:
+            try:
+                read_root_file(root_fd, relative)
+                destinations_exist = True
+            except FileNotFoundError:
+                pass
+        if installed_manifest is None:
+            if destinations_exist:
+                raise SecureFilesError("refusing pre-existing destination without install manifest")
+            owned = False
+        else:
+            existing_records = parse_manifest(installed_manifest)
+            owned = installed_manifest == staged_manifest and current_matches(root_fd, existing_records)
+            if not owned:
+                raise SecureFilesError("refusing destination not proven by a matching install manifest")
+        if owned:
+            return
+
+        fail_after = numeric_environment("FORZA_INSTALL_FAIL_AFTER_PUBLISH") if explicit_root else 0
+        pause_after = numeric_environment("FORZA_INSTALL_PAUSE_AFTER_PUBLISH") if explicit_root else 0
+        for count, relative in enumerate(PAYLOADS, start=1):
+            info = publish(stage_fd, root_fd, relative)
+            data, mode, _ = read_root_file(root_fd, relative)
+            published.append((relative, info.st_dev, info.st_ino, mode, digest(data)))
+            if pause_after == count:
+                time.sleep(0.5)
+            if fail_after == count:
+                raise SecureFilesError("simulated publish interruption")
+        if explicit_root and os.environ.get("FORZA_INSTALL_FAIL_BEFORE_MANIFEST") == "1":
+            raise SecureFilesError("simulated failure before manifest publication")
+        publish(stage_fd, root_fd, MANIFEST)
+    except Exception:
+        rollback(root_fd, published)
+        raise
+    finally:
+        if stage_fd >= 0:
+            try:
+                remove_tree(stage_fd)
+            finally:
+                os.close(stage_fd)
+        if stage and stage_info is not None:
+            try:
+                named_stage = os.stat(stage, dir_fd=root_fd, follow_symlinks=False)
+                if (named_stage.st_dev, named_stage.st_ino) == (stage_info.st_dev, stage_info.st_ino):
+                    os.rmdir(stage, dir_fd=root_fd)
+            except FileNotFoundError:
+                pass
+        os.close(root_fd)
+
+
+def uninstall(root: str) -> bool:
+    root_fd = open_absolute_directory(root)
+    try:
+        try:
+            data, _, manifest_info = read_root_file(root_fd, MANIFEST)
+        except FileNotFoundError:
+            return False
+        records = parse_manifest(data)
+        for relative in PAYLOADS:
+            parent_fd, leaf = open_parent(root_fd, relative, create=False)
+            os.close(parent_fd)
+            relative_parts(relative)
+        for relative, (mode, expected_hash) in records.items():
+            try:
+                parent_fd, leaf = open_parent(root_fd, relative, create=False)
+                try:
+                    current, current_mode, _ = read_regular_at(parent_fd, leaf)
+                    if current_mode == mode and digest(current) == expected_hash:
+                        os.unlink(leaf, dir_fd=parent_fd)
+                    else:
+                        print(f"warning: preserving modified file: {relative}", file=sys.stderr)
+                finally:
+                    os.close(parent_fd)
+            except FileNotFoundError:
+                pass
+        parent_fd, leaf = open_parent(root_fd, MANIFEST, create=False)
+        try:
+            current, _, current_info = read_regular_at(parent_fd, leaf)
+            if (current_info.st_dev, current_info.st_ino, digest(current)) != (
+                manifest_info.st_dev,
+                manifest_info.st_ino,
+                digest(data),
+            ):
+                raise SecureFilesError("install manifest changed during uninstall")
+            os.unlink(leaf, dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+        return True
+    finally:
+        os.close(root_fd)
+
+
+def source_arguments(values: list[str]) -> dict[str, str]:
+    sources: dict[str, str] = {}
+    for value in values:
+        relative, separator, source = value.partition("=")
+        if not separator or relative not in PAYLOADS or relative in sources:
+            raise SecureFilesError("invalid source mapping")
+        sources[relative] = source
+    if set(sources) != set(PAYLOADS):
+        raise SecureFilesError("source mapping does not cover every payload")
+    return sources
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    install_parser = subparsers.add_parser("install")
+    install_parser.add_argument("--root", required=True)
+    install_parser.add_argument("--source", action="append", required=True)
+    install_parser.add_argument("--explicit-root", action="store_true")
+    uninstall_parser = subparsers.add_parser("uninstall")
+    uninstall_parser.add_argument("--root", required=True)
+    args = parser.parse_args()
+    try:
+        if args.command == "install":
+            install(args.root, source_arguments(args.source), args.explicit_root)
+        elif not uninstall(args.root):
+            return 3
+    except (OSError, SecureFilesError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

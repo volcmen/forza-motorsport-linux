@@ -2,56 +2,13 @@
 
 set -u
 
-install_root=${FORZA_INSTALL_ROOT:-${HOME:?HOME is required}}
-readonly manifest_relative_path='.local/state/forza-motorsport-linux/install-manifest'
-readonly -a allowed_paths=(
-    '.local/bin/forza-linux'
-    '.local/bin/forza-doctor'
-    '.local/libexec/forza-motorsport-linux/patch-known-build'
-    '.local/share/forza-motorsport-linux/supported-builds.toml'
-    '.local/libexec/xodus-forza/xodus-service'
-    '.local/libexec/xodus-forza/xodus-cli'
-    '.local/libexec/xodus-forza/xodus-overlay'
-    '.config/systemd/user/xodus-forza.service'
-)
-
-die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+HELPER="$ROOT/scripts/secure-user-files"
+install_root=${FORZA_INSTALL_ROOT:-}
 
 usage() {
     printf '%s\n' "usage: $0 [--root PATH]" >&2
     exit 64
-}
-
-sha256() { sha256sum -- "$1" | awk '{print $1}'; }
-
-check_existing_parent_components() {
-    local relative=$1 path=$install_root component
-    IFS=/ read -r -a components <<< "${relative%/*}"
-    for component in "${components[@]}"; do
-        path="$path/$component"
-        [[ ! -L $path ]] || die "refusing symlinked destination parent: $path"
-        [[ ! -e $path || -d $path ]] || die "destination parent is not a directory: $path"
-    done
-}
-
-is_allowed_path() {
-    local candidate=$1 allowed
-    for allowed in "${allowed_paths[@]}"; do
-        [[ $candidate == "$allowed" ]] && return 0
-    done
-    return 1
-}
-
-remove_empty_owned_directories() {
-    local relative path
-    for relative in \
-        '.local/state/forza-motorsport-linux' \
-        '.local/share/forza-motorsport-linux' \
-        '.local/libexec/forza-motorsport-linux' \
-        '.local/libexec/xodus-forza'; do
-        path="$install_root/$relative"
-        [[ -d $path && ! -L $path ]] && rmdir -- "$path" 2>/dev/null || true
-    done
 }
 
 while (($#)); do
@@ -66,52 +23,22 @@ while (($#)); do
     esac
 done
 
-[[ -d $install_root && ! -L $install_root ]] || die "install root must be a non-symlink directory: $install_root"
-check_existing_parent_components "$manifest_relative_path"
-manifest="$install_root/$manifest_relative_path"
-[[ -e $manifest || -L $manifest ]] || exit 0
-[[ -f $manifest && ! -L $manifest ]] || die "install manifest must be a non-symlink regular file: $manifest"
+[[ -n $install_root ]] || install_root=${HOME:?HOME is required}
+[[ $install_root == /* ]] || {
+    printf '%s\n' 'error: root must be an absolute path' >&2
+    exit 1
+}
 
-declare -a manifest_paths=() manifest_modes=() manifest_hashes=()
-declare -A seen=()
-{
-    IFS= read -r header || die 'install manifest is empty'
-    [[ $header == forza-motorsport-linux-install-v1 ]] || die 'unrecognized install manifest'
-    while IFS=$'\t' read -r relative mode digest extra || [[ -n ${relative:-} ]]; do
-        [[ -n ${relative:-} && -n ${mode:-} && -n ${digest:-} && -z ${extra:-} ]] ||
-            die 'malformed install manifest entry'
-        is_allowed_path "$relative" || die "install manifest path is not allowed: $relative"
-        [[ ! ${seen[$relative]+present} ]] || die "duplicate install manifest path: $relative"
-        [[ $mode =~ ^[0-7]{3,4}$ ]] || die "invalid install manifest mode: $relative"
-        [[ $digest =~ ^[0-9a-f]{64}$ ]] || die "invalid install manifest digest: $relative"
-        check_existing_parent_components "$relative"
-        destination="$install_root/$relative"
-        [[ ! -L $destination ]] || die "refusing symlinked installed file: $destination"
-        seen[$relative]=1
-        manifest_paths+=("$relative")
-        manifest_modes+=("$mode")
-        manifest_hashes+=("$digest")
-    done
-} < "$manifest"
-
-((${#manifest_paths[@]} == ${#allowed_paths[@]})) || die 'install manifest does not list every installed file'
-for relative in "${allowed_paths[@]}"; do
-    [[ ${seen[$relative]+present} ]] || die "install manifest is missing required path: $relative"
-done
-
-for index in "${!manifest_paths[@]}"; do
-    destination="$install_root/${manifest_paths[index]}"
-    if [[ -e $destination ]]; then
-        if [[ ! -f $destination || -L $destination || $(sha256 "$destination") != "${manifest_hashes[index]}" ||
-            $(stat -c '%a' -- "$destination") != "${manifest_modes[index]}" ]]; then
-            printf 'warning: preserving modified file: %s\n' "$destination" >&2
-        else
-            rm -f -- "$destination" || die "cannot remove installed file: $destination"
-        fi
-    fi
-done
-
-rm -f -- "$manifest" || die 'cannot remove install manifest'
-remove_empty_owned_directories
-systemctl --user daemon-reload || die 'cannot reload user systemd daemon'
-printf 'uninstalled Forza Motorsport Linux user integration\n'
+"$HELPER" uninstall --root "$install_root"
+helper_status=$?
+case "$helper_status" in
+    0)
+        systemctl --user daemon-reload || {
+            printf '%s\n' 'error: cannot reload user systemd daemon' >&2
+            exit 1
+        }
+        printf '%s\n' 'uninstalled Forza Motorsport Linux user integration'
+        ;;
+    3) exit 0 ;;
+    *) exit "$helper_status" ;;
+esac

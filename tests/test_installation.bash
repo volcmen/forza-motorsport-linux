@@ -137,6 +137,18 @@ test_identical_reinstall_keeps_bytes_and_manifest_stable() {
     tear_down
 }
 
+test_fresh_identical_destination_is_rejected_without_a_manifest() {
+    set_up
+    local destination="$FAKE_ROOT/.local/bin/forza-linux" before
+    mkdir -p -- "${destination%/*}"
+    cp --preserve=mode -- "$ROOT/bin/forza-linux" "$destination"
+    before=$(sha256sum -- "$destination")
+    assert_command_fails run_install || return 1
+    assert_eq "$(sha256sum -- "$destination")" "$before" || return 1
+    assert_path_absent "$(manifest_path)"
+    tear_down
+}
+
 test_fresh_install_requires_complete_xodus_build() {
     set_up
     rm -- "$XODUS_BUILD/xodus-overlay"
@@ -164,6 +176,31 @@ test_xodus_artifacts_reject_symlinks_and_non_executables() {
     done
 }
 
+test_xodus_build_rejects_an_ancestor_symlink() {
+    set_up
+    local real_parent="$WORK_ROOT/real-build-parent" linked_parent="$WORK_ROOT/build-link"
+    mkdir -p -- "$real_parent"
+    mv -- "$XODUS_BUILD" "$real_parent/build"
+    ln -s -- "$real_parent" "$linked_parent"
+    XODUS_BUILD="$linked_parent/build"
+    assert_command_fails run_install || return 1
+    assert_path_absent "$(manifest_path)"
+    tear_down
+}
+
+test_root_ancestor_symlink_is_rejected_without_outside_write() {
+    set_up
+    local real_parent="$WORK_ROOT/real-parent" linked_parent="$WORK_ROOT/linked-parent"
+    mkdir -p -- "$real_parent/root"
+    printf 'outside sentinel\n' > "$real_parent/sentinel"
+    ln -s -- "$real_parent" "$linked_parent"
+    FAKE_ROOT="$linked_parent/root"
+    assert_command_fails run_install || return 1
+    assert_eq "$(<"$real_parent/sentinel")" 'outside sentinel' || return 1
+    assert_path_absent "$real_parent/root/.local/bin/forza-linux"
+    tear_down
+}
+
 test_conflicting_existing_file_is_preserved() {
     set_up
     local conflict="$FAKE_ROOT/.local/bin/forza-linux" before
@@ -185,6 +222,46 @@ test_mid_publish_failure_rolls_back_all_new_files() {
     assert_manifested_files_absent || return 1
     assert_file_exists "$FAKE_ROOT/keep-me" || return 1
     assert_path_absent "$ESCAPE_SENTINEL"
+    tear_down
+}
+
+test_rollback_preserves_a_replacement_made_during_failure() {
+    set_up
+    local destination="$FAKE_ROOT/.local/bin/forza-linux" replacement="$WORK_ROOT/replacement" attacker_pid
+    (
+        for _ in {1..100}; do [[ -f $destination ]] && break; sleep 0.01; done
+        [[ -f $destination ]] || exit 1
+        printf 'replacement by user\n' > "$replacement"
+        mv -f -- "$replacement" "$destination"
+    ) &
+    attacker_pid=$!
+    export FORZA_INSTALL_PAUSE_AFTER_PUBLISH=1 FORZA_INSTALL_FAIL_AFTER_PUBLISH=3
+    assert_command_fails run_install || return 1
+    wait "$attacker_pid" || return 1
+    unset FORZA_INSTALL_PAUSE_AFTER_PUBLISH FORZA_INSTALL_FAIL_AFTER_PUBLISH
+    assert_eq "$(<"$destination")" 'replacement by user' || return 1
+    assert_path_absent "$(manifest_path)"
+    tear_down
+}
+
+test_parent_swap_during_publish_preserves_outside_sentinel() {
+    set_up
+    local outside="$WORK_ROOT/outside" attacker_pid
+    mkdir -p -- "$outside"
+    printf 'outside sentinel\n' > "$outside/sentinel"
+    (
+        for _ in {1..100}; do [[ -f $FAKE_ROOT/.local/bin/forza-linux ]] && break; sleep 0.01; done
+        [[ -f $FAKE_ROOT/.local/bin/forza-linux ]] || exit 1
+        mv -- "$FAKE_ROOT/.local" "$FAKE_ROOT/local-real"
+        ln -s -- "$outside" "$FAKE_ROOT/.local"
+    ) &
+    attacker_pid=$!
+    export FORZA_INSTALL_PAUSE_AFTER_PUBLISH=1 FORZA_INSTALL_FAIL_AFTER_PUBLISH=3
+    assert_command_fails run_install || return 1
+    wait "$attacker_pid" || return 1
+    unset FORZA_INSTALL_PAUSE_AFTER_PUBLISH FORZA_INSTALL_FAIL_AFTER_PUBLISH
+    assert_eq "$(<"$outside/sentinel")" 'outside sentinel' || return 1
+    assert_path_absent "$outside/bin/forza-doctor"
     tear_down
 }
 
@@ -267,6 +344,16 @@ test_uninstall_preserves_modified_installed_file_with_warning() {
     tear_down
 }
 
+test_uninstall_preserves_preexisting_empty_project_directory() {
+    set_up
+    mkdir -p -- "$FAKE_ROOT/.local/libexec/xodus-forza"
+    run_install || return 1
+    run_uninstall || return 1
+    [[ -d $FAKE_ROOT/.local/libexec/xodus-forza && ! -L $FAKE_ROOT/.local/libexec/xodus-forza ]] ||
+        fail 'pre-existing project directory was removed'
+    tear_down
+}
+
 test_uninstall_is_idempotent_and_only_daemon_reloads() {
     set_up
     run_install || return 1
@@ -299,6 +386,8 @@ test_forza_install_root_seam_never_uses_home() {
 run_test() {
     ((tests_run += 1))
     current_test_failed=0
+    unset FORZA_INSTALL_FAIL_AFTER_PUBLISH FORZA_INSTALL_FAIL_BEFORE_MANIFEST \
+        FORZA_INSTALL_PAUSE_AFTER_PUBLISH
     "$1" || current_test_failed=1
     if ((current_test_failed == 0)); then
         printf 'PASS: %s\n' "$1"
@@ -306,18 +395,25 @@ run_test() {
         ((tests_failed += 1))
         status=1
     fi
+    [[ -n ${WORK_ROOT:-} ]] && rm -rf -- "$WORK_ROOT"
 }
 
 run_test test_round_trip_touches_only_manifested_paths
 run_test test_identical_reinstall_keeps_bytes_and_manifest_stable
+run_test test_fresh_identical_destination_is_rejected_without_a_manifest
 run_test test_fresh_install_requires_complete_xodus_build
 run_test test_xodus_artifacts_reject_symlinks_and_non_executables
+run_test test_xodus_build_rejects_an_ancestor_symlink
+run_test test_root_ancestor_symlink_is_rejected_without_outside_write
 run_test test_conflicting_existing_file_is_preserved
 run_test test_mid_publish_failure_rolls_back_all_new_files
+run_test test_rollback_preserves_a_replacement_made_during_failure
+run_test test_parent_swap_during_publish_preserves_outside_sentinel
 run_test test_failure_before_manifest_rolls_back_published_files
 run_test test_uninstall_rejects_malicious_manifest_paths_before_delete
 run_test test_uninstall_rejects_duplicate_and_out_of_allowlist_manifest_entries
 run_test test_uninstall_preserves_modified_installed_file_with_warning
+run_test test_uninstall_preserves_preexisting_empty_project_directory
 run_test test_uninstall_is_idempotent_and_only_daemon_reloads
 run_test test_forza_install_root_seam_never_uses_home
 
