@@ -225,6 +225,29 @@ test_mid_publish_failure_rolls_back_all_new_files() {
     tear_down
 }
 
+test_rollback_retires_owned_payloads_to_recovery() {
+    set_up
+    export FORZA_INSTALL_FAIL_AFTER_PUBLISH=1
+    assert_command_fails run_install || return 1
+    unset FORZA_INSTALL_FAIL_AFTER_PUBLISH
+    assert_path_absent "$FAKE_ROOT/.local/bin/forza-linux" || return 1
+    rg -l -F -- '#!/usr/bin/env bash' "$FAKE_ROOT/.local/state/forza-motorsport-linux/recovery" >/dev/null ||
+        fail 'owned rollback payload was not retained in recovery'
+    tear_down
+}
+
+test_crash_after_publish_recovers_journal_before_next_install() {
+    set_up
+    export FORZA_INSTALL_CRASH_AFTER_PUBLISH=1
+    assert_command_fails run_install || return 1
+    unset FORZA_INSTALL_CRASH_AFTER_PUBLISH
+    assert_file_exists "$FAKE_ROOT/.local/state/forza-motorsport-linux/transaction-journal" || return 1
+    run_install || return 1
+    assert_installed_files_match_manifest || return 1
+    [[ -d $FAKE_ROOT/.local/state/forza-motorsport-linux/recovery ]] || fail 'journal recovery directory missing'
+    tear_down
+}
+
 test_rollback_preserves_a_replacement_made_during_failure() {
     set_up
     local destination="$FAKE_ROOT/.local/bin/forza-linux" replacement="$WORK_ROOT/replacement" attacker_pid
@@ -283,19 +306,18 @@ test_concurrent_destination_at_publish_boundary_is_preserved() {
     tear_down
 }
 
-test_cleanup_symlink_swap_never_traverses_outside_root() {
+test_stage_substitution_never_traverses_outside_root() {
     set_up
-    local outside="$WORK_ROOT/outside" stage local_dir attacker_pid
+    local outside="$WORK_ROOT/outside" stage attacker_pid
     mkdir -p -- "$outside"
     printf 'outside sentinel\n' > "$outside/sentinel"
     (
         for _ in {1..100}; do
             for stage in "$FAKE_ROOT"/.forza-install-*; do
-                local_dir="$stage/.local"
                 [[ ! -e $FAKE_ROOT/.local/bin/forza-linux ]] || continue
-                [[ -d $local_dir && ! -L $local_dir ]] || continue
-                mv -- "$local_dir" "$stage/local-real"
-                ln -s -- "$outside" "$local_dir"
+                [[ -d $stage && ! -L $stage ]] || continue
+                mv -- "$stage" "$FAKE_ROOT/stage-real"
+                ln -s -- "$outside" "$stage"
                 exit 0
             done
             sleep 0.01
@@ -303,10 +325,10 @@ test_cleanup_symlink_swap_never_traverses_outside_root() {
         exit 1
     ) &
     attacker_pid=$!
-    export FORZA_INSTALL_FAIL_AFTER_PUBLISH=1 FORZA_INSTALL_PAUSE_AFTER_CLEANUP_LSTAT=1
+    export FORZA_INSTALL_FAIL_AFTER_PUBLISH=1 FORZA_INSTALL_PAUSE_BEFORE_STAGE_RETIRE=1
     assert_command_fails run_install || return 1
     wait "$attacker_pid" || return 1
-    unset FORZA_INSTALL_FAIL_AFTER_PUBLISH FORZA_INSTALL_PAUSE_AFTER_CLEANUP_LSTAT
+    unset FORZA_INSTALL_FAIL_AFTER_PUBLISH FORZA_INSTALL_PAUSE_BEFORE_STAGE_RETIRE
     assert_eq "$(<"$outside/sentinel")" 'outside sentinel' || return 1
     assert_path_absent "$outside/bin/forza-linux"
     tear_down
@@ -435,7 +457,8 @@ run_test() {
     current_test_failed=0
     unset FORZA_INSTALL_FAIL_AFTER_PUBLISH FORZA_INSTALL_FAIL_BEFORE_MANIFEST \
         FORZA_INSTALL_PAUSE_AFTER_PUBLISH FORZA_INSTALL_PAUSE_BEFORE_PUBLISH \
-        FORZA_INSTALL_PAUSE_AFTER_CLEANUP_LSTAT
+        FORZA_INSTALL_PAUSE_AFTER_CLEANUP_LSTAT FORZA_INSTALL_PAUSE_BEFORE_STAGE_RETIRE \
+        FORZA_INSTALL_CRASH_AFTER_PUBLISH
     "$1" || current_test_failed=1
     if ((current_test_failed == 0)); then
         printf 'PASS: %s\n' "$1"
@@ -455,10 +478,12 @@ run_test test_xodus_build_rejects_an_ancestor_symlink
 run_test test_root_ancestor_symlink_is_rejected_without_outside_write
 run_test test_conflicting_existing_file_is_preserved
 run_test test_mid_publish_failure_rolls_back_all_new_files
+run_test test_rollback_retires_owned_payloads_to_recovery
+run_test test_crash_after_publish_recovers_journal_before_next_install
 run_test test_rollback_preserves_a_replacement_made_during_failure
 run_test test_parent_swap_during_publish_preserves_outside_sentinel
 run_test test_concurrent_destination_at_publish_boundary_is_preserved
-run_test test_cleanup_symlink_swap_never_traverses_outside_root
+run_test test_stage_substitution_never_traverses_outside_root
 run_test test_failure_before_manifest_rolls_back_published_files
 run_test test_uninstall_rejects_malicious_manifest_paths_before_delete
 run_test test_uninstall_rejects_duplicate_and_out_of_allowlist_manifest_entries
