@@ -37,6 +37,30 @@ The final range from the canonical base changes exactly:
 - `dlls/mountmgr.sys/device.c`
 - `dlls/kernel32/tests/volume.c`
 
+### Upstream lineage
+
+The production behavior is a backport/adaptation of wine-mirror commit
+[`5b5e95719dd7dd4d219cad447f8fb219259cb162`](https://github.com/wine-mirror/wine/commit/5b5e95719dd7dd4d219cad447f8fb219259cb162),
+`mountmgr.sys: Stub StorageDeviceTrimProperty query.` It was not applied
+verbatim to this older Xodus base. The adaptation differs in three documented
+ways:
+
+- This base lacks the public `DEVICE_TRIM_DESCRIPTOR` declaration in
+  `include/ntddstor.h`. The two task-scoped source files instead use an
+  equivalent private 12-byte layout protected by
+  `C_ASSERT(sizeof(struct trim_descriptor) == 12)`.
+- The full descriptor is zero-filled before its fields are assigned, making
+  the three ABI padding bytes after `TrimEnabled` deterministic.
+- The added tests cover short-header, header-only, 9-, 10-, and 11-byte
+  partial, full-descriptor, zero-padding, and unrelated-property cases. Wine's
+  compatibility expectations remain strict while `broken()` allowances record
+  the observed native-Windows alternatives without weakening the Wine checks.
+
+The modified Wine source remains under its existing LGPL-2.1-or-later source
+headers. The GPL-3.0-or-later SPDX declaration at the top of this file applies
+to this integration-repository evidence document; no Wine source or binary is
+redistributed here.
+
 For a standard `StorageDeviceTrimProperty` query, the compatibility branch
 returns a correctly sized descriptor with `TrimEnabled = TRUE`. A buffer
 shorter than `STORAGE_DESCRIPTOR_HEADER` is rejected; header and partial

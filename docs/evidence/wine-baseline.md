@@ -2,20 +2,26 @@
 
 Date: 2026-08-31
 
+This document is the historical snapshot captured by Task 1. Statements about
+branch distance, worktree cleanliness, and unconfigured build directories are
+bound to that baseline capture; they do not describe later task state. See
+[Verification](../verification.md) for the current recorded status.
+
 ## Canonical source and branch state
 
-The canonical Wine remote is `https://github.com/xodus-gaming/wine.git`.  Both
-local branches below track `xodus/bleeding-edge` at
-`b1dd32734a34472a28eb5be9922df06e07ac0834`; each has zero commits ahead of or
-behind that upstream.  They are planned, local, and unpublished.
+The canonical Wine remote is `https://github.com/xodus-gaming/wine.git`. At the
+Task 1 baseline capture, both local branches below tracked
+`xodus/bleeding-edge` at
+`b1dd32734a34472a28eb5be9922df06e07ac0834`; each had zero commits ahead of or
+behind that upstream. They were planned, local, and unpublished.
 
 | Purpose | Local branch | Source worktree | Dedicated build directory | Baseline state |
 | --- | --- | --- | --- | --- |
 | Physical controller identity | `fix/wgi-physical-nonroamable-id` | `.worktrees/wine-controller` | `.worktrees/wine-controller-build` | clean; no configure or build run |
 | Storage TRIM capability | `fix/storage-trim-property` | `.worktrees/wine-storage` | `.worktrees/wine-storage-build` | clean; no configure or build run |
 
-The build directories are distinct ignored out-of-tree directories.  No live
-build artifact was reused.
+At capture time, the build directories were distinct ignored out-of-tree
+directories. No live build artifact was reused.
 
 ## Source baseline
 
@@ -45,9 +51,9 @@ or artifact is included here.
 | Check | Status | Result |
 | --- | --- | --- |
 | Deterministic source assertions | PASS | Baseline source behavior above was asserted without compiling. |
-| Worktree status, upstream relationship, and whitespace checks | PASS | Both Wine worktrees are clean at the same canonical base; `git diff --check` passed. |
+| Worktree status, upstream relationship, and whitespace checks | PASS | At baseline capture, both Wine worktrees were clean at the same canonical base; `git diff --check` passed. |
 | Integration repository privacy test | PASS | The repository policy test found no prohibited binary or live-secret content. |
-| Compiled Wine tests | NOT RUN | Dedicated build directories exist but were not configured or built in this baseline task. |
+| Compiled Wine tests | NOT RUN | Dedicated build directories existed but were not configured or built in this baseline task. |
 | Manual physical-controller matrix row | NOT RUN | No source artifact was installed. |
 | Manual AP702 matrix row | NOT RUN | No source artifact was installed. |
 

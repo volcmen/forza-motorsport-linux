@@ -20,6 +20,15 @@ git diff --check
 
 The tests use only synthetic patch bytes and temporary roots. A passing gate proves repository contracts, not game compatibility, account authentication, online play, or invite delivery. CI runs the same `just verify` command and deliberately uploads no system information, runtime logs, or artifacts.
 
+## Integration branch readiness
+
+A green repository gate does not make `feature/integration-repository`
+merge-ready or publication-ready. `scripts/patch-known-build` still has an
+unresolved publication race when a validated target is concurrently replaced
+by a symlink or directory: the current publication/rollback path does not
+correctly restore that replacement. The checks above do not cover that
+outstanding case, and this document does not claim a fix.
+
 ## Local Wine source evidence
 
 Two source branches were built from canonical
