@@ -299,9 +299,9 @@ def test_install_orders_durable_journal_and_manifest_around_publication(
         stage: str,
         stage_info: os.stat_result | tuple[int, int] | None,
         transaction: str,
-    ) -> None:
+    ) -> bool:
         events.append("stage-retire")
-        real_retire_stage(root_fd, stage, stage_info, transaction)
+        return real_retire_stage(root_fd, stage, stage_info, transaction)
 
     monkeypatch.setattr(secure.os, "fsync", recording_fsync)
     monkeypatch.setattr(secure, "publish", recording_publish)
@@ -360,3 +360,63 @@ def test_restart_keeps_journal_when_committed_stage_retirement_fails(
         os.close(root_fd)
 
     assert journal.is_file()
+
+
+def test_committed_install_keeps_journal_when_recorded_stage_disappears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing stage must not let a committed install retire its recovery journal."""
+    root = tmp_path / "root"
+    root.mkdir()
+    sources = make_sources(tmp_path)
+    real_rename = secure.durable_rename_noreplace
+
+    def remove_recorded_stage(
+        source_fd: int, source: str, destination_fd: int, destination: str
+    ) -> None:
+        if source.startswith(".forza-install-") and destination.startswith("stage-"):
+            os.rename(root / source, root / "missing-recorded-stage")
+        real_rename(source_fd, source, destination_fd, destination)
+
+    monkeypatch.setattr(secure, "durable_rename_noreplace", remove_recorded_stage)
+
+    with pytest.raises(secure.SecureFilesError, match="recorded staging directory"):
+        secure.install(str(root), sources, explicit_root=True)
+
+    assert (root / secure.JOURNAL).is_file()
+    assert (root / "missing-recorded-stage").is_dir()
+
+
+def test_startup_recovery_keeps_journal_when_recorded_stage_identity_changes(tmp_path: Path) -> None:
+    """A replacement at the recorded stage name must leave the journal discoverable."""
+    root = tmp_path / "root"
+    root.mkdir()
+    sources = make_sources(tmp_path)
+    env = os.environ.copy()
+    env["FORZA_INSTALL_CRASH_AFTER_MANIFEST"] = "1"
+
+    result = subprocess.run(
+        [
+            str(HELPER_PATH),
+            "install",
+            "--root",
+            str(root),
+            "--explicit-root",
+            *source_arguments(sources),
+        ],
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 99
+    journal = root / secure.JOURNAL
+    _, stage, _, _ = secure.parse_journal(journal.read_bytes())
+    (root / stage).rename(root / "recorded-stage-original")
+    (root / stage).mkdir(mode=0o700)
+
+    with pytest.raises(secure.SecureFilesError, match="recorded staging directory"):
+        secure.install(str(root), sources, explicit_root=True)
+
+    assert journal.is_file()
+    assert (root / stage).is_dir()
+    assert (root / "recorded-stage-original").is_dir()

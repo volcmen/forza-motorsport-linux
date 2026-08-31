@@ -10,7 +10,11 @@ tests_run=0
 tests_failed=0
 current_test_failed=0
 
-fail() { current_test_failed=1; printf 'FAIL: %s\n' "$*" >&2; return 1; }
+fail() {
+    current_test_failed=1
+    printf 'FAIL: %s\n' "$*" >&2
+    return 1
+}
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "expected [$1] to contain [$2]"; }
 assert_not_contains() { [[ "$1" != *"$2"* ]] || fail "expected [$1] not to contain [$2]"; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected [$2], got [$1]"; }
@@ -20,7 +24,7 @@ set_up() {
     SENTINEL="$WORK_ROOT/injected"
     TEST_ROOT="$WORK_ROOT/launcher path; \$(touch $SENTINEL)"
     mkdir -p -- "$TEST_ROOT/.local/bin"
-    cat > "$TEST_ROOT/.local/bin/forza-linux" <<'EOF'
+    cat >"$TEST_ROOT/.local/bin/forza-linux" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
@@ -64,7 +68,7 @@ test_invalid_test_uid_or_id_output_is_rejected_without_an_option_line() {
     set_up
     local output_file="$WORK_ROOT/options" error_file="$WORK_ROOT/error"
     export FORZA_TEST_UID="1234; touch $SENTINEL"
-    if "$GENERATOR" > "$output_file" 2> "$error_file"; then
+    if "$GENERATOR" >"$output_file" 2>"$error_file"; then
         fail 'invalid FORZA_TEST_UID was accepted'
     fi
     [[ ! -s $output_file ]] || fail 'invalid FORZA_TEST_UID produced an option line'
@@ -75,10 +79,10 @@ test_invalid_test_uid_or_id_output_is_rejected_without_an_option_line() {
     output_file="$WORK_ROOT/options"
     error_file="$WORK_ROOT/error"
     local fake_id="$WORK_ROOT/id"
-    printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' '1234; touch $SENTINEL'" > "$fake_id"
+    printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' '1234; touch $SENTINEL'" >"$fake_id"
     chmod +x -- "$fake_id"
     unset FORZA_TEST_UID
-    PATH="$WORK_ROOT:$PATH" "$GENERATOR" > "$output_file" 2> "$error_file" && \
+    PATH="$WORK_ROOT:$PATH" "$GENERATOR" >"$output_file" 2>"$error_file" &&
         fail 'invalid id -u output was accepted'
     [[ ! -s $output_file ]] || fail 'invalid id -u output produced an option line'
     [[ ! -e $SENTINEL ]] || fail 'invalid id -u output was evaluated'

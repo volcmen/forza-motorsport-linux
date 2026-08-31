@@ -11,12 +11,11 @@ import stat
 import sys
 import tempfile
 import tomllib
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Callable, Mapping, Sequence
-
 
 APP_ID = "2440510"
 COMPATIBILITY_TOOL = "GE-Proton11-3-FM"
@@ -366,7 +365,7 @@ def _atomic_create_new(path: Path, data: bytes, mode: int) -> None:
 def _write_exclusive_backup(
     backup_root: Path, name: str, original_hash: str, data: bytes, mode: int
 ) -> Path:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     for suffix in range(sys.maxsize):
         ending = "" if suffix == 0 else f".{suffix}"
         candidate = backup_root / f"{timestamp}-{original_hash}-{name}{ending}"
@@ -402,7 +401,7 @@ def _write_backup_manifest(
             }
         )
     document = json.dumps({"version": 1, "targets": entries}, indent=2, sort_keys=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     data = (document + "\n").encode()
     for suffix in range(sys.maxsize):
         ending = "" if suffix == 0 else f".{suffix}"
@@ -431,7 +430,7 @@ def _rollback_entries(entries: Sequence[RollbackEntry]) -> None:
             if sha256(entry.backup) != entry.spec.original_sha256:
                 raise UnknownBuild(f"backup is not original: {entry.backup}")
             active.append(entry)
-        except Exception as error:
+        except (OSError, PatcherError) as error:
             preflight_errors.append(f"{entry.path}: {error}")
     if preflight_errors:
         raise RollbackError("rollback preflight failed: " + "; ".join(preflight_errors))
@@ -441,7 +440,7 @@ def _rollback_entries(entries: Sequence[RollbackEntry]) -> None:
         try:
             restore_target(entry.path, entry.backup, entry.spec)
             entry.active = False
-        except Exception as error:
+        except (OSError, PatcherError) as error:
             restore_errors.append(f"{entry.path}: {error}")
     if restore_errors:
         raise RollbackError("rollback restore failed: " + "; ".join(restore_errors))

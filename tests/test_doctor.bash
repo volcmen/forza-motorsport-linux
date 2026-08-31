@@ -10,7 +10,11 @@ tests_run=0
 tests_failed=0
 current_test_failed=0
 
-fail() { current_test_failed=1; printf 'FAIL: %s\n' "$*" >&2; return 1; }
+fail() {
+    current_test_failed=1
+    printf 'FAIL: %s\n' "$*" >&2
+    return 1
+}
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "expected [$1] to contain [$2]"; }
 assert_not_contains() { [[ "$1" != *"$2"* ]] || fail "expected [$1] not to contain [$2]"; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected [$2], got [$1]"; }
@@ -18,7 +22,7 @@ assert_log_not_contains() { ! rg -Fq -- "$1" "$FAKE_LOG" || fail "log unexpected
 
 snapshot_root() {
     (
-        cd -- "$TEST_ROOT"
+        cd -- "$TEST_ROOT" || return
         tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - .
     ) | sha256sum
 }
@@ -27,17 +31,17 @@ write_fake_commands() {
     FAKE_BIN="$WORK_ROOT/fake-bin"
     mkdir -p -- "$FAKE_BIN"
 
-    cat > "$FAKE_BIN/busctl" <<'EOF'
+    cat >"$FAKE_BIN/busctl" <<'EOF'
 #!/usr/bin/env bash
 printf 'busctl %s\n' "$*" >> "$FAKE_LOG"
 [[ ${FORZA_FAKE_SECRET_OWNER:-0} == 1 ]]
 EOF
-    cat > "$FAKE_BIN/systemctl" <<'EOF'
+    cat >"$FAKE_BIN/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >> "$FAKE_LOG"
 printf '%s\n' "${FORZA_FAKE_SERVICE_STATE:-disabled}"
 EOF
-    cat > "$FAKE_BIN/df" <<'EOF'
+    cat >"$FAKE_BIN/df" <<'EOF'
 #!/usr/bin/env bash
 printf 'df %s\n' "$*" >> "$FAKE_LOG"
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
@@ -50,7 +54,7 @@ EOF
 write_fake_patcher() {
     local patcher="$TEST_ROOT/.local/libexec/forza-motorsport-linux/patch-known-build"
     mkdir -p -- "$(dirname -- "$patcher")"
-    cat > "$patcher" <<'EOF'
+    cat >"$patcher" <<'EOF'
 #!/usr/bin/env bash
 set -u
 printf 'patch-known-build %s\n' "$*" >> "$FAKE_LOG"
@@ -70,7 +74,7 @@ printf '%s\n' "$state"
 [[ $state == original || $state == patched ]]
 EOF
     chmod +x -- "$patcher"
-    : > "$TEST_ROOT/.local/share/forza-motorsport-linux/supported-builds.toml"
+    : >"$TEST_ROOT/.local/share/forza-motorsport-linux/supported-builds.toml"
 }
 
 make_ready_installation() {
@@ -81,12 +85,12 @@ make_ready_installation() {
         "$TEST_ROOT/.local/libexec/xodus-forza" \
         "$TEST_ROOT/.local/share/dbus-1/services" \
         "$TEST_ROOT/.local/share/forza-motorsport-linux"
-    : > "$steam/steamapps/appmanifest_2440510.acf"
-    : > "$steam/steamapps/compatdata/2440510/pfx/drive_c/windows/system32/xgameruntime.dll.threading"
-    : > "$TEST_ROOT/.local/libexec/xodus-forza/xodus-service"
+    : >"$steam/steamapps/appmanifest_2440510.acf"
+    : >"$steam/steamapps/compatdata/2440510/pfx/drive_c/windows/system32/xgameruntime.dll.threading"
+    : >"$TEST_ROOT/.local/libexec/xodus-forza/xodus-service"
     chmod +x -- "$TEST_ROOT/.local/libexec/xodus-forza/xodus-service"
     mkdir -p -- "$TEST_ROOT/usr/bin"
-    : > "$TEST_ROOT/usr/bin/ksecretd"
+    : >"$TEST_ROOT/usr/bin/ksecretd"
     chmod +x -- "$TEST_ROOT/usr/bin/ksecretd"
     printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
         'Exec="/usr/bin/ksecretd" --daemon' > \
@@ -99,7 +103,7 @@ set_up() {
     TEST_ROOT="$WORK_ROOT/test root; \$(touch should-not-run)"
     FAKE_LOG="$WORK_ROOT/commands.log"
     mkdir -p -- "$TEST_ROOT"
-    : > "$FAKE_LOG"
+    : >"$FAKE_LOG"
     export FORZA_TEST_ROOT="$TEST_ROOT" FAKE_LOG
     export FORZA_FAKE_SECRET_OWNER=0 FORZA_FAKE_SERVICE_STATE=disabled
     export FORZA_FAKE_CONTROLLER_STATE=patched FORZA_FAKE_MOUNTMGR_STATE=patched
@@ -149,7 +153,7 @@ test_each_required_file_check_fails_when_its_input_is_missing() {
         '.local/libexec/xodus-forza/xodus-service' \
         '.local/share/Steam/steamapps/compatdata/2440510/pfx/drive_c/windows/system32/xgameruntime.dll.threading'; do
         set_up
-        rm -rf -- "$TEST_ROOT/$path"
+        rm -rf -- "${TEST_ROOT:?}/$path"
         run_doctor
         case "$path" in
             *appmanifest*) label='Steam AppID manifest' ;;
@@ -183,7 +187,7 @@ test_xodus_service_binary_rejects_directories_and_symlinks() {
     set_up
     service="$TEST_ROOT/.local/libexec/xodus-forza/xodus-service"
     rm -- "$service"
-    : > "$WORK_ROOT/real-xodus-service"
+    : >"$WORK_ROOT/real-xodus-service"
     chmod +x -- "$WORK_ROOT/real-xodus-service"
     ln -s -- "$WORK_ROOT/real-xodus-service" "$service"
     run_doctor
@@ -210,7 +214,7 @@ test_secret_service_rejects_non_definition_text_and_malformed_exec() {
     set_up
     definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
     printf '%s\n' '[D-BUS Service]' '# Name=org.freedesktop.secrets' \
-        "Exec=$TEST_ROOT/usr/bin/ksecretd" > "$definition"
+        "Exec=$TEST_ROOT/usr/bin/ksecretd" >"$definition"
     run_doctor
     assert_contains "$output" 'FAIL Secret Service'
     tear_down
@@ -218,7 +222,7 @@ test_secret_service_rejects_non_definition_text_and_malformed_exec() {
     set_up
     definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
     printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
-        'Name=org.freedesktop.secrets' 'Exec=/usr/bin/ksecretd' > "$definition"
+        'Name=org.freedesktop.secrets' 'Exec=/usr/bin/ksecretd' >"$definition"
     run_doctor
     assert_contains "$output" 'FAIL Secret Service'
     tear_down
@@ -226,7 +230,7 @@ test_secret_service_rejects_non_definition_text_and_malformed_exec() {
     set_up
     definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
     printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
-        'Exec="/usr/bin/ksecretd" --daemon' > "$definition"
+        'Exec="/usr/bin/ksecretd" --daemon' >"$definition"
     run_doctor
     assert_contains "$output" 'PASS Secret Service'
     tear_down
@@ -237,7 +241,7 @@ test_secret_service_rejects_wrong_sections_duplicates_and_untrusted_executables(
     set_up
     definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
     printf '%s\n' '[Other]' 'Name=org.freedesktop.secrets' \
-        "Exec=$TEST_ROOT/usr/bin/ksecretd" > "$definition"
+        "Exec=$TEST_ROOT/usr/bin/ksecretd" >"$definition"
     run_doctor
     assert_contains "$output" 'FAIL Secret Service'
     tear_down
@@ -245,7 +249,7 @@ test_secret_service_rejects_wrong_sections_duplicates_and_untrusted_executables(
     set_up
     definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
     printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
-        'Exec=/usr/bin/ksecretd' '[D-BUS Service]' > "$definition"
+        'Exec=/usr/bin/ksecretd' '[D-BUS Service]' >"$definition"
     run_doctor
     assert_contains "$output" 'FAIL Secret Service'
     tear_down
@@ -253,10 +257,10 @@ test_secret_service_rejects_wrong_sections_duplicates_and_untrusted_executables(
     set_up
     definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
     mkdir -p -- "$TEST_ROOT/providers"
-    : > "$TEST_ROOT/providers/ksecretd"
+    : >"$TEST_ROOT/providers/ksecretd"
     chmod +x -- "$TEST_ROOT/providers/ksecretd"
     printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
-        "Exec=$TEST_ROOT/providers/ksecretd" > "$definition"
+        "Exec=$TEST_ROOT/providers/ksecretd" >"$definition"
     run_doctor
     assert_contains "$output" 'FAIL Secret Service'
     tear_down
@@ -264,11 +268,11 @@ test_secret_service_rejects_wrong_sections_duplicates_and_untrusted_executables(
     set_up
     definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
     rm -- "$TEST_ROOT/usr/bin/ksecretd"
-    : > "$WORK_ROOT/real-ksecretd"
+    : >"$WORK_ROOT/real-ksecretd"
     chmod +x -- "$WORK_ROOT/real-ksecretd"
     ln -s -- "$WORK_ROOT/real-ksecretd" "$TEST_ROOT/usr/bin/ksecretd"
     printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
-        'Exec=/usr/bin/ksecretd' > "$definition"
+        'Exec=/usr/bin/ksecretd' >"$definition"
     run_doctor
     assert_contains "$output" 'FAIL Secret Service'
     tear_down
@@ -281,12 +285,12 @@ test_secret_service_first_xdg_definition_shadows_lower_priority_provider() {
     low_definition="$TEST_ROOT/usr/share/dbus-1/services/org.freedesktop.secrets.service"
     mkdir -p -- "$(dirname -- "$low_definition")"
     mkdir -p -- "$TEST_ROOT/providers"
-    : > "$TEST_ROOT/providers/ksecretd"
+    : >"$TEST_ROOT/providers/ksecretd"
     chmod +x -- "$TEST_ROOT/providers/ksecretd"
     printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
-        "Exec=$TEST_ROOT/providers/ksecretd" > "$high_definition"
+        "Exec=$TEST_ROOT/providers/ksecretd" >"$high_definition"
     printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
-        'Exec=/usr/bin/ksecretd' > "$low_definition"
+        'Exec=/usr/bin/ksecretd' >"$low_definition"
     run_doctor
     assert_contains "$output" 'FAIL Secret Service'
     tear_down
@@ -296,7 +300,7 @@ test_secret_service_accepts_valid_crlf_definition() {
     local definition
     set_up
     definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
-    printf '[D-BUS Service]\r\nName=org.freedesktop.secrets\r\nExec="/usr/bin/ksecretd" --daemon\r\n' > "$definition"
+    printf '[D-BUS Service]\r\nName=org.freedesktop.secrets\r\nExec="/usr/bin/ksecretd" --daemon\r\n' >"$definition"
     run_doctor
     assert_contains "$output" 'PASS Secret Service'
     tear_down
@@ -307,7 +311,7 @@ test_secret_service_rejects_additional_structural_negatives() {
     set_up
     definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
     printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
-        'Exec=/usr/bin/ksecretd' '[Other]' 'Name=org.freedesktop.secrets' > "$definition"
+        'Exec=/usr/bin/ksecretd' '[Other]' 'Name=org.freedesktop.secrets' >"$definition"
     run_doctor
     assert_contains "$output" 'FAIL Secret Service'
     tear_down
@@ -315,7 +319,7 @@ test_secret_service_rejects_additional_structural_negatives() {
     set_up
     definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
     printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
-        'Exec=/usr/bin/ksecretd' '[Other]' 'Exec=/usr/bin/ksecretd' > "$definition"
+        'Exec=/usr/bin/ksecretd' '[Other]' 'Exec=/usr/bin/ksecretd' >"$definition"
     run_doctor
     assert_contains "$output" 'FAIL Secret Service'
     tear_down
@@ -323,7 +327,7 @@ test_secret_service_rejects_additional_structural_negatives() {
     set_up
     definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
     printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
-        'Exec=/usr/bin/ksecretd' 'Exec=/usr/bin/ksecretd' > "$definition"
+        'Exec=/usr/bin/ksecretd' 'Exec=/usr/bin/ksecretd' >"$definition"
     run_doctor
     assert_contains "$output" 'FAIL Secret Service'
     tear_down
@@ -332,7 +336,7 @@ test_secret_service_rejects_additional_structural_negatives() {
     definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
     rm -- "$definition"
     printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
-        'Exec=/usr/bin/ksecretd' > "$WORK_ROOT/real-secrets.service"
+        'Exec=/usr/bin/ksecretd' >"$WORK_ROOT/real-secrets.service"
     ln -s -- "$WORK_ROOT/real-secrets.service" "$definition"
     run_doctor
     assert_contains "$output" 'FAIL Secret Service'

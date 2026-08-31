@@ -38,3 +38,16 @@ def test_repository_policy_rejects_renamed_pe_binary(tmp_path):
 def test_declared_licenses_exist():
     assert (ROOT / "LICENSES/GPL-3.0-or-later.txt").is_file()
     assert (ROOT / "LICENSES/LGPL-2.1-or-later.txt").is_file()
+
+
+def test_readme_names_supported_and_unsupported_boundaries():
+    readme = (ROOT / "README.md").read_text()
+    required = [
+        "Experimental",
+        "AppID 2440510",
+        "KDE Wallet",
+        "Microsoft binaries are not distributed",
+        "Incoming invite notifications are not supported",
+        "Uninstall",
+    ]
+    assert all(item in readme for item in required)

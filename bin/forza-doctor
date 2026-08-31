@@ -58,20 +58,20 @@ report_directory() {
 }
 
 has_kde_secret_service_provider() {
-    local candidate= check_executable data_dir executable line name= exec=
+    local candidate='' check_executable data_dir executable line name='' exec=''
     local active_section=0 invalid_key=0 name_count=0 exec_count=0 section_count=0
     local -a data_dirs=("$data_root")
     if [[ -n $test_root ]]; then
         data_dirs+=("$test_root/usr/local/share" "$test_root/usr/share")
     else
         local -a xdg_data_dirs
-        IFS=: read -r -a xdg_data_dirs <<< "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+        IFS=: read -r -a xdg_data_dirs <<<"${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
         for data_dir in "${xdg_data_dirs[@]}"; do
             [[ $data_dir == /* ]] && data_dirs+=("$data_dir")
         done
     fi
     for data_dir in "${data_dirs[@]}"; do
-        if [[ -e $data_dir/dbus-1/services/org.freedesktop.secrets.service || \
+        if [[ -e $data_dir/dbus-1/services/org.freedesktop.secrets.service ||
             -L $data_dir/dbus-1/services/org.freedesktop.secrets.service ]]; then
             candidate="$data_dir/dbus-1/services/org.freedesktop.secrets.service"
             break
@@ -104,10 +104,11 @@ has_kde_secret_service_provider() {
                 fi
                 ;;
         esac
-    done < "$candidate"
+    done <"$candidate"
     ((section_count == 1 && name_count == 1 && exec_count == 1 && !invalid_key)) || return 1
     [[ $name == org.freedesktop.secrets ]] || return 1
-    if ! executable=$(python3 - "$exec" <<'PY'
+    if ! executable=$(
+        python3 - "$exec" <<'PY'
 import shlex
 import sys
 

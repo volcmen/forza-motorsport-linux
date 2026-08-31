@@ -27,7 +27,7 @@ service_invocation_id() {
 
 token_file_matches() {
     local path=$1 expected=$2
-    [[ -f $path && ! -L $path && $(stat -c %a -- "$path") == 600 && $(< "$path") == "$expected" ]]
+    [[ -f $path && ! -L $path && $(stat -c %a -- "$path") == 600 && $(<"$path") == "$expected" ]]
 }
 
 socket_is_listening() {
@@ -52,8 +52,8 @@ cleanup() {
     stop_wait_timer
     if ((started_here)); then
         started_here=0
-        if [[ -n $started_invocation_id && -n $started_owner_token ]] && service_is_active && \
-            [[ $(service_invocation_id) == "$started_invocation_id" ]] && \
+        if [[ -n $started_invocation_id && -n $started_owner_token ]] && service_is_active &&
+            [[ $(service_invocation_id) == "$started_invocation_id" ]] &&
             token_file_matches "$active_token_path" "$started_owner_token"; then
             "$systemctl_bin" --user stop "$service_name" || true
             if service_is_inactive && token_file_matches "$active_token_path" "$started_owner_token"; then
@@ -61,7 +61,7 @@ cleanup() {
             fi
         fi
     fi
-    if [[ -n $reservation_token ]] && service_is_inactive && [[ ! -e $active_token_path ]] && \
+    if [[ -n $reservation_token ]] && service_is_inactive && [[ ! -e $active_token_path ]] &&
         token_file_matches "$pending_token_path" "$reservation_token"; then
         rm -f -- "$pending_token_path"
     fi
@@ -129,7 +129,7 @@ else
         exit 1
     }
     chmod 600 -- "$pending_token_temp"
-    printf '%s' "$reservation_token" > "$pending_token_temp"
+    printf '%s' "$reservation_token" >"$pending_token_temp"
     if ! mv -T -- "$pending_token_temp" "$pending_token_path"; then
         rm -f -- "$pending_token_temp"
         printf 'error: cannot reserve %s ownership\n' "$service_name" >&2
@@ -181,7 +181,7 @@ wait_for_game() {
     done
 }
 
-deadline=$(( $(monotonic_ms) + 4800 ))
+deadline=$(($(monotonic_ms) + 4800))
 until socket_is_listening && service_is_active; do
     now=$(monotonic_ms)
     if ((now >= deadline)); then

@@ -9,7 +9,10 @@ status=0
 tests_run=0
 tests_failed=0
 
-fail() { printf 'FAIL: %s\n' "$*" >&2; return 1; }
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    return 1
+}
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected [$2], got [$1]"; }
 assert_log_contains() { rg -Fq -- "$1" "$FAKE_LOG" || fail "log does not contain [$1]"; }
 assert_log_not_contains() { ! rg -Fq -- "$1" "$FAKE_LOG" || fail "log unexpectedly contains [$1]"; }
@@ -26,7 +29,7 @@ wait_for_file() {
 }
 
 monotonic_ms() { awk '{ printf "%.0f\n", $1 * 1000 }' /proc/uptime; }
-write_fake_state() { printf '%s %s %s\n' "$1" "$2" "$3" > "$FAKE_STATE"; }
+write_fake_state() { printf '%s %s %s\n' "$1" "$2" "$3" >"$FAKE_STATE"; }
 
 start_socket() {
     "$SOCKET_SERVER" "$1" &
@@ -113,9 +116,9 @@ set_up() {
     FAKE_LOG="$TEST_ROOT/systemctl.log"
     FAKE_STATE="$TEST_ROOT/service.state"
     FAKE_COUNTER="$TEST_ROOT/invocation.counter"
-    : > "$FAKE_LOG"
+    : >"$FAKE_LOG"
     write_fake_state inactive none none
-    printf '0\n' > "$FAKE_COUNTER"
+    printf '0\n' >"$FAKE_COUNTER"
     export FAKE_LOG FAKE_STATE FAKE_COUNTER
     export FAKE_SOCKET="$XDG_RUNTIME_DIR/xodus.sock"
     export FAKE_PENDING_TOKEN="$XDG_RUNTIME_DIR/forza-xodus-owner.pending"
@@ -131,7 +134,7 @@ set_up() {
     SOCKET_PIDS=()
 
     SOCKET_SERVER="$TEST_ROOT/socket-server"
-    cat > "$SOCKET_SERVER" <<'EOF'
+    cat >"$SOCKET_SERVER" <<'EOF'
 #!/usr/bin/env bash
 exec uv run python - "$1" <<'PY'
 import os
@@ -161,7 +164,7 @@ EOF
     export SOCKET_SERVER
 
     FAKE_SYSTEMCTL="$TEST_ROOT/systemctl"
-    cat > "$FAKE_SYSTEMCTL" <<'EOF'
+    cat >"$FAKE_SYSTEMCTL" <<'EOF'
 #!/usr/bin/env bash
 set -u
 
@@ -266,12 +269,18 @@ tear_down() {
     rm -rf -- "$TEST_ROOT"
 }
 
-run_launcher() { "$LAUNCHER" "$@"; status=$?; }
-run_launcher_capturing_stderr() { output=$("$LAUNCHER" "$@" 2>&1); status=$?; }
+run_launcher() {
+    "$LAUNCHER" "$@"
+    status=$?
+}
+run_launcher_capturing_stderr() {
+    output=$("$LAUNCHER" "$@" 2>&1)
+    status=$?
+}
 
 make_waiting_game() {
     local game="$TEST_ROOT/waiting-game"
-    cat > "$game" <<'EOF'
+    cat >"$game" <<'EOF'
 #!/usr/bin/env bash
 printf ready > "$FORZA_GAME_READY"
 while [[ ! -e $FORZA_GAME_RELEASE ]]; do sleep 0.02; done
@@ -282,7 +291,7 @@ EOF
 
 make_signal_game() {
     local game="$TEST_ROOT/signal game"
-    cat > "$game" <<'EOF'
+    cat >"$game" <<'EOF'
 #!/usr/bin/env bash
 printf ready > "$FORZA_GAME_READY"
 printf '%s\n' "$$" > "$FORZA_GAME_PID"
@@ -299,7 +308,7 @@ EOF
 
 make_fd_game() {
     local game="$TEST_ROOT/fd-game"
-    cat > "$game" <<'EOF'
+    cat >"$game" <<'EOF'
 #!/usr/bin/env bash
 for descriptor in /proc/$$/fd/*; do
     [[ $(readlink "$descriptor") == "$FORZA_LOCK_PATH" ]] && {
@@ -429,7 +438,7 @@ test_consumes_a_mode_0600_token_and_removes_it_after_cleanup() {
     assert_eq "$(stat -c %a "$FAKE_ACTIVE_TOKEN")" 600 || return 1
     assert_path_absent "$FAKE_PENDING_TOKEN" || return 1
     assert_log_not_contains 'FORZA_LAUNCH_OWNER' || return 1
-    : > "$release"
+    : >"$release"
     wait "$launcher_pid"
     assert_eq "$?" 0 || return 1
     assert_path_absent "$FAKE_ACTIVE_TOKEN"
@@ -446,7 +455,7 @@ test_rejects_a_concurrent_launcher_without_stopping_the_owner() {
     run_launcher /usr/bin/true
     concurrent_status=$status
     assert_log_not_contains 'stop xodus-forza.service' || no_stop=1
-    : > "$release"
+    : >"$release"
     wait "$first_pid"
     first_status=$?
     assert_eq "$concurrent_status" 1 || return 1
@@ -465,7 +474,7 @@ test_restart_after_token_consumption_fails_closed() {
     wait_for_file "$ready" || return 1
     "$FAKE_SYSTEMCTL" --user restart xodus-forza.service
     restart_status=$?
-    : > "$release"
+    : >"$release"
     wait "$launcher_pid"
     assert_eq "$?" 0 || return 1
     assert_eq "$restart_status" 1 || return 1
@@ -507,7 +516,7 @@ test_game_child_does_not_inherit_the_coordinator_lease() {
 
 test_space_named_game_preserves_normal_status() {
     local game="$TEST_ROOT/game with spaces"
-    cat > "$game" <<'EOF'
+    cat >"$game" <<'EOF'
 #!/usr/bin/env bash
 exit 23
 EOF
@@ -518,7 +527,7 @@ EOF
 
 test_preserves_exact_game_argv() {
     local recorder="$TEST_ROOT/record-argv" argv_log="$TEST_ROOT/argv.log"
-    cat > "$recorder" <<'EOF'
+    cat >"$recorder" <<'EOF'
 #!/usr/bin/env bash
 for argument in "$@"; do printf '[%s]\n' "$argument"; done > "$FORZA_ARGV_LOG"
 EOF
@@ -615,7 +624,7 @@ test_completes_kwallet_pam_only_for_an_existing_socket() {
     run_launcher /usr/bin/true
     assert_eq "$status" 0 || return 1
     assert_log_not_contains 'start plasma-kwallet-pam.service' || return 1
-    : > "$FAKE_LOG"
+    : >"$FAKE_LOG"
     export PAM_KWALLET5_LOGIN="$TEST_ROOT/kwallet.sock"
     start_socket "$PAM_KWALLET5_LOGIN"
     run_launcher /usr/bin/true
@@ -640,7 +649,10 @@ run_test() {
     FAKE_EXTERNAL_DURING_START=0
     unset PAM_KWALLET5_LOGIN FORZA_SELF_SIGNAL FORZA_LOCK_PATH FORZA_FD_RESULT
     set_up
-    if "$name"; then printf 'PASS: %s\n' "$name"; else printf 'FAIL: %s\n' "$name" >&2; ((tests_failed += 1)); fi
+    if "$name"; then printf 'PASS: %s\n' "$name"; else
+        printf 'FAIL: %s\n' "$name" >&2
+        ((tests_failed += 1))
+    fi
     tear_down
 }
 

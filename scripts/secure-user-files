@@ -355,9 +355,9 @@ def retire_stage(
     stage: str,
     stage_info: os.stat_result | tuple[int, int] | None,
     transaction: str,
-) -> None:
+) -> bool:
     if stage_info is None:
-        return
+        return False
     expected_identity = (
         (stage_info.st_dev, stage_info.st_ino) if isinstance(stage_info, os.stat_result) else stage_info
     )
@@ -369,7 +369,7 @@ def retire_stage(
                 durable_rename_noreplace(root_fd, stage, recovery_fd, quarantine)
                 break
             except FileNotFoundError:
-                return
+                return False
             except OSError as error:
                 if error.errno != errno.EEXIST:
                     raise
@@ -379,13 +379,15 @@ def retire_stage(
             retired_fd = os.open(quarantine, DIRECTORY, dir_fd=recovery_fd)
         except OSError:
             restore_retired_stage(recovery_fd, quarantine, root_fd, stage)
-            return
+            return False
         try:
             retired_info = os.fstat(retired_fd)
         finally:
             os.close(retired_fd)
         if (retired_info.st_dev, retired_info.st_ino) != expected_identity:
             restore_retired_stage(recovery_fd, quarantine, root_fd, stage)
+            return False
+        return True
     finally:
         os.close(recovery_fd)
 
@@ -413,7 +415,8 @@ def recover_interrupted(root_fd: int) -> None:
                     os.close(parent_fd)
             except FileNotFoundError:
                 continue
-    retire_stage(root_fd, stage, stage_identity, transaction)
+    if not retire_stage(root_fd, stage, stage_identity, transaction):
+        raise SecureFilesError("cannot prove retirement of recorded staging directory")
     journal_parent, journal_leaf = open_parent(root_fd, JOURNAL, create=False)
     try:
         if not quarantine_then_verify(
@@ -717,7 +720,8 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
         crash_after_manifest = numeric_environment("FORZA_INSTALL_CRASH_AFTER_MANIFEST") if explicit_root else 0
         if crash_after_manifest == 1:
             os._exit(99)
-        retire_stage(root_fd, stage, stage_info, transaction)
+        if not retire_stage(root_fd, stage, stage_info, transaction):
+            raise SecureFilesError("cannot prove retirement of recorded staging directory")
         stage = ""
         journal_parent, journal_leaf = open_parent(root_fd, JOURNAL, create=False)
         try:
@@ -745,7 +749,8 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
         if stage:
             if explicit_root and numeric_environment("FORZA_INSTALL_PAUSE_BEFORE_STAGE_RETIRE") == 1:
                 time.sleep(0.5)
-            retire_stage(root_fd, stage, stage_info, transaction)
+            if not retire_stage(root_fd, stage, stage_info, transaction) and sys.exc_info()[0] is None:
+                raise SecureFilesError("cannot prove retirement of recorded staging directory")
         os.close(root_fd)
 
 

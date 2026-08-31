@@ -23,7 +23,11 @@ readonly -a INSTALLED_RELATIVE_PATHS=(
 )
 readonly MANIFEST_RELATIVE_PATH='.local/state/forza-motorsport-linux/install-manifest'
 
-fail() { current_test_failed=1; printf 'FAIL: %s\n' "$*" >&2; return 1; }
+fail() {
+    current_test_failed=1
+    printf 'FAIL: %s\n' "$*" >&2
+    return 1
+}
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected [$2], got [$1]"; }
 assert_file_exists() { [[ -f $1 && ! -L $1 ]] || fail "regular file missing [$1]"; }
 assert_path_absent() { [[ ! -e $1 && ! -L $1 ]] || fail "path unexpectedly exists [$1]"; }
@@ -33,14 +37,14 @@ assert_command_fails() {
     fi
 }
 assert_log_is_daemon_reload_only() {
-    [[ $(wc -l < "$SYSTEMCTL_LOG") -gt 0 ]] || fail 'systemctl was not called'
+    [[ $(wc -l <"$SYSTEMCTL_LOG") -gt 0 ]] || fail 'systemctl was not called'
     ! rg -vx 'systemctl --user daemon-reload' "$SYSTEMCTL_LOG" >/dev/null ||
         fail 'systemctl log contains a command other than daemon-reload'
 }
 
 snapshot_directory() {
     (
-        cd -- "$1"
+        cd -- "$1" || return
         tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - .
     ) | sha256sum
 }
@@ -49,7 +53,7 @@ make_xodus_build() {
     local artifact
     mkdir -p -- "$XODUS_BUILD"
     for artifact in "$@"; do
-        printf '#!/usr/bin/env bash\nexit 0\n' > "$XODUS_BUILD/$artifact"
+        printf '#!/usr/bin/env bash\nexit 0\n' >"$XODUS_BUILD/$artifact"
         chmod 755 -- "$XODUS_BUILD/$artifact"
     done
 }
@@ -62,8 +66,8 @@ set_up() {
     FAKE_BIN="$WORK_ROOT/fake-bin"
     SYSTEMCTL_LOG="$WORK_ROOT/systemctl.log"
     mkdir -p -- "$FAKE_ROOT" "$FAKE_BIN"
-    : > "$SYSTEMCTL_LOG"
-    cat > "$FAKE_BIN/systemctl" <<'EOF'
+    : >"$SYSTEMCTL_LOG"
+    cat >"$FAKE_BIN/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >> "$SYSTEMCTL_LOG"
 [[ ${1:-} == --user && ${2:-} == daemon-reload && $# == 2 ]]
@@ -71,7 +75,7 @@ EOF
     chmod 755 -- "$FAKE_BIN/systemctl"
     export SYSTEMCTL_LOG
     make_xodus_build xodus-service xodus-cli xodus-overlay
-    printf 'do not remove\n' > "$FAKE_ROOT/keep-me"
+    printf 'do not remove\n' >"$FAKE_ROOT/keep-me"
 }
 
 tear_down() {
@@ -213,7 +217,7 @@ test_root_ancestor_symlink_is_rejected_without_outside_write() {
     set_up
     local real_parent="$WORK_ROOT/real-parent" linked_parent="$WORK_ROOT/linked-parent"
     mkdir -p -- "$real_parent/root"
-    printf 'outside sentinel\n' > "$real_parent/sentinel"
+    printf 'outside sentinel\n' >"$real_parent/sentinel"
     ln -s -- "$real_parent" "$linked_parent"
     FAKE_ROOT="$linked_parent/root"
     assert_command_fails run_install || return 1
@@ -226,7 +230,7 @@ test_conflicting_existing_file_is_preserved() {
     set_up
     local conflict="$FAKE_ROOT/.local/bin/forza-linux" before
     mkdir -p -- "$(dirname -- "$conflict")"
-    printf 'user file\n' > "$conflict"
+    printf 'user file\n' >"$conflict"
     before=$(sha256sum -- "$conflict")
     assert_command_fails run_install || return 1
     assert_eq "$(sha256sum -- "$conflict")" "$before" || return 1
@@ -293,11 +297,11 @@ test_hostile_journal_cannot_retire_local_bin() {
     local journal transaction='aaaaaaaaaaaaaaaaaaaaaaaa' relative sentinel
     sentinel="$FAKE_ROOT/.local/bin/user-sentinel"
     mkdir -p -- "${sentinel%/*}" "$(dirname -- "$(journal_path)")"
-    printf 'user sentinel\n' > "$sentinel"
+    printf 'user sentinel\n' >"$sentinel"
     journal=$(journal_path)
-    printf 'forza-motorsport-linux-journal-v1\t%s\t.local/bin\n' "$transaction" > "$journal"
+    printf 'forza-motorsport-linux-journal-v1\t%s\t.local/bin\n' "$transaction" >"$journal"
     for relative in "${INSTALLED_RELATIVE_PATHS[@]}"; do
-        printf '%s\t1\t2\t755\t%s\n' "$relative" '0000000000000000000000000000000000000000000000000000000000000000' >> "$journal"
+        printf '%s\t1\t2\t755\t%s\n' "$relative" '0000000000000000000000000000000000000000000000000000000000000000' >>"$journal"
     done
     assert_command_fails run_uninstall || return 1
     assert_eq "$(<"$sentinel")" 'user sentinel' || return 1
@@ -321,7 +325,7 @@ test_recovery_symlink_fails_without_outside_deposit() {
     set_up
     local state="$FAKE_ROOT/.local/state/forza-motorsport-linux" outside="$WORK_ROOT/outside-recovery"
     mkdir -p -- "$state" "$outside"
-    printf 'outside sentinel\n' > "$outside/sentinel"
+    printf 'outside sentinel\n' >"$outside/sentinel"
     ln -s -- "$outside" "$state/recovery"
     export FORZA_INSTALL_FAIL_AFTER_PUBLISH=1
     assert_command_fails run_install || return 1
@@ -335,9 +339,12 @@ test_rollback_preserves_a_replacement_made_during_failure() {
     set_up
     local destination="$FAKE_ROOT/.local/bin/forza-linux" replacement="$WORK_ROOT/replacement" attacker_pid
     (
-        for _ in {1..100}; do [[ -f $destination ]] && break; sleep 0.01; done
+        for _ in {1..100}; do
+            [[ -f $destination ]] && break
+            sleep 0.01
+        done
         [[ -f $destination ]] || exit 1
-        printf 'replacement by user\n' > "$replacement"
+        printf 'replacement by user\n' >"$replacement"
         mv -f -- "$replacement" "$destination"
     ) &
     attacker_pid=$!
@@ -354,9 +361,12 @@ test_parent_swap_during_publish_preserves_outside_sentinel() {
     set_up
     local outside="$WORK_ROOT/outside" attacker_pid
     mkdir -p -- "$outside"
-    printf 'outside sentinel\n' > "$outside/sentinel"
+    printf 'outside sentinel\n' >"$outside/sentinel"
     (
-        for _ in {1..100}; do [[ -f $FAKE_ROOT/.local/bin/forza-linux ]] && break; sleep 0.01; done
+        for _ in {1..100}; do
+            [[ -f $FAKE_ROOT/.local/bin/forza-linux ]] && break
+            sleep 0.01
+        done
         [[ -f $FAKE_ROOT/.local/bin/forza-linux ]] || exit 1
         mv -- "$FAKE_ROOT/.local" "$FAKE_ROOT/local-real"
         ln -s -- "$outside" "$FAKE_ROOT/.local"
@@ -375,9 +385,12 @@ test_concurrent_destination_at_publish_boundary_is_preserved() {
     set_up
     local destination="$FAKE_ROOT/.local/bin/forza-doctor" attacker_pid
     (
-        for _ in {1..100}; do [[ -f $FAKE_ROOT/.local/bin/forza-linux ]] && break; sleep 0.01; done
+        for _ in {1..100}; do
+            [[ -f $FAKE_ROOT/.local/bin/forza-linux ]] && break
+            sleep 0.01
+        done
         [[ -f $FAKE_ROOT/.local/bin/forza-linux ]] || exit 1
-        printf 'concurrent user destination\n' > "$destination"
+        printf 'concurrent user destination\n' >"$destination"
     ) &
     attacker_pid=$!
     export FORZA_INSTALL_PAUSE_BEFORE_PUBLISH=2
@@ -393,7 +406,7 @@ test_stage_substitution_never_traverses_outside_root() {
     set_up
     local outside="$WORK_ROOT/outside" stage attacker_pid
     mkdir -p -- "$outside"
-    printf 'outside sentinel\n' > "$outside/sentinel"
+    printf 'outside sentinel\n' >"$outside/sentinel"
     (
         for _ in {1..100}; do
             for stage in "$FAKE_ROOT"/.forza-install-*; do
@@ -420,7 +433,7 @@ test_stage_substitution_never_traverses_outside_root() {
 test_staged_payload_replacement_after_journal_fails_without_manifest() {
     set_up
     local unexpected="$WORK_ROOT/unexpected-stage" expected_hash attacker_pid
-    printf 'unexpected staged replacement\n' > "$unexpected"
+    printf 'unexpected staged replacement\n' >"$unexpected"
     chmod 755 -- "$unexpected"
     expected_hash=$(sha256sum -- "$unexpected" | awk '{print $1}')
     (
@@ -471,7 +484,7 @@ test_staged_payload_in_place_mutation_after_journal_fails_without_manifest() {
                 sleep 0.01
                 continue
             }
-            printf 'unexpected staged mutation\n' > "$target"
+            printf 'unexpected staged mutation\n' >"$target"
             chmod 755 -- "$target"
             exit 0
         done
@@ -492,9 +505,12 @@ test_published_payload_mutation_before_manifest_fails_without_manifest() {
     local destination="$FAKE_ROOT/.local/bin/forza-linux" expected_hash attacker_pid
     expected_hash=$(printf 'unexpected published mutation\n' | sha256sum | awk '{print $1}')
     (
-        for _ in {1..100}; do [[ -f $destination ]] && break; sleep 0.01; done
+        for _ in {1..100}; do
+            [[ -f $destination ]] && break
+            sleep 0.01
+        done
         [[ -f $destination ]] || exit 1
-        printf 'unexpected published mutation\n' > "$destination"
+        printf 'unexpected published mutation\n' >"$destination"
     ) &
     attacker_pid=$!
     export FORZA_INSTALL_PAUSE_AFTER_PUBLISH=1
@@ -520,7 +536,7 @@ write_bad_manifest() {
     local line=$1 manifest
     manifest=$(manifest_path)
     mkdir -p -- "$(dirname -- "$manifest")"
-    printf '%s\n%s\n' 'forza-motorsport-linux-install-v1' "$line" > "$manifest"
+    printf '%s\n%s\n' 'forza-motorsport-linux-install-v1' "$line" >"$manifest"
 }
 
 test_uninstall_rejects_malicious_manifest_paths_before_delete() {
@@ -532,7 +548,7 @@ test_uninstall_rejects_malicious_manifest_paths_before_delete() {
         run_install || return 1
         manifest=$(manifest_path)
         outside="$WORK_ROOT/outside"
-        printf 'outside\n' > "$outside"
+        printf 'outside\n' >"$outside"
         write_bad_manifest "$(printf '%b' "$target")"
         assert_command_fails run_uninstall || return 1
         assert_file_exists "$FAKE_ROOT/.local/bin/forza-linux" || return 1
@@ -544,7 +560,7 @@ test_uninstall_rejects_malicious_manifest_paths_before_delete() {
     run_install || return 1
     manifest=$(manifest_path)
     outside="$WORK_ROOT/outside-manifest"
-    printf '%s\n' 'forza-motorsport-linux-install-v1' > "$outside"
+    printf '%s\n' 'forza-motorsport-linux-install-v1' >"$outside"
     rm -- "$manifest"
     ln -s -- "$outside" "$manifest"
     assert_command_fails run_uninstall || return 1
@@ -558,14 +574,14 @@ test_uninstall_rejects_duplicate_and_out_of_allowlist_manifest_entries() {
     set_up
     run_install || return 1
     first_line=$(sed -n '2p' "$(manifest_path)")
-    printf '%s\n' "$first_line" >> "$(manifest_path)"
+    printf '%s\n' "$first_line" >>"$(manifest_path)"
     assert_command_fails run_uninstall || return 1
     assert_file_exists "$FAKE_ROOT/.local/bin/forza-linux" || return 1
     tear_down
 
     set_up
     run_install || return 1
-    printf '%s\n' $'.local/share/forza-motorsport-linux/other\t644\t0000000000000000000000000000000000000000000000000000000000000000' >> "$(manifest_path)"
+    printf '%s\n' $'.local/share/forza-motorsport-linux/other\t644\t0000000000000000000000000000000000000000000000000000000000000000' >>"$(manifest_path)"
     assert_command_fails run_uninstall || return 1
     assert_file_exists "$FAKE_ROOT/.local/bin/forza-linux" || return 1
     tear_down
@@ -575,7 +591,7 @@ test_uninstall_preserves_modified_installed_file_with_warning() {
     set_up
     run_install || return 1
     local modified="$FAKE_ROOT/.local/bin/forza-linux" output
-    printf 'user modified launcher\n' > "$modified"
+    printf 'user modified launcher\n' >"$modified"
     output=$(run_uninstall 2>&1) || return 1
     assert_file_exists "$modified" || return 1
     [[ $output == *'warning: preserving modified file'* ]] || fail 'modified file warning missing'
@@ -592,9 +608,12 @@ test_uninstall_preserves_manifest_replacement() {
     manifest=$(manifest_path)
     replacement="$WORK_ROOT/replacement-manifest"
     (
-        for _ in {1..100}; do [[ -e $FAKE_ROOT/.forza-test-before-manifest-retire ]] && break; sleep 0.01; done
+        for _ in {1..100}; do
+            [[ -e $FAKE_ROOT/.forza-test-before-manifest-retire ]] && break
+            sleep 0.01
+        done
         [[ -e $FAKE_ROOT/.forza-test-before-manifest-retire ]] || exit 1
-        printf 'user replacement manifest\n' > "$replacement"
+        printf 'user replacement manifest\n' >"$replacement"
         mv -f -- "$replacement" "$manifest"
     ) &
     attacker_pid=$!
