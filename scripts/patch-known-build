@@ -1,0 +1,462 @@
+#!/usr/bin/env python3
+"""Fail-closed, reversible patches for one reviewed Forza compatibility build."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import stat
+import sys
+import tempfile
+import tomllib
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path, PurePosixPath
+from typing import Mapping, Sequence
+
+
+APP_ID = "2440510"
+COMPATIBILITY_TOOL = "GE-Proton11-3-FM"
+DEFAULT_MANIFEST = Path(__file__).parents[1] / "manifests" / "supported-builds.toml"
+
+
+class PatcherError(RuntimeError):
+    """Base class for a refused patch operation."""
+
+
+class TargetMissing(PatcherError):
+    """Raised when an explicitly requested target is absent."""
+
+
+class UnknownBuild(PatcherError):
+    """Raised when a target or backup does not match its reviewed digest."""
+
+
+class PatchMismatch(PatcherError):
+    """Raised when reviewed edit bytes are not present in an accepted target."""
+
+
+class ManifestError(PatcherError):
+    """Raised when a patch or backup manifest is malformed or unsafe."""
+
+
+@dataclass(frozen=True)
+class Edit:
+    offset: int
+    before: bytes
+    after: bytes
+
+
+@dataclass(frozen=True)
+class PatchSpec:
+    name: str
+    file: str
+    original_sha256: str
+    patched_sha256: str
+    edits: tuple[Edit, ...]
+
+
+class PatchState(Enum):
+    ORIGINAL = "original"
+    PATCHED = "patched"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class PatchResult:
+    before: str
+    after: str
+    backup: Path
+
+
+@dataclass(frozen=True)
+class ForzaPatchResult:
+    backup_manifest: Path
+    results: tuple[PatchResult, ...]
+
+
+def sha256(path: Path) -> str:
+    _require_regular_file(path, "target")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def inspect_target(path: Path, spec: PatchSpec) -> PatchState:
+    digest = sha256(path)
+    if digest == spec.original_sha256:
+        return PatchState.ORIGINAL
+    if digest == spec.patched_sha256:
+        return PatchState.PATCHED
+    return PatchState.UNKNOWN
+
+
+def load_specs(manifest_path: Path) -> dict[str, PatchSpec]:
+    _require_regular_file(manifest_path, "manifest")
+    with manifest_path.open("rb") as stream:
+        document = tomllib.load(stream)
+    records = document.get("patches")
+    if not isinstance(records, list):
+        raise ManifestError("manifest patches must be an array")
+
+    specs: dict[str, PatchSpec] = {}
+    for record in records:
+        spec = _parse_spec(record)
+        if spec.file in specs:
+            raise ManifestError(f"duplicate patch file: {spec.file}")
+        specs[spec.file] = spec
+    if not specs:
+        raise ManifestError("manifest contains no patches")
+    return specs
+
+
+def resolve_forza_targets(steam_root: Path) -> list[Path]:
+    tool_root = (
+        steam_root
+        / "compatibilitytools.d"
+        / COMPATIBILITY_TOOL
+        / "files"
+        / "lib"
+        / "wine"
+        / "x86_64-windows"
+    )
+    prefix_root = steam_root / "steamapps" / "compatdata" / APP_ID / "pfx" / "drive_c"
+    return [
+        tool_root / "windows.gaming.input.dll",
+        prefix_root / "windows" / "system32" / "windows.gaming.input.dll",
+        tool_root / "mountmgr.sys",
+        prefix_root / "windows" / "system32" / "drivers" / "mountmgr.sys",
+    ]
+
+
+def apply_target(path: Path, spec: PatchSpec, backup_root: Path) -> PatchResult:
+    if inspect_target(path, spec) is not PatchState.ORIGINAL:
+        raise UnknownBuild(f"target is not the reviewed original build: {path}")
+
+    original = path.read_bytes()
+    before = hashlib.sha256(original).hexdigest()
+    if before != spec.original_sha256:
+        raise UnknownBuild(f"target changed during validation: {path}")
+    patched = _apply_edits(original, spec)
+    if hashlib.sha256(patched).hexdigest() != spec.patched_sha256:
+        raise PatchMismatch(f"patch result does not match reviewed digest: {path}")
+
+    backup_root.mkdir(parents=True, exist_ok=True)
+    backup = _next_backup_path(backup_root, path.name, spec.original_sha256)
+    _atomic_replace(backup, original, stat.S_IMODE(path.stat().st_mode))
+    if sha256(backup) != spec.original_sha256:
+        raise PatchMismatch(f"backup verification failed: {backup}")
+
+    _atomic_replace(path, patched, stat.S_IMODE(path.stat().st_mode))
+    after = sha256(path)
+    if after != spec.patched_sha256:
+        raise PatchMismatch(f"patched target verification failed: {path}")
+    return PatchResult(before=before, after=after, backup=backup)
+
+
+def restore_target(path: Path, backup: Path, spec: PatchSpec) -> PatchResult:
+    if inspect_target(path, spec) is not PatchState.PATCHED:
+        raise UnknownBuild(f"target is not the reviewed patched build: {path}")
+    _require_regular_file(backup, "backup")
+    before = sha256(path)
+    original = backup.read_bytes()
+    if hashlib.sha256(original).hexdigest() != spec.original_sha256:
+        raise UnknownBuild(f"backup is not the reviewed original build: {backup}")
+
+    _atomic_replace(path, original, stat.S_IMODE(path.stat().st_mode))
+    after = sha256(path)
+    if after != spec.original_sha256:
+        raise PatchMismatch(f"restored target verification failed: {path}")
+    return PatchResult(before=before, after=after, backup=backup)
+
+
+def apply_forza(
+    steam_root: Path, specs: Mapping[str, PatchSpec], backup_root: Path
+) -> ForzaPatchResult:
+    targets = resolve_forza_targets(steam_root)
+    pairs = [(target, _spec_for_target(target, specs)) for target in targets]
+    states = [(target, spec, inspect_target(target, spec)) for target, spec in pairs]
+    unknown = [target for target, _, state in states if state is PatchState.UNKNOWN]
+    if unknown:
+        raise UnknownBuild(f"refusing transaction; unknown target: {unknown[0]}")
+
+    applied: list[tuple[Path, PatchSpec, PatchResult]] = []
+    try:
+        for target, spec, state in states:
+            if state is PatchState.ORIGINAL:
+                applied.append((target, spec, apply_target(target, spec, backup_root)))
+    except Exception:
+        for target, spec, result in reversed(applied):
+            restore_target(target, result.backup, spec)
+        raise
+
+    manifest = _write_backup_manifest(steam_root, backup_root, applied)
+    return ForzaPatchResult(manifest, tuple(result for _, _, result in applied))
+
+
+def restore_forza(
+    steam_root: Path, backup_manifest: Path, specs: Mapping[str, PatchSpec]
+) -> tuple[PatchResult, ...]:
+    _require_regular_file(backup_manifest, "backup manifest")
+    try:
+        record = json.loads(backup_manifest.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ManifestError(f"cannot read backup manifest: {backup_manifest}") from error
+    entries = _backup_entries(steam_root, backup_manifest.parent, record, specs)
+
+    for target, backup, spec in entries:
+        if inspect_target(target, spec) is not PatchState.PATCHED:
+            raise UnknownBuild(f"refusing restore; target is not patched: {target}")
+        _require_regular_file(backup, "backup")
+        if sha256(backup) != spec.original_sha256:
+            raise UnknownBuild(f"refusing restore; backup is not original: {backup}")
+
+    return tuple(restore_target(target, backup, spec) for target, backup, spec in entries)
+
+
+def _parse_spec(record: object) -> PatchSpec:
+    if not isinstance(record, dict):
+        raise ManifestError("patch record must be a table")
+    try:
+        name = record["name"]
+        file = record["file"]
+        original = record["original_sha256"]
+        patched = record["patched_sha256"]
+        edits = record["edits"]
+    except KeyError as error:
+        raise ManifestError(f"patch record missing {error.args[0]}") from error
+    if not all(isinstance(value, str) for value in (name, file, original, patched)):
+        raise ManifestError("patch names and hashes must be strings")
+    if Path(file).name != file:
+        raise ManifestError(f"patch file must be a basename: {file}")
+    _validate_digest(original, "original_sha256")
+    _validate_digest(patched, "patched_sha256")
+    if not isinstance(edits, list) or not edits:
+        raise ManifestError("patch edits must be a nonempty array")
+    return PatchSpec(name, file, original, patched, tuple(_parse_edit(edit) for edit in edits))
+
+
+def _parse_edit(record: object) -> Edit:
+    if not isinstance(record, dict):
+        raise ManifestError("edit must be a table")
+    offset = record.get("offset")
+    before = record.get("before")
+    after = record.get("after")
+    if not isinstance(offset, int) or offset < 0:
+        raise ManifestError("edit offset must be a nonnegative integer")
+    if not isinstance(before, str) or not isinstance(after, str):
+        raise ManifestError("edit bytes must be hexadecimal strings")
+    try:
+        before_bytes = bytes.fromhex(before)
+        after_bytes = bytes.fromhex(after)
+    except ValueError as error:
+        raise ManifestError("edit bytes must be hexadecimal strings") from error
+    if not before_bytes or len(before_bytes) != len(after_bytes):
+        raise ManifestError("edit replacements must be nonempty and equal length")
+    return Edit(offset, before_bytes, after_bytes)
+
+
+def _apply_edits(original: bytes, spec: PatchSpec) -> bytes:
+    patched = bytearray(original)
+    for edit in spec.edits:
+        end = edit.offset + len(edit.before)
+        if end > len(original) or original[edit.offset:end] != edit.before:
+            raise PatchMismatch(f"reviewed bytes absent for {spec.name} at 0x{edit.offset:x}")
+        patched[edit.offset:end] = edit.after
+    return bytes(patched)
+
+
+def _require_regular_file(path: Path, label: str) -> None:
+    if not path.exists():
+        raise TargetMissing(f"{label} does not exist: {path}")
+    if path.is_symlink() or not path.is_file():
+        raise PatcherError(f"{label} is not a regular file: {path}")
+
+
+def _atomic_replace(path: Path, data: bytes, mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _next_backup_path(backup_root: Path, name: str, original_hash: str) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    candidate = backup_root / f"{timestamp}-{original_hash}-{name}"
+    suffix = 1
+    while candidate.exists():
+        candidate = backup_root / f"{timestamp}-{original_hash}-{name}.{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _spec_for_target(target: Path, specs: Mapping[str, PatchSpec]) -> PatchSpec:
+    try:
+        return specs[target.name]
+    except KeyError as error:
+        raise ManifestError(f"manifest has no patch for {target.name}") from error
+
+
+def _write_backup_manifest(
+    steam_root: Path,
+    backup_root: Path,
+    applied: Sequence[tuple[Path, PatchSpec, PatchResult]],
+) -> Path:
+    entries = []
+    for target, spec, result in applied:
+        entries.append(
+            {
+                "target": target.relative_to(steam_root).as_posix(),
+                "file": spec.file,
+                "original_sha256": spec.original_sha256,
+                "patched_sha256": spec.patched_sha256,
+                "backup": result.backup.relative_to(backup_root).as_posix(),
+            }
+        )
+    document = json.dumps({"version": 1, "targets": entries}, indent=2, sort_keys=True)
+    manifest = _next_manifest_path(backup_root)
+    _atomic_replace(manifest, (document + "\n").encode(), 0o600)
+    return manifest
+
+
+def _next_manifest_path(backup_root: Path) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    candidate = backup_root / f"forza-patch-{timestamp}.json"
+    suffix = 1
+    while candidate.exists():
+        candidate = backup_root / f"forza-patch-{timestamp}.{suffix}.json"
+        suffix += 1
+    return candidate
+
+
+def _backup_entries(
+    steam_root: Path,
+    backup_root: Path,
+    record: object,
+    specs: Mapping[str, PatchSpec],
+) -> list[tuple[Path, Path, PatchSpec]]:
+    if not isinstance(record, dict) or record.get("version") != 1:
+        raise ManifestError("backup manifest version is unsupported")
+    entries = record.get("targets")
+    if not isinstance(entries, list) or not entries:
+        raise ManifestError("backup manifest contains no targets")
+    allowed = {
+        target.relative_to(steam_root).as_posix(): target
+        for target in resolve_forza_targets(steam_root)
+    }
+    parsed: list[tuple[Path, Path, PatchSpec]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ManifestError("backup target entry must be an object")
+        target_name = entry.get("target")
+        backup_name = entry.get("backup")
+        file_name = entry.get("file")
+        if not all(isinstance(value, str) for value in (target_name, backup_name, file_name)):
+            raise ManifestError("backup target entry is incomplete")
+        if target_name in seen or target_name not in allowed:
+            raise ManifestError(f"backup target is outside Forza scope: {target_name}")
+        seen.add(target_name)
+        target = allowed[target_name]
+        if target.name != file_name:
+            raise ManifestError(f"backup file does not match target: {target_name}")
+        spec = _spec_for_target(target, specs)
+        if (
+            entry.get("original_sha256") != spec.original_sha256
+            or entry.get("patched_sha256") != spec.patched_sha256
+        ):
+            raise ManifestError(f"backup hashes do not match manifest: {target_name}")
+        backup = _safe_relative_path(backup_root, backup_name)
+        parsed.append((target, backup, spec))
+    return parsed
+
+
+def _safe_relative_path(root: Path, value: str) -> Path:
+    candidate = PurePosixPath(value)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ManifestError(f"backup path is not relative: {value}")
+    return root.joinpath(*candidate.parts)
+
+
+def _validate_digest(value: str, field: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ManifestError(f"{field} must be a lowercase SHA-256 digest")
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    inspect = commands.add_parser("inspect")
+    inspect.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    inspect.add_argument("--target", type=Path, required=True)
+    apply = commands.add_parser("apply")
+    apply.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    apply.add_argument("--target", type=Path, required=True)
+    apply.add_argument("--backup-root", type=Path, required=True)
+    restore = commands.add_parser("restore")
+    restore.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    restore.add_argument("--target", type=Path, required=True)
+    restore.add_argument("--backup", type=Path, required=True)
+    apply_forza_command = commands.add_parser("apply-forza")
+    apply_forza_command.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    apply_forza_command.add_argument("--steam-root", type=Path, required=True)
+    apply_forza_command.add_argument("--backup-root", type=Path, required=True)
+    restore_forza_command = commands.add_parser("restore-forza")
+    restore_forza_command.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    restore_forza_command.add_argument("--steam-root", type=Path, required=True)
+    restore_forza_command.add_argument("--backup-manifest", type=Path, required=True)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = _parser().parse_args(argv)
+    try:
+        specs = load_specs(arguments.manifest)
+        if arguments.command == "inspect":
+            _require_regular_file(arguments.target, "target")
+            print(inspect_target(arguments.target, _spec_for_target(arguments.target, specs)).value)
+        elif arguments.command == "apply":
+            result = apply_target(
+                arguments.target,
+                _spec_for_target(arguments.target, specs),
+                arguments.backup_root,
+            )
+            print(result.backup)
+        elif arguments.command == "restore":
+            restore_target(arguments.target, arguments.backup, _spec_for_target(arguments.target, specs))
+        elif arguments.command == "apply-forza":
+            result = apply_forza(arguments.steam_root, specs, arguments.backup_root)
+            print(result.backup_manifest)
+        elif arguments.command == "restore-forza":
+            restore_forza(arguments.steam_root, arguments.backup_manifest, specs)
+    except PatcherError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

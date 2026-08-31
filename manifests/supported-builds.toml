@@ -1,0 +1,19 @@
+[[patches]]
+name = "wgi-physical-xinput-nonroamable-id"
+file = "windows.gaming.input.dll"
+original_sha256 = "57538166ba052dc763232880f18a4b48a07ab735a61b5b8fbf5a8f56a05f2ca5"
+patched_sha256 = "f520d9b4d44d9cdc11e67396583a1ccc8c53eca60e0b3a69233f358556b59245"
+edits = [
+  { offset = 0x14932, before = "753a", after = "9090" },
+  { offset = 0x1493a, before = "7532", after = "9090" },
+]
+
+[[patches]]
+name = "mountmgr-storage-trim"
+file = "mountmgr.sys"
+original_sha256 = "764f72bad9e639aead6535045f953815d9013ecb39b24b3b0027a70b846712b6"
+patched_sha256 = "61fd9e9bb22ec1e92a3156c55cbfe77e22df49186b2de8f42b26d71cae2349d2"
+edits = [
+  { offset = 0x6b3f, before = "83f8070f85b0020000", after = "83e80783f80177b690" },
+  { offset = 0x6f84, before = "c7460800000000", after = "803e080f944608" },
+]
