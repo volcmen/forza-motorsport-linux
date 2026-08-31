@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+
+set -u
+
+if [[ -n ${FORZA_TEST_ROOT:-} ]]; then
+    home_root=$FORZA_TEST_ROOT
+else
+    home_root=${HOME:?HOME is required}
+fi
+
+uid=${FORZA_TEST_UID:-$(id -u)}
+launcher="$home_root/.local/bin/forza-linux"
+printf -v quoted_launcher '%q' "$launcher"
+
+printf 'WINEDLLOVERRIDES=xgameruntime=b PRESSURE_VESSEL_FILESYSTEMS_RW=/run/user/%s/xodus.sock %s %%command%%\n' \
+    "$uid" "$quoted_launcher"
