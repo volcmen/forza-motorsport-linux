@@ -19,3 +19,31 @@ git diff --check
 | Whitespace | `git diff --check` | No whitespace errors in the working change. |
 
 The tests use only synthetic patch bytes and temporary roots. A passing gate proves repository contracts, not game compatibility, account authentication, online play, or invite delivery. CI runs the same `just verify` command and deliberately uploads no system information, runtime logs, or artifacts.
+
+## Local Wine source evidence
+
+Two source branches were built from canonical
+[`xodus-gaming/wine`](https://github.com/xodus-gaming/wine) `bleeding-edge` at
+`b1dd32734a34472a28eb5be9922df06e07ac0834`. As of 2026-08-31, both branches
+and all listed commits remain local, planned, and unpublished. Their SHAs are
+provenance records, not public fetch locations, and this repository vendors no
+compiled Wine artifacts.
+
+| Source branch | Final local commit | Compile/link | Wine PE runtime | Live/manual |
+| --- | --- | --- | --- | --- |
+| [`fix/wgi-physical-nonroamable-id`](../patches/wine-controller/README.md) | `ddd302d97c6008d79ea4f3e3ad56014cb548e514` | **GREEN** | **BLOCKED before test dispatch** | Controller/Forza matrix **NOT RUN** |
+| [`fix/storage-trim-property`](../patches/wine-storage-trim/README.md) | `a7719bd8d0719e5ea6061387db020fa6a6b39d27` | **GREEN** | **BLOCKED before test dispatch** | Installation and Forza/AP702 A/B **NOT RUN** |
+
+Both focused PE test commands stopped during canonical Wine bootstrap with
+`secur32.dll` initialization failure and `kernel32.dll` status `c0000135`,
+before either task's assertions ran. This does not downgrade the recorded
+source compile/link result, but it also cannot be reported as runtime GREEN.
+No source branch or artifact was installed into the live compatibility tool or
+game prefix, and no live Steam setting was changed by these source tasks.
+
+The controller evidence records the supported physical XInput identity grammar
+and the outstanding manual controller matrix. The storage evidence records the
+unconditional `TrimEnabled = TRUE` compatibility policy; that policy requires
+maintainer agreement and a canonical device-detection design before canonical
+Wine inclusion. See each linked provenance document for the exact changed
+files, commands, exit states, and semantic limitations.

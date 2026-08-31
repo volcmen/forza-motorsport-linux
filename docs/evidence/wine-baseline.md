@@ -24,9 +24,11 @@ build artifact was reused.
   `wine_provider_get_NonRoamableId()` returns `E_NOTIMPL`.  Thus a physical,
   non-Steam controller still has no NonRoamableId implementation.
 - `include/ntddstor.h` assigns `StorageDeviceTrimProperty` the value `0x8`.
-  `dlls/mountmgr.sys/device.c` handles only Device and SeekPenalty properties
-  in this query switch.  Property `0x8` reaches the default unsupported path
-  and returns `STATUS_NOT_SUPPORTED`.
+  For a standard property query, `dlls/mountmgr.sys/device.c` handles only
+  Device and SeekPenalty properties, so property `0x8` reaches the switch's
+  default unsupported path and returns `STATUS_NOT_SUPPORTED`.
+  `PropertyExistsQuery` returns `STATUS_NOT_SUPPORTED` before the property
+  switch is entered.
 
 ## Exact-build fallback provenance
 
