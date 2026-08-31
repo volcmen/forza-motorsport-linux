@@ -24,6 +24,17 @@ Use a licensed Steam copy of Forza Motorsport, the reviewed `GE-Proton11-3-FM` l
 
 The repository does not download credentials, game assets, Microsoft binaries, or third-party binaries. Every command below is user-local; do not use `sudo`.
 
+To place a runtime you are licensed to use, set the Steam root for the account whose prefix you are preparing and place its renamed file at the exact doctor-required path:
+
+```bash
+steam_root="${XDG_DATA_HOME:-$HOME/.local/share}/Steam"
+prefix_root="$steam_root/steamapps/compatdata/2440510/pfx/drive_c"
+mkdir -p -- "$prefix_root/windows/system32"
+cp -- /absolute/path/to/your/licensed/xgameruntime.dll "$prefix_root/windows/system32/xgameruntime.dll.threading"
+```
+
+The required destination is `steamapps/compatdata/2440510/pfx/drive_c/windows/system32/xgameruntime.dll.threading` beneath the selected Steam root. This repository neither supplies nor hashes that Microsoft file in public output.
+
 ## Read-only preflight
 
 From a checkout, run:
@@ -57,6 +68,8 @@ Paste its output into Forza Motorsport's Steam launch options. It uses the insta
 ## Known-build patch fallback
 
 If `forza-doctor` reports `WARN` for controller and mountmgr known-build state, the reviewed fallback is available only for the exact hashes in `supported-builds.toml`. Unknown, mixed, changed, missing, or partly patched targets fail closed. The fallback covers `windows.gaming.input.dll` and `mountmgr.sys`; it is not a generic Proton flag.
+
+The `mountmgr.sys` fallback is for AP702, Forza's HDD/SSD launch rejection. On this dedicated compatibility build only, the reviewed exact-build patch reports the reviewed TRIM/storage capability through `StorageDeviceTrimProperty`. It is temporary evidence for a source fix, not a claim about other Wine, Proton, disks, or game builds.
 
 Choose a private backup directory, record the printed backup-manifest path, and run:
 
@@ -99,8 +112,27 @@ Restore patches with the recorded patch backup manifest before altering compatib
 scripts/uninstall-user
 ```
 
-Uninstall removes only files proven by its install manifest. Modified, replaced, missing, or unproven files are preserved with a warning. Interrupted-install and replaced owned material is moved into the private project recovery directory under `~/.local/state/forza-motorsport-linux/recovery` and retained rather than unlinked through a mutable name. This intentional recovery retention consumes disk space; inspect and purge it manually only after confirming it is no longer needed.
+Uninstall removes only files proven by its install manifest. Modified, replaced, or unproven files are preserved with a warning; already-missing paths are left absent. Interrupted-install and replaced owned material is moved into the private project recovery directory under `~/.local/state/forza-motorsport-linux/recovery` and retained rather than unlinked through a mutable name. This intentional recovery retention consumes disk space; inspect and purge it manually only after confirming it is no longer needed.
 
 ## Upstream branches and provenance
 
-This repository contains only scripts, manifests, documentation, and synthetic test fixtures. It does not redistribute Wine, Proton, Xodus, Microsoft, Steam, or game binaries. The supported-build manifest records reviewed hashes and byte edits. See [architecture](docs/architecture.md), [troubleshooting](docs/troubleshooting.md), and [verification](docs/verification.md).
+This repository contains only scripts, manifests, documentation, and synthetic test fixtures. It does not redistribute Wine, Proton, Xodus, Microsoft, Steam, or game binaries. The supported-build manifest records reviewed hashes and byte edits.
+
+### Component source status
+
+The canonical planned bases are `xodus-gaming/wine` `bleeding-edge` for Wine, `xodus-gaming/xodus` `main` for Xodus, and `xodus-gaming/xgameruntime` `oot-cpp` / PR 19 for the XGameRuntime transport base. The component roadmap is sequential: these companion branches and immutable SHAs are not public yet, and stale local branch history is not canonical provenance. The planned public names are `forza-social-invite-join`, `xodus-social-invite-bridge`, `wgi-physical-nonroamable-id`, and `storage-trim-property`; they are names for future reviewed publication, not current download locations.
+
+The canonical bases can be checked out for inspection with no claim that they build the complete integration:
+
+```bash
+git clone https://github.com/xodus-gaming/wine.git wine
+git -C wine switch bleeding-edge
+git clone https://github.com/xodus-gaming/xodus.git xodus
+git -C xodus switch main
+git clone https://github.com/xodus-gaming/xgameruntime.git xgameruntime
+git -C xgameruntime switch oot-cpp
+```
+
+When the reviewed Xodus branch is published, its documented workspace build command is `cargo build --release --workspace`. The installer requires `--xodus-build-dir` to be an absolute directory containing exactly these direct artifacts: `xodus-service`, `xodus-cli`, and `xodus-overlay` (for a conventional Cargo release build, evaluate the verified `target/release` output directory rather than the checkout root). The planned component build checks are `make -C dlls/mountmgr.sys` for Wine storage and `make -C dlls/xgameruntime` for XGameRuntime. A complete build-from-source path cannot be claimed until the companion branches, immutable SHAs, and artifact-parity evidence are published; until then, use only the legal prerequisites and exact-build fallback described above.
+
+See [architecture](docs/architecture.md), [troubleshooting](docs/troubleshooting.md), and [verification](docs/verification.md).
