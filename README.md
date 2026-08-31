@@ -82,7 +82,7 @@ backup_root="$HOME/.local/state/forza-motorsport-linux/patch-backups"
 "$patcher" apply-forza --manifest "$manifest" --steam-root "$steam_root" --backup-root "$backup_root"
 ```
 
-The patcher preflights all four in-scope targets before writing, creates verified user-owned backups outside every compatibility-tool directory, and records a backup manifest. Publication is bound to the validated inode and digest through held no-follow directory descriptors; a concurrent unknown replacement is restored or preserved rather than overwritten. Restore only with that manifest:
+The patcher preflights all four in-scope targets before writing, creates verified user-owned backups outside every compatibility-tool directory, and records a backup manifest. Publication is bound to the validated inode and digest through held no-follow directory descriptors; a concurrent regular file, symlink, or directory is atomically restored at the public path rather than overwritten. The patcher does not unlink mutable post-exchange names. It retains the other exchange object beside the target under a reported `.forza-recovery-*` name, including after successful apply and restore. These hidden recovery objects intentionally consume additional disk space; keep the external backup manifest authoritative and remove retained objects manually only after verifying they are no longer needed. Restore only with that manifest:
 
 ```bash
 "$patcher" restore-forza --manifest "$manifest" --steam-root "$steam_root" --backup-manifest /absolute/path/to/forza-patch-TIMESTAMP.json

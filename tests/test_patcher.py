@@ -44,6 +44,13 @@ def synthetic_original(spec):
     return bytes(data)
 
 
+def synthetic_patched(spec):
+    data = bytearray(synthetic_original(spec))
+    for edit in spec.edits:
+        data[edit.offset : edit.offset + len(edit.after)] = edit.after
+    return bytes(data)
+
+
 def synthetic_spec(spec):
     original = synthetic_original(spec)
     patched = bytearray(original)
@@ -84,6 +91,40 @@ def populate_forza_root(steam_root, specs):
         target.write_bytes(synthetic_original(specs[target.name]))
 
 
+def replace_with_nonregular(target, replacement_type):
+    replacement = target.with_name(f"{target.name}-{replacement_type}")
+    if replacement_type == "symlink":
+        link_text = "concurrent-symlink-destination"
+        (target.parent / link_text).write_bytes(b"symlink sentinel")
+        replacement.symlink_to(link_text)
+        identity = replacement.lstat().st_ino
+        os.replace(replacement, target)
+        return identity, link_text
+
+    replacement.mkdir()
+    (replacement / "sentinel").write_bytes(b"directory sentinel")
+    identity = replacement.stat().st_ino
+    target.unlink()
+    replacement.rename(target)
+    return identity, b"directory sentinel"
+
+
+def assert_nonregular_replacement(target, replacement_type, identity, detail):
+    assert target.lstat().st_ino == identity
+    if replacement_type == "symlink":
+        assert target.is_symlink()
+        assert os.readlink(target) == detail
+    else:
+        assert target.is_dir()
+        assert (target / "sentinel").read_bytes() == detail
+
+
+def assert_only_patched_recovery_remains(target, spec):
+    recovery = target.with_name(f".{target.name}.forza-recovery-publication-conflict")
+    assert recovery.read_bytes() == synthetic_patched(spec)
+    assert list(target.parent.glob(f".{target.name}.forza-*")) == [recovery]
+
+
 def test_manifest_records_the_reviewed_exact_build_hashes(supported_builds):
     assert supported_builds["windows.gaming.input.dll"].original_sha256 == (
         "57538166ba052dc763232880f18a4b48a07ab735a61b5b8fbf5a8f56a05f2ca5"
@@ -117,6 +158,73 @@ def test_known_original_is_patched_backed_up_atomically_and_preserves_mode(
     assert target.stat().st_ino != before_inode
     assert stat.S_IMODE(target.stat().st_mode) == 0o640
     assert inspect_target(target, controller_spec) is PatchState.PATCHED
+
+
+def test_success_retains_original_and_never_unlinks_a_private_name_swap(
+    tmp_path, controller_spec, monkeypatch, capsys
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    original = synthetic_original(controller_spec)
+    target.write_bytes(original)
+    original_inode = target.stat().st_ino
+    late_replacement = tmp_path / "late-private-name-replacement"
+    late_replacement.symlink_to("late-user-link")
+    late_identity = late_replacement.lstat().st_ino
+    real_unlink = patcher.os.unlink
+
+    def replace_before_private_unlink(path, *args, **kwargs):
+        dir_fd = kwargs.get("dir_fd")
+        if (
+            isinstance(path, str)
+            and path.startswith(f".{target.name}.forza-")
+            and dir_fd is not None
+            and Path(os.readlink(f"/proc/self/fd/{dir_fd}")) == target.parent
+        ):
+            os.replace(late_replacement, target.parent / path)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(patcher.os, "unlink", replace_before_private_unlink)
+    apply_target(target, controller_spec, tmp_path / "backups")
+
+    assert late_replacement.is_symlink()
+    assert late_replacement.lstat().st_ino == late_identity
+    assert os.readlink(late_replacement) == "late-user-link"
+    recovery = target.with_name(f".{target.name}.forza-recovery-publication-success")
+    assert recovery.read_bytes() == original
+    assert recovery.stat().st_ino == original_inode
+    assert str(recovery) in capsys.readouterr().err
+
+
+def test_failed_exchange_reports_and_retains_a_private_name_replacement(
+    tmp_path, controller_spec, monkeypatch, capsys
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    original = synthetic_original(controller_spec)
+    target.write_bytes(original)
+    late_replacement = tmp_path / "late-failed-exchange-replacement"
+    late_replacement.symlink_to("late-failed-exchange-link")
+    late_identity = late_replacement.lstat().st_ino
+    real_renameat2 = patcher._renameat2
+    failed = False
+
+    def fail_exchange_after_name_swap(source_fd, source, destination_fd, destination, flags):
+        nonlocal failed
+        if flags == patcher.RENAME_EXCHANGE and not failed:
+            failed = True
+            os.replace(late_replacement, target.parent / source)
+            raise OSError("simulated exchange failure")
+        return real_renameat2(source_fd, source, destination_fd, destination, flags)
+
+    monkeypatch.setattr(patcher, "_renameat2", fail_exchange_after_name_swap)
+    with pytest.raises(OSError, match="simulated exchange failure"):
+        apply_target(target, controller_spec, tmp_path / "backups")
+
+    assert target.read_bytes() == original
+    recovery = target.with_name(f".{target.name}.forza-recovery-unpublished-staging")
+    assert recovery.is_symlink()
+    assert recovery.lstat().st_ino == late_identity
+    assert os.readlink(recovery) == "late-failed-exchange-link"
+    assert str(recovery) in capsys.readouterr().err
 
 
 def test_unknown_hash_is_refused_without_writing(tmp_path, controller_spec):
@@ -321,6 +429,7 @@ def test_apply_target_restores_concurrent_unknown_replacement(
     target.write_bytes(synthetic_original(controller_spec))
     replacement = tmp_path / "concurrent-replacement"
     replacement.write_bytes(b"concurrent unknown target")
+    replacement_inode = replacement.stat().st_ino
 
     def replace_after_backup(_entry):
         os.replace(replacement, target)
@@ -334,9 +443,197 @@ def test_apply_target_restores_concurrent_unknown_replacement(
         )
 
     assert target.read_bytes() == b"concurrent unknown target"
+    assert target.stat().st_ino == replacement_inode
+    assert_only_patched_recovery_remains(target, controller_spec)
     backups = list((tmp_path / "backups").iterdir())
     assert len(backups) == 1
     assert backups[0].read_bytes() == synthetic_original(controller_spec)
+
+
+@pytest.mark.parametrize("replacement_type", ("symlink", "directory"))
+def test_apply_target_restores_concurrent_nonregular_replacement(
+    tmp_path, controller_spec, replacement_type
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    target.write_bytes(synthetic_original(controller_spec))
+    replacement = None
+
+    def replace_after_backup(_entry):
+        nonlocal replacement
+        replacement = replace_with_nonregular(target, replacement_type)
+
+    with pytest.raises(patcher.PatcherError, match="changed during publication"):
+        apply_target(
+            target,
+            controller_spec,
+            tmp_path / "backups",
+            on_backup=replace_after_backup,
+        )
+
+    assert replacement is not None
+    assert_nonregular_replacement(target, replacement_type, *replacement)
+    assert_only_patched_recovery_remains(target, controller_spec)
+
+
+def test_conflict_restore_reports_secondary_public_replacement(tmp_path, capsys):
+    target = tmp_path / "windows.gaming.input.dll"
+    target.write_bytes(b"second concurrent public target")
+    target_inode = target.stat().st_ino
+    displaced = f".{target.name}.forza-displaced"
+    (tmp_path / displaced).symlink_to("first-concurrent-link")
+    displaced_inode = (tmp_path / displaced).lstat().st_ino
+    parent_fd = os.open(tmp_path, patcher.DIRECTORY)
+    try:
+        restored = patcher._restore_displaced_after_conflict(
+            parent_fd,
+            target.name,
+            displaced,
+            target,
+        )
+    finally:
+        os.close(parent_fd)
+
+    assert restored
+    assert target.is_symlink()
+    assert target.lstat().st_ino == displaced_inode
+    assert os.readlink(target) == "first-concurrent-link"
+    recovery = tmp_path / f".{target.name}.forza-recovery-publication-conflict"
+    assert recovery.read_bytes() == b"second concurrent public target"
+    assert recovery.stat().st_ino == target_inode
+    assert str(recovery) in capsys.readouterr().err
+    assert not (tmp_path / displaced).exists()
+
+
+def test_conflict_restore_never_unlinks_a_name_swap_after_identity_check(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    target.write_bytes(b"known published patch")
+    displaced = f".{target.name}.forza-displaced"
+    (tmp_path / displaced).symlink_to("first-concurrent-link")
+    late_replacement = tmp_path / "late-concurrent-link"
+    late_replacement.symlink_to("second-concurrent-link")
+    late_identity = late_replacement.lstat().st_ino
+    real_unlink = patcher.os.unlink
+    parent_fd = os.open(tmp_path, patcher.DIRECTORY)
+
+    def replace_before_unlink(path, *args, **kwargs):
+        if path == displaced and kwargs.get("dir_fd") == parent_fd:
+            os.replace(late_replacement, tmp_path / displaced)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(patcher.os, "unlink", replace_before_unlink)
+    try:
+        assert patcher._restore_displaced_after_conflict(
+            parent_fd,
+            target.name,
+            displaced,
+            target,
+        )
+    finally:
+        os.close(parent_fd)
+
+    assert target.is_symlink()
+    assert os.readlink(target) == "first-concurrent-link"
+    assert late_replacement.is_symlink()
+    assert late_replacement.lstat().st_ino == late_identity
+    assert os.readlink(late_replacement) == "second-concurrent-link"
+
+
+@pytest.mark.parametrize(("missing", "expected_restored"), (("public", True), ("displaced", False)))
+def test_conflict_restore_handles_a_disappearing_name(
+    tmp_path, monkeypatch, missing, expected_restored
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    target.write_bytes(b"known published patch")
+    target_inode = target.stat().st_ino
+    displaced = f".{target.name}.forza-displaced"
+    (tmp_path / displaced).symlink_to("concurrent-link")
+    displaced_inode = (tmp_path / displaced).lstat().st_ino
+    vanished = tmp_path / f"vanished-{missing}"
+    real_renameat2 = patcher._renameat2
+    interrupted = False
+
+    def disappear_before_exchange(source_fd, source, destination_fd, destination, flags):
+        nonlocal interrupted
+        if flags == patcher.RENAME_EXCHANGE and not interrupted:
+            interrupted = True
+            vanished_source = target if missing == "public" else tmp_path / displaced
+            os.replace(vanished_source, vanished)
+            raise FileNotFoundError
+        return real_renameat2(source_fd, source, destination_fd, destination, flags)
+
+    monkeypatch.setattr(patcher, "_renameat2", disappear_before_exchange)
+    parent_fd = os.open(tmp_path, patcher.DIRECTORY)
+    try:
+        restored = patcher._restore_displaced_after_conflict(
+            parent_fd,
+            target.name,
+            displaced,
+            target,
+        )
+    finally:
+        os.close(parent_fd)
+
+    assert restored is expected_restored
+    if missing == "public":
+        assert target.is_symlink()
+        assert target.lstat().st_ino == displaced_inode
+        assert vanished.read_bytes() == b"known published patch"
+        assert vanished.stat().st_ino == target_inode
+    else:
+        assert target.read_bytes() == b"known published patch"
+        assert target.stat().st_ino == target_inode
+        assert vanished.is_symlink()
+        assert vanished.lstat().st_ino == displaced_inode
+        assert os.readlink(vanished) == "concurrent-link"
+    assert not list(tmp_path.glob(f".{target.name}.forza-*"))
+
+
+@pytest.mark.parametrize("replacement_type", ("symlink", "directory"))
+def test_apply_forza_rollback_preserves_concurrent_nonregular_replacement(
+    tmp_path, synthetic_specs, monkeypatch, replacement_type
+):
+    populate_forza_root(tmp_path, synthetic_specs)
+    targets = resolve_forza_targets(tmp_path)
+    raced_target = targets[1]
+    backup_root = tmp_path / "backups"
+    real_apply_target = patcher.apply_target
+    replacement = None
+
+    def apply_target_with_race(path, spec, backup_root, on_backup=None):
+        if path != raced_target:
+            return real_apply_target(path, spec, backup_root, on_backup=on_backup)
+
+        def replace_after_backup(entry):
+            nonlocal replacement
+            if on_backup is not None:
+                on_backup(entry)
+            replacement = replace_with_nonregular(path, replacement_type)
+
+        return real_apply_target(
+            path,
+            spec,
+            backup_root,
+            on_backup=replace_after_backup,
+        )
+
+    monkeypatch.setattr(patcher, "apply_target", apply_target_with_race)
+
+    with pytest.raises(patcher.PatcherError, match="changed during publication"):
+        apply_forza(tmp_path, synthetic_specs, backup_root)
+
+    assert replacement is not None
+    assert_nonregular_replacement(raced_target, replacement_type, *replacement)
+    assert_only_patched_recovery_remains(
+        raced_target, synthetic_specs[raced_target.name]
+    )
+    assert all(
+        inspect_target(target, synthetic_specs[target.name]) is PatchState.ORIGINAL
+        for target in targets
+        if target != raced_target
+    )
+    assert not list(backup_root.glob("*.json"))
 
 
 @pytest.mark.parametrize("tool_name", ("GE-Proton11-3-FM", "OtherTool"))

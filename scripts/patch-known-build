@@ -52,6 +52,14 @@ class UnknownBuild(PatcherError):
     """Raised when a target or backup does not match its reviewed digest."""
 
 
+class _PublicationConflict(UnknownBuild):
+    """A publication race whose displaced target was handled safely."""
+
+    def __init__(self, message: str, *, target_restored: bool):
+        super().__init__(message)
+        self.target_restored = target_restored
+
+
 class PatchMismatch(PatcherError):
     """Raised when reviewed edit bytes are not present in an accepted target."""
 
@@ -277,12 +285,15 @@ def apply_target(
             ):
                 raise PatchMismatch(f"patched target verification failed: {path}")
         except Exception as primary:
-            try:
-                state = inspect_target(path, spec)
-            except (OSError, PatcherError):
-                state = None
-            if state in {PatchState.ORIGINAL, PatchState.UNKNOWN}:
+            if isinstance(primary, _PublicationConflict) and primary.target_restored:
                 rollback.active = False
+            else:
+                try:
+                    state = inspect_target(path, spec)
+                except (OSError, PatcherError):
+                    state = None
+                if state in {PatchState.ORIGINAL, PatchState.UNKNOWN}:
+                    rollback.active = False
             if rollback.active:
                 try:
                     _rollback_entries((rollback,))
@@ -494,34 +505,60 @@ def _restore_displaced_after_conflict(
     parent_fd: int,
     leaf: str,
     displaced: str,
-    published_identity: tuple[int, int],
+    display_path: Path,
 ) -> bool:
-    quarantine = f".{leaf}.forza-published-{secrets.token_hex(TOKEN_BYTES)}"
     try:
-        _renameat2(parent_fd, leaf, parent_fd, quarantine, RENAME_NOREPLACE)
+        _renameat2(parent_fd, leaf, parent_fd, displaced, RENAME_EXCHANGE)
     except FileNotFoundError:
-        quarantine = ""
-    if quarantine:
-        _, _, current_info = _read_regular_at(parent_fd, quarantine, "published target")
-        if (current_info.st_dev, current_info.st_ino) != published_identity:
-            try:
-                _renameat2(parent_fd, quarantine, parent_fd, leaf, RENAME_NOREPLACE)
-            except OSError as error:
-                if error.errno != errno.EEXIST:
-                    raise
+        try:
+            _renameat2(parent_fd, displaced, parent_fd, leaf, RENAME_NOREPLACE)
+        except FileNotFoundError:
             return False
-    try:
-        _renameat2(parent_fd, displaced, parent_fd, leaf, RENAME_NOREPLACE)
-    except OSError as error:
-        if error.errno != errno.EEXIST:
-            raise
-        return False
-    if quarantine:
-        _, _, patched_info = _read_regular_at(parent_fd, quarantine, "published target")
-        if (patched_info.st_dev, patched_info.st_ino) == published_identity:
-            os.unlink(quarantine, dir_fd=parent_fd)
+        except OSError as error:
+            if error.errno != errno.EEXIST:
+                raise
+            _preserve_conflict_object(
+                parent_fd, leaf, displaced, display_path, "displaced-target"
+            )
+            return False
+        os.fsync(parent_fd)
+        return True
+
+    _preserve_conflict_object(
+        parent_fd, leaf, displaced, display_path, "publication-conflict"
+    )
     os.fsync(parent_fd)
     return True
+
+
+def _preserve_conflict_object(
+    parent_fd: int,
+    leaf: str,
+    source: str,
+    display_path: Path,
+    label: str,
+) -> str | None:
+    source_path = display_path.with_name(source)
+    for suffix in range(100):
+        ending = "" if suffix == 0 else f".{suffix}"
+        recovery = f".{leaf}.forza-recovery-{label}{ending}"
+        try:
+            _renameat2(parent_fd, source, parent_fd, recovery, RENAME_NOREPLACE)
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            if error.errno == errno.EEXIST:
+                continue
+            raise RollbackError(
+                f"concurrent object remains at {source_path}; recovery rename failed"
+            ) from error
+        os.fsync(parent_fd)
+        recovered_path = display_path.with_name(recovery)
+        print(f"warning: preserved concurrent object at {recovered_path}", file=sys.stderr)
+        return recovery
+    raise RollbackError(
+        f"concurrent object remains at {source_path}; cannot reserve recovery name"
+    )
 
 
 def _atomic_replace_at(
@@ -539,31 +576,45 @@ def _atomic_replace_at(
         _renameat2(parent_fd, temporary, parent_fd, leaf, RENAME_EXCHANGE)
         exchanged = True
         os.fsync(parent_fd)
-        displaced, displaced_mode, displaced_info = _read_regular_at(
-            parent_fd, temporary, "displaced target"
-        )
+        try:
+            displaced, displaced_mode, displaced_info = _read_regular_at(
+                parent_fd, temporary, "displaced target"
+            )
+        except (OSError, PatcherError) as error:
+            restored = _restore_displaced_after_conflict(
+                parent_fd, leaf, temporary, display_path
+            )
+            exchanged = False
+            temporary = ""
+            raise _PublicationConflict(
+                f"target changed during publication: {display_path}",
+                target_restored=restored,
+            ) from error
         if (
             (displaced_info.st_dev, displaced_info.st_ino) != expected_identity
             or displaced_mode != mode
             or hashlib.sha256(displaced).hexdigest() != expected_hash
         ):
             restored = _restore_displaced_after_conflict(
-                parent_fd, leaf, temporary, published_identity
+                parent_fd, leaf, temporary, display_path
             )
             exchanged = False
-            if not restored:
-                temporary = ""
-            raise UnknownBuild(f"target changed during publication: {display_path}")
-        os.unlink(temporary, dir_fd=parent_fd)
-        os.fsync(parent_fd)
+            temporary = ""
+            raise _PublicationConflict(
+                f"target changed during publication: {display_path}",
+                target_restored=restored,
+            )
+        _preserve_conflict_object(
+            parent_fd, leaf, temporary, display_path, "publication-success"
+        )
+        temporary = ""
         exchanged = False
         return published_identity
     finally:
         if not exchanged and temporary:
-            try:
-                os.unlink(temporary, dir_fd=parent_fd)
-            except FileNotFoundError:
-                pass
+            _preserve_conflict_object(
+                parent_fd, leaf, temporary, display_path, "unpublished-staging"
+            )
 
 
 def _fsync_directory(directory: Path) -> None:

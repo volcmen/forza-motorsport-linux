@@ -12,7 +12,7 @@ The repository is a local control surface for one experimental Steam layout: App
 
 ## Exact-build patches
 
-`supported-builds.toml` declares the only accepted SHA-256 originals, patched SHA-256 values, and byte edits. The patcher preflights all four controller/mountmgr targets. It rejects unknown or mixed states, requires backups to resolve outside `compatibilitytools.d`, and uses held no-follow directory descriptors plus atomic exchange to bind publication to the validated inode and digest. Restore consumes the backup manifest and rechecks every target and backup before changing any target.
+`supported-builds.toml` declares the only accepted SHA-256 originals, patched SHA-256 values, and byte edits. The patcher preflights all four controller/mountmgr targets. It rejects unknown or mixed states, requires backups to resolve outside `compatibilitytools.d`, and uses held no-follow directory descriptors plus atomic exchange to bind publication to the validated inode and digest. A conflicting displaced object is atomically exchanged back to the public name regardless of file type. Post-exchange names are never unlinked: the remaining private object is atomically renamed to a deterministic, reported `.forza-recovery-*` name beside the target. Restore consumes the backup manifest and rechecks every target and backup before changing any target. External backups remain authoritative; the same-directory recovery objects are retained race evidence and intentionally consume additional disk space.
 
 ## Installation and recovery
 
