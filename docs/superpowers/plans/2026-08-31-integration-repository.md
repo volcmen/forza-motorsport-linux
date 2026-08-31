@@ -47,7 +47,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 FORBIDDEN_SUFFIXES = {".dll", ".exe", ".sys", ".so"}
-FORBIDDEN_TEXT = ("authorization: xbl3.0 x=", "proof_private_key=")
+FORBIDDEN_TEXT = ("authorization: " + "xbl3.0 x=", "proof_" + "private_key=")
 
 
 def test_repository_contains_no_prohibited_binaries_or_live_secrets():
