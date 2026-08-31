@@ -1,0 +1,9 @@
+version = 1
+SPDX-PackageName = "forza-motorsport-linux-tools"
+SPDX-PackageSupplier = "volcmen"
+SPDX-PackageDownloadLocation = "NOASSERTION"
+
+[[annotations]]
+path = ["README.md", "justfile", "pyproject.toml", ".gitignore", "tests/**"]
+SPDX-FileCopyrightText = "2026 volcmen"
+SPDX-License-Identifier = "GPL-3.0-or-later"
