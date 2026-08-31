@@ -97,7 +97,13 @@ def open_parent(root_fd: int, relative: str, *, create: bool) -> tuple[int, str]
         raise
 
 
-def read_regular_at(parent_fd: int, leaf: str, *, executable: bool = False) -> tuple[bytes, int, os.stat_result]:
+def read_regular_at(
+    parent_fd: int,
+    leaf: str,
+    *,
+    executable: bool = False,
+    fsync_file: bool = False,
+) -> tuple[bytes, int, os.stat_result]:
     fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
     try:
         info = os.fstat(fd)
@@ -109,6 +115,8 @@ def read_regular_at(parent_fd: int, leaf: str, *, executable: bool = False) -> t
         chunks: list[bytes] = []
         while block := os.read(fd, 1024 * 1024):
             chunks.append(block)
+        if fsync_file:
+            os.fsync(fd)
         return b"".join(chunks), mode, info
     finally:
         os.close(fd)
@@ -405,6 +413,7 @@ def recover_interrupted(root_fd: int) -> None:
                     os.close(parent_fd)
             except FileNotFoundError:
                 continue
+    retire_stage(root_fd, stage, stage_identity, transaction)
     journal_parent, journal_leaf = open_parent(root_fd, JOURNAL, create=False)
     try:
         if not quarantine_then_verify(
@@ -421,7 +430,6 @@ def recover_interrupted(root_fd: int) -> None:
             raise SecureFilesError("transaction journal changed during recovery")
     finally:
         os.close(journal_parent)
-    retire_stage(root_fd, stage, stage_identity, transaction)
 
 
 def stage_name(root_fd: int) -> tuple[str, str, int]:
@@ -446,34 +454,84 @@ def stage_file(stage_fd: int, relative: str, data: bytes, mode: int) -> None:
         os.close(parent_fd)
 
 
-def publish(stage_fd: int, root_fd: int, relative: str) -> os.stat_result:
+def verified_file_record_at(
+    parent_fd: int,
+    leaf: str,
+    relative: str,
+    expected_record: tuple[int, int, int, str],
+    *,
+    fsync_file: bool = False,
+) -> tuple[int, int, int, str]:
+    data, mode, info = read_regular_at(parent_fd, leaf, fsync_file=fsync_file)
+    observed = (info.st_dev, info.st_ino, mode, digest(data))
+    if observed != expected_record:
+        raise SecureFilesError(f"published destination does not match transaction journal: {relative}")
+    return observed
+
+
+def retire_untrusted_destination(parent_fd: int, leaf: str, root_fd: int, transaction: str, relative: str) -> None:
+    try:
+        retire_name(parent_fd, leaf, root_fd, transaction, "unexpected")
+        print(f"warning: preserving untrusted published file in project recovery: {relative}", file=sys.stderr)
+    except FileNotFoundError:
+        pass
+
+
+def publish(
+    stage_fd: int,
+    root_fd: int,
+    relative: str,
+    expected_record: tuple[int, int, int, str],
+    transaction: str,
+) -> tuple[int, int, int, str]:
     source_parent, leaf = open_parent(stage_fd, relative, create=False)
     destination_parent, destination_leaf = open_parent(root_fd, relative, create=True)
     try:
-        info = os.stat(leaf, dir_fd=source_parent, follow_symlinks=False)
-        if not stat.S_ISREG(info.st_mode):
-            raise SecureFilesError(f"staged source is not regular: {relative}")
         durable_rename_noreplace(source_parent, leaf, destination_parent, destination_leaf)
-        return info
+        try:
+            return verified_file_record_at(destination_parent, destination_leaf, relative, expected_record)
+        except (OSError, SecureFilesError) as error:
+            retire_untrusted_destination(destination_parent, destination_leaf, root_fd, transaction, relative)
+            raise SecureFilesError(f"published destination changed from transaction journal: {relative}") from error
     finally:
         os.close(source_parent)
         os.close(destination_parent)
 
 
-def fsync_root_file(root_fd: int, relative: str, expected_identity: tuple[int, int]) -> None:
+def fsync_root_file(
+    root_fd: int,
+    relative: str,
+    expected_record: tuple[int, int, int, str],
+    transaction: str,
+) -> None:
     parent_fd, leaf = open_parent(root_fd, relative, create=False)
     try:
-        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
         try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != expected_identity:
-                raise SecureFilesError(f"published file changed before durability: {relative}")
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+            verified_file_record_at(parent_fd, leaf, relative, expected_record, fsync_file=True)
+        except (OSError, SecureFilesError) as error:
+            retire_untrusted_destination(parent_fd, leaf, root_fd, transaction, relative)
+            raise SecureFilesError(f"published file changed before durability: {relative}") from error
         os.fsync(parent_fd)
     finally:
         os.close(parent_fd)
+
+
+def revalidate_published(
+    root_fd: int,
+    published: Iterable[tuple[str, int, int, int, str]],
+    records: dict[str, tuple[int, int, int, str]],
+    transaction: str,
+) -> None:
+    for relative, *_ in published:
+        parent_fd, leaf = open_parent(root_fd, relative, create=False)
+        try:
+            try:
+                verified_file_record_at(parent_fd, leaf, relative, records[relative])
+            except (OSError, SecureFilesError) as error:
+                retire_untrusted_destination(parent_fd, leaf, root_fd, transaction, relative)
+                raise SecureFilesError(f"published destination changed before manifest: {relative}") from error
+        finally:
+            os.close(parent_fd)
 
 
 def quarantine_name(prefix: str) -> str:
@@ -616,6 +674,13 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
             _, _, info = read_root_file(stage_fd, relative)
             journal_records[relative] = (info.st_dev, info.st_ino, mode, digest(data))
         stage_file(stage_fd, MANIFEST, staged_manifest, 0o600)
+        _, _, manifest_stage_info = read_root_file(stage_fd, MANIFEST)
+        manifest_record = (
+            manifest_stage_info.st_dev,
+            manifest_stage_info.st_ino,
+            0o600,
+            digest(staged_manifest),
+        )
         os.fsync(stage_fd)
         stage_identity = (stage_info.st_dev, stage_info.st_ino)
         journal_data = journal_bytes(transaction, stage, stage_identity, journal_records)
@@ -633,9 +698,8 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
         for count, relative in enumerate(PAYLOADS, start=1):
             if pause_before == count:
                 time.sleep(0.5)
-            info = publish(stage_fd, root_fd, relative)
-            mode, expected_hash = records[relative]
-            published.append((relative, info.st_dev, info.st_ino, mode, expected_hash))
+            observed = publish(stage_fd, root_fd, relative, journal_records[relative], transaction)
+            published.append((relative, *observed))
             if pause_after == count:
                 time.sleep(0.5)
             if crash_after == count:
@@ -645,21 +709,16 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
         fail_before_manifest = numeric_environment("FORZA_INSTALL_FAIL_BEFORE_MANIFEST") if explicit_root else 0
         if fail_before_manifest == 1:
             raise SecureFilesError("simulated failure before manifest publication")
-        manifest_info = publish(stage_fd, root_fd, MANIFEST)
-        published.append(
-            (
-                MANIFEST,
-                manifest_info.st_dev,
-                manifest_info.st_ino,
-                0o600,
-                digest(staged_manifest),
-            )
-        )
-        fsync_root_file(root_fd, MANIFEST, (manifest_info.st_dev, manifest_info.st_ino))
+        revalidate_published(root_fd, published, journal_records, transaction)
+        observed_manifest = publish(stage_fd, root_fd, MANIFEST, manifest_record, transaction)
+        published.append((MANIFEST, *observed_manifest))
+        fsync_root_file(root_fd, MANIFEST, observed_manifest, transaction)
         committed = True
         crash_after_manifest = numeric_environment("FORZA_INSTALL_CRASH_AFTER_MANIFEST") if explicit_root else 0
         if crash_after_manifest == 1:
             os._exit(99)
+        retire_stage(root_fd, stage, stage_info, transaction)
+        stage = ""
         journal_parent, journal_leaf = open_parent(root_fd, JOURNAL, create=False)
         try:
             if not quarantine_then_verify(

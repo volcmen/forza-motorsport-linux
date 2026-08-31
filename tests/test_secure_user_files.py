@@ -4,6 +4,7 @@ import errno
 import importlib.util
 import os
 import stat
+import subprocess
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,25 @@ SPEC = importlib.util.spec_from_loader(
 assert SPEC is not None and SPEC.loader is not None
 secure = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(secure)
+
+
+def make_sources(tmp_path: Path) -> dict[str, str]:
+    sources_root = tmp_path / "sources"
+    sources_root.mkdir()
+    sources: dict[str, str] = {}
+    for index, relative in enumerate(secure.PAYLOADS):
+        source = sources_root / str(index)
+        source.write_bytes(f"payload {index}\n".encode())
+        source.chmod(0o755 if relative.startswith(".local/bin/") or "/libexec/" in relative else 0o644)
+        sources[relative] = str(source)
+    return sources
+
+
+def source_arguments(sources: dict[str, str]) -> list[str]:
+    arguments: list[str] = []
+    for relative, source in sources.items():
+        arguments.extend(("--source", f"{relative}={source}"))
+    return arguments
 
 
 def test_write_new_at_fsyncs_file_before_close(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -38,15 +58,20 @@ def test_publish_fsyncs_both_rename_directories(monkeypatch: pytest.MonkeyPatch)
     parents = iter(((11, "payload"), (22, "payload")))
     monkeypatch.setattr(secure, "open_parent", lambda *args, **kwargs: next(parents))
     monkeypatch.setattr(secure, "rename_noreplace", lambda *args: events.append(("rename", 0)))
+    expected = (1, 2, 0o600, secure.digest(b"payload"))
     monkeypatch.setattr(
-        secure.os,
-        "stat",
-        lambda *args, **kwargs: SimpleNamespace(st_mode=stat.S_IFREG | 0o600),
+        secure,
+        "read_regular_at",
+        lambda *args, **kwargs: (
+            b"payload",
+            0o600,
+            SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFREG | 0o600),
+        ),
     )
     monkeypatch.setattr(secure.os, "fsync", lambda fd: events.append(("fsync", fd)))
     monkeypatch.setattr(secure.os, "close", lambda fd: events.append(("close", fd)))
 
-    secure.publish(3, 4, ".local/bin/forza-linux")
+    assert secure.publish(3, 4, ".local/bin/forza-linux", expected, "a" * 24) == expected
 
     assert events == [
         ("rename", 0),
@@ -234,20 +259,14 @@ def test_install_orders_durable_journal_and_manifest_around_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "root"
-    sources_root = tmp_path / "sources"
     root.mkdir()
-    sources_root.mkdir()
-    sources: dict[str, str] = {}
-    for index, relative in enumerate(secure.PAYLOADS):
-        source = sources_root / str(index)
-        source.write_bytes(f"payload {index}\n".encode())
-        source.chmod(0o755 if relative.startswith(".local/bin/") or "/libexec/" in relative else 0o644)
-        sources[relative] = str(source)
+    sources = make_sources(tmp_path)
 
     events: list[str] = []
     real_fsync = os.fsync
     real_publish = secure.publish
     real_retire_name = secure.retire_name
+    real_retire_stage = secure.retire_stage
 
     def recording_fsync(fd: int) -> None:
         target = os.readlink(f"/proc/self/fd/{fd}")
@@ -257,8 +276,14 @@ def test_install_orders_durable_journal_and_manifest_around_publication(
             events.append("manifest-file-fsync")
         real_fsync(fd)
 
-    def recording_publish(stage_fd: int, root_fd: int, relative: str) -> os.stat_result:
-        result = real_publish(stage_fd, root_fd, relative)
+    def recording_publish(
+        stage_fd: int,
+        root_fd: int,
+        relative: str,
+        expected_record: tuple[int, int, int, str],
+        transaction: str,
+    ) -> tuple[int, int, int, str]:
+        result = real_publish(stage_fd, root_fd, relative, expected_record, transaction)
         events.append(f"published:{relative}")
         return result
 
@@ -269,15 +294,69 @@ def test_install_orders_durable_journal_and_manifest_around_publication(
             events.append("journal-retire")
         real_retire_name(parent_fd, leaf, root_fd, transaction, label)
 
+    def recording_retire_stage(
+        root_fd: int,
+        stage: str,
+        stage_info: os.stat_result | tuple[int, int] | None,
+        transaction: str,
+    ) -> None:
+        events.append("stage-retire")
+        real_retire_stage(root_fd, stage, stage_info, transaction)
+
     monkeypatch.setattr(secure.os, "fsync", recording_fsync)
     monkeypatch.setattr(secure, "publish", recording_publish)
     monkeypatch.setattr(secure, "retire_name", recording_retire)
+    monkeypatch.setattr(secure, "retire_stage", recording_retire_stage)
 
     secure.install(str(root), sources, explicit_root=True)
 
     first_payload = events.index(f"published:{secure.PAYLOADS[0]}")
     manifest_publish = events.index(f"published:{secure.MANIFEST}")
+    stage_retire = events.index("stage-retire")
     journal_retire = events.index("journal-retire")
     assert events.index("journal-file-fsync") < first_payload
     assert manifest_publish < events.index("manifest-file-fsync", manifest_publish)
-    assert events.index("manifest-file-fsync", manifest_publish) < journal_retire
+    assert events.index("manifest-file-fsync", manifest_publish) < stage_retire
+    assert stage_retire < journal_retire
+
+
+def test_restart_keeps_journal_when_committed_stage_retirement_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    sources = make_sources(tmp_path)
+    env = os.environ.copy()
+    env["FORZA_INSTALL_CRASH_AFTER_MANIFEST"] = "1"
+
+    result = subprocess.run(
+        [
+            str(HELPER_PATH),
+            "install",
+            "--root",
+            str(root),
+            "--explicit-root",
+            *source_arguments(sources),
+        ],
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 99
+    journal = root / secure.JOURNAL
+    assert journal.is_file()
+    stage = secure.parse_journal(journal.read_bytes())[1]
+    assert (root / stage).is_dir()
+
+    def crash_stage_retirement(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated stage retirement crash")
+
+    monkeypatch.setattr(secure, "retire_stage", crash_stage_retirement)
+    root_fd = os.open(root, secure.DIRECTORY)
+    try:
+        with pytest.raises(RuntimeError, match="simulated stage retirement crash"):
+            secure.recover_interrupted(root_fd)
+    finally:
+        os.close(root_fd)
+
+    assert journal.is_file()

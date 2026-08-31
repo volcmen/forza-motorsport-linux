@@ -97,6 +97,10 @@ recovery_contains_hash() {
     return 1
 }
 
+stage_path_from_journal() {
+    awk -F '\t' 'NR == 1 {print $3}' "$(journal_path)"
+}
+
 installed_identity_snapshot() {
     local relative
     for relative in "${INSTALLED_RELATIVE_PATHS[@]}" "$MANIFEST_RELATIVE_PATH"; do
@@ -413,6 +417,95 @@ test_stage_substitution_never_traverses_outside_root() {
     tear_down
 }
 
+test_staged_payload_replacement_after_journal_fails_without_manifest() {
+    set_up
+    local unexpected="$WORK_ROOT/unexpected-stage" expected_hash attacker_pid
+    printf 'unexpected staged replacement\n' > "$unexpected"
+    chmod 755 -- "$unexpected"
+    expected_hash=$(sha256sum -- "$unexpected" | awk '{print $1}')
+    (
+        local stage target replacement
+        for _ in {1..100}; do
+            [[ -f $(journal_path) ]] || {
+                sleep 0.01
+                continue
+            }
+            stage=$(stage_path_from_journal)
+            target="$FAKE_ROOT/$stage/.local/bin/forza-linux"
+            [[ -f $target ]] || {
+                sleep 0.01
+                continue
+            }
+            replacement="$WORK_ROOT/replacement-stage"
+            cp -- "$unexpected" "$replacement"
+            chmod 755 -- "$replacement"
+            mv -f -- "$replacement" "$target"
+            exit 0
+        done
+        exit 1
+    ) &
+    attacker_pid=$!
+    export FORZA_INSTALL_PAUSE_BEFORE_PUBLISH=1
+    assert_command_fails run_install || return 1
+    wait "$attacker_pid" || return 1
+    unset FORZA_INSTALL_PAUSE_BEFORE_PUBLISH
+    assert_path_absent "$(manifest_path)" || return 1
+    recovery_contains_hash "$expected_hash" || fail 'unexpected staged replacement was not retained in recovery'
+    tear_down
+}
+
+test_staged_payload_in_place_mutation_after_journal_fails_without_manifest() {
+    set_up
+    local expected_hash attacker_pid
+    expected_hash=$(printf 'unexpected staged mutation\n' | sha256sum | awk '{print $1}')
+    (
+        local stage target
+        for _ in {1..100}; do
+            [[ -f $(journal_path) ]] || {
+                sleep 0.01
+                continue
+            }
+            stage=$(stage_path_from_journal)
+            target="$FAKE_ROOT/$stage/.local/bin/forza-linux"
+            [[ -f $target ]] || {
+                sleep 0.01
+                continue
+            }
+            printf 'unexpected staged mutation\n' > "$target"
+            chmod 755 -- "$target"
+            exit 0
+        done
+        exit 1
+    ) &
+    attacker_pid=$!
+    export FORZA_INSTALL_PAUSE_BEFORE_PUBLISH=1
+    assert_command_fails run_install || return 1
+    wait "$attacker_pid" || return 1
+    unset FORZA_INSTALL_PAUSE_BEFORE_PUBLISH
+    assert_path_absent "$(manifest_path)" || return 1
+    recovery_contains_hash "$expected_hash" || fail 'unexpected staged mutation was not retained in recovery'
+    tear_down
+}
+
+test_published_payload_mutation_before_manifest_fails_without_manifest() {
+    set_up
+    local destination="$FAKE_ROOT/.local/bin/forza-linux" expected_hash attacker_pid
+    expected_hash=$(printf 'unexpected published mutation\n' | sha256sum | awk '{print $1}')
+    (
+        for _ in {1..100}; do [[ -f $destination ]] && break; sleep 0.01; done
+        [[ -f $destination ]] || exit 1
+        printf 'unexpected published mutation\n' > "$destination"
+    ) &
+    attacker_pid=$!
+    export FORZA_INSTALL_PAUSE_AFTER_PUBLISH=1
+    assert_command_fails run_install || return 1
+    wait "$attacker_pid" || return 1
+    unset FORZA_INSTALL_PAUSE_AFTER_PUBLISH
+    assert_path_absent "$(manifest_path)" || return 1
+    recovery_contains_hash "$expected_hash" || fail 'unexpected published mutation was not retained in recovery'
+    tear_down
+}
+
 test_failure_before_manifest_rolls_back_published_files() {
     set_up
     export FORZA_INSTALL_FAIL_BEFORE_MANIFEST=1
@@ -589,6 +682,9 @@ run_test test_rollback_preserves_a_replacement_made_during_failure
 run_test test_parent_swap_during_publish_preserves_outside_sentinel
 run_test test_concurrent_destination_at_publish_boundary_is_preserved
 run_test test_stage_substitution_never_traverses_outside_root
+run_test test_staged_payload_replacement_after_journal_fails_without_manifest
+run_test test_staged_payload_in_place_mutation_after_journal_fails_without_manifest
+run_test test_published_payload_mutation_before_manifest_fails_without_manifest
 run_test test_failure_before_manifest_rolls_back_published_files
 run_test test_uninstall_rejects_malicious_manifest_paths_before_delete
 run_test test_uninstall_rejects_duplicate_and_out_of_allowlist_manifest_entries
