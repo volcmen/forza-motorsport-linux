@@ -20,5 +20,5 @@ fi
 launcher="$home_root/.local/bin/forza-linux"
 printf -v quoted_launcher '%q' "$launcher"
 
-printf 'WINEDLLOVERRIDES=xgameruntime=b PRESSURE_VESSEL_FILESYSTEMS_RW=/run/user/%s/xodus.sock %s %%command%%\n' \
+printf 'WINEDLLOVERRIDES=xgameruntime=b PROTON_VKD3D_HEAP=1 VKD3D_CONFIG=skip_application_workarounds,descriptor_heap,avoid_image_buffer_aliasing PRESSURE_VESSEL_FILESYSTEMS_RW=/run/user/%s/xodus.sock %s %%command%%\n' \
     "$uid" "$quoted_launcher"

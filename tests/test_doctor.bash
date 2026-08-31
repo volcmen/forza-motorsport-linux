@@ -39,6 +39,7 @@ EOF
     cat >"$FAKE_BIN/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >> "$FAKE_LOG"
+[[ ${FORZA_FAKE_SERVICE_QUERY_ERROR:-0} == 0 ]] || exit 1
 printf '%s\n' "${FORZA_FAKE_SERVICE_STATE:-disabled}"
 EOF
     cat >"$FAKE_BIN/df" <<'EOF'
@@ -66,8 +67,10 @@ for ((index = 1; index <= $#; index += 1)); do
     fi
 done
 case "$target" in
-    *windows.gaming.input.dll) state=${FORZA_FAKE_CONTROLLER_STATE:-patched} ;;
-    *mountmgr.sys) state=${FORZA_FAKE_MOUNTMGR_STATE:-patched} ;;
+    *compatibilitytools.d/*/windows.gaming.input.dll) state=${FORZA_FAKE_TOOL_CONTROLLER_STATE:-patched} ;;
+    *compatdata/*/windows.gaming.input.dll) state=${FORZA_FAKE_PREFIX_CONTROLLER_STATE:-patched} ;;
+    *compatibilitytools.d/*/mountmgr.sys) state=${FORZA_FAKE_TOOL_MOUNTMGR_STATE:-patched} ;;
+    *compatdata/*/mountmgr.sys) state=${FORZA_FAKE_PREFIX_MOUNTMGR_STATE:-patched} ;;
     *) exit 64 ;;
 esac
 printf '%s\n' "$state"
@@ -106,7 +109,9 @@ set_up() {
     : >"$FAKE_LOG"
     export FORZA_TEST_ROOT="$TEST_ROOT" FAKE_LOG
     export FORZA_FAKE_SECRET_OWNER=0 FORZA_FAKE_SERVICE_STATE=disabled
-    export FORZA_FAKE_CONTROLLER_STATE=patched FORZA_FAKE_MOUNTMGR_STATE=patched
+    export FORZA_FAKE_SERVICE_QUERY_ERROR=0
+    export FORZA_FAKE_TOOL_CONTROLLER_STATE=patched FORZA_FAKE_PREFIX_CONTROLLER_STATE=patched
+    export FORZA_FAKE_TOOL_MOUNTMGR_STATE=patched FORZA_FAKE_PREFIX_MOUNTMGR_STATE=patched
     export FORZA_FAKE_DISK_KB=209715200
     write_fake_commands
     make_ready_installation
@@ -343,24 +348,49 @@ test_secret_service_rejects_additional_structural_negatives() {
     tear_down
 }
 
-test_service_and_known_build_states_distinguish_pass_warn_and_fail() {
+test_service_states_accept_only_non_enabled_runnable_units() {
+    local service_state
+    for service_state in disabled static; do
+        set_up
+        export FORZA_FAKE_SERVICE_STATE=$service_state
+        run_doctor
+        assert_contains "$output" 'PASS xodus-forza.service disabled state'
+        tear_down
+    done
+
+    for service_state in missing masked enabled unknown; do
+        set_up
+        export FORZA_FAKE_SERVICE_STATE=$service_state
+        run_doctor
+        assert_contains "$output" 'FAIL xodus-forza.service disabled state'
+        tear_down
+    done
+
     set_up
-    export FORZA_FAKE_SERVICE_STATE=enabled
+    export FORZA_FAKE_SERVICE_QUERY_ERROR=1
     run_doctor
     assert_contains "$output" 'FAIL xodus-forza.service disabled state'
     tear_down
+}
 
+test_per_target_known_build_states_reject_mixed_and_unknown() {
     set_up
-    export FORZA_FAKE_SERVICE_STATE=unknown
-    export FORZA_FAKE_CONTROLLER_STATE=original
-    export FORZA_FAKE_MOUNTMGR_STATE=original
+    export FORZA_FAKE_TOOL_CONTROLLER_STATE=original
+    export FORZA_FAKE_PREFIX_CONTROLLER_STATE=original
+    export FORZA_FAKE_TOOL_MOUNTMGR_STATE=original
+    export FORZA_FAKE_PREFIX_MOUNTMGR_STATE=original
     run_doctor
-    assert_contains "$output" 'WARN xodus-forza.service disabled state'
     assert_contains "$output" 'WARN controller and mountmgr known-build states'
     tear_down
 
     set_up
-    export FORZA_FAKE_CONTROLLER_STATE=unknown
+    export FORZA_FAKE_PREFIX_CONTROLLER_STATE=original
+    run_doctor
+    assert_contains "$output" 'FAIL controller and mountmgr known-build states'
+    tear_down
+
+    set_up
+    export FORZA_FAKE_TOOL_MOUNTMGR_STATE=unknown
     run_doctor
     assert_contains "$output" 'FAIL controller and mountmgr known-build states'
     tear_down
@@ -408,7 +438,8 @@ run_test test_secret_service_rejects_wrong_sections_duplicates_and_untrusted_exe
 run_test test_secret_service_first_xdg_definition_shadows_lower_priority_provider
 run_test test_secret_service_accepts_valid_crlf_definition
 run_test test_secret_service_rejects_additional_structural_negatives
-run_test test_service_and_known_build_states_distinguish_pass_warn_and_fail
+run_test test_service_states_accept_only_non_enabled_runnable_units
+run_test test_per_target_known_build_states_reject_mixed_and_unknown
 run_test test_free_disk_space_has_pass_warn_and_fail_thresholds
 
 printf '%s tests run, %s failed\n' "$tests_run" "$tests_failed"

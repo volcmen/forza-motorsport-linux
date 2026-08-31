@@ -591,7 +591,8 @@ def quarantine_then_verify(
         raise
 
 
-def rollback(root_fd: int, published: Iterable[tuple[str, int, int, int, str]], transaction: str) -> None:
+def rollback(root_fd: int, published: Iterable[tuple[str, int, int, int, str]], transaction: str) -> bool:
+    complete = True
     for relative, device, inode, mode, expected_hash in reversed(tuple(published)):
         try:
             parent_fd, leaf = open_parent(root_fd, relative, create=False)
@@ -611,7 +612,9 @@ def rollback(root_fd: int, published: Iterable[tuple[str, int, int, int, str]], 
             finally:
                 os.close(parent_fd)
         except (FileNotFoundError, OSError, SecureFilesError):
+            complete = False
             print(f"warning: preserving unavailable file during rollback: {relative}", file=sys.stderr)
+    return complete
 
 
 def numeric_environment(name: str) -> int:
@@ -623,6 +626,82 @@ def numeric_environment(name: str) -> int:
     return int(value)
 
 
+def check_install(root: str, sources: dict[str, str]) -> list[str]:
+    root_fd = open_absolute_directory(root)
+    try:
+        records: dict[str, tuple[int, str]] = {}
+        lines: list[str] = []
+        for relative in PAYLOADS:
+            source = sources[relative]
+            executable = relative.startswith(".local/bin/") or "/libexec/" in relative
+            try:
+                data, mode = read_regular_absolute(source, executable=executable)
+            except (OSError, SecureFilesError) as error:
+                raise SecureFilesError(
+                    f"source prerequisite failed for {relative}: {error}\n"
+                    "ACTION: provide the complete executable Xodus build and repository sources"
+                ) from error
+            records[relative] = (mode, digest(data))
+            lines.append(f"PASS source: {relative} <- {source}")
+
+        try:
+            journal_data, _, _ = read_root_file(root_fd, JOURNAL)
+        except FileNotFoundError:
+            journal_data = None
+        if journal_data is not None:
+            parse_journal(journal_data)
+            lines.append(f"PLAN recover: {os.path.join(root, JOURNAL)}")
+            lines.extend(
+                f"PLAN revalidate then install: {os.path.join(root, relative)}"
+                for relative in PAYLOADS
+            )
+            lines.append(f"PLAN revalidate then write: {os.path.join(root, MANIFEST)}")
+            return lines
+
+        staged_manifest = manifest_bytes(records)
+        try:
+            installed_manifest, _, _ = read_root_file(root_fd, MANIFEST)
+        except FileNotFoundError:
+            installed_manifest = None
+
+        existing: list[str] = []
+        for relative in PAYLOADS:
+            try:
+                read_root_file(root_fd, relative)
+                existing.append(relative)
+            except FileNotFoundError:
+                pass
+            except (OSError, SecureFilesError) as error:
+                raise SecureFilesError(
+                    f"CONFLICT destination: {os.path.join(root, relative)} ({error})\n"
+                    "ACTION: move the conflicting file aside or restore the matching install manifest"
+                ) from error
+
+        if installed_manifest is None:
+            if existing:
+                raise SecureFilesError(
+                    f"CONFLICT destination: {os.path.join(root, existing[0])}\n"
+                    "ACTION: move the conflicting file aside or restore the matching install manifest"
+                )
+            lines.extend(
+                f"PLAN install: {os.path.join(root, relative)}" for relative in PAYLOADS
+            )
+            lines.append(f"PLAN write: {os.path.join(root, MANIFEST)}")
+            return lines
+
+        existing_records = parse_manifest(installed_manifest)
+        if installed_manifest != staged_manifest or not current_matches(root_fd, existing_records):
+            raise SecureFilesError(
+                f"CONFLICT install manifest: {os.path.join(root, MANIFEST)}\n"
+                "ACTION: restore the recorded files or uninstall before installing different content"
+            )
+        lines.extend(f"PLAN keep: {os.path.join(root, relative)}" for relative in PAYLOADS)
+        lines.append(f"PLAN keep: {os.path.join(root, MANIFEST)}")
+        return lines
+    finally:
+        os.close(root_fd)
+
+
 def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
     root_fd = open_absolute_directory(root)
     stage_fd = -1
@@ -630,6 +709,8 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
     stage_info: os.stat_result | None = None
     transaction = ""
     committed = False
+    journal_data = b""
+    journal_info: os.stat_result | None = None
     published: list[tuple[str, int, int, int, str]] = []
     try:
         recover_interrupted(root_fd)
@@ -739,14 +820,37 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
                 raise SecureFilesError("transaction journal changed before retirement")
         finally:
             os.close(journal_parent)
+        journal_info = None
     except Exception:
         if not committed:
-            rollback(root_fd, published, transaction)
+            rollback_complete = rollback(root_fd, published, transaction)
+            if journal_info is not None and rollback_complete:
+                if explicit_root and numeric_environment("FORZA_INSTALL_PAUSE_BEFORE_STAGE_RETIRE") == 1:
+                    time.sleep(0.5)
+                if retire_stage(root_fd, stage, stage_info, transaction):
+                    stage = ""
+                    journal_parent, journal_leaf = open_parent(root_fd, JOURNAL, create=False)
+                    try:
+                        if not quarantine_then_verify(
+                            journal_parent,
+                            journal_leaf,
+                            JOURNAL,
+                            0o600,
+                            digest(journal_data),
+                            (journal_info.st_dev, journal_info.st_ino),
+                            root_fd,
+                            transaction,
+                            owned_label="journal",
+                        ):
+                            raise SecureFilesError("transaction journal changed before failure retirement")
+                        journal_info = None
+                    finally:
+                        os.close(journal_parent)
         raise
     finally:
         if stage_fd >= 0:
             os.close(stage_fd)
-        if stage:
+        if stage and journal_info is None:
             if explicit_root and numeric_environment("FORZA_INSTALL_PAUSE_BEFORE_STAGE_RETIRE") == 1:
                 time.sleep(0.5)
             if not retire_stage(root_fd, stage, stage_info, transaction) and sys.exc_info()[0] is None:
@@ -829,12 +933,18 @@ def main() -> int:
     install_parser.add_argument("--root", required=True)
     install_parser.add_argument("--source", action="append", required=True)
     install_parser.add_argument("--explicit-root", action="store_true")
+    check_parser = subparsers.add_parser("check")
+    check_parser.add_argument("--root", required=True)
+    check_parser.add_argument("--source", action="append", required=True)
     uninstall_parser = subparsers.add_parser("uninstall")
     uninstall_parser.add_argument("--root", required=True)
     uninstall_parser.add_argument("--explicit-root", action="store_true")
     args = parser.parse_args()
     try:
-        if args.command == "install":
+        if args.command == "check":
+            for line in check_install(args.root, source_arguments(args.source)):
+                print(line)
+        elif args.command == "install":
             install(args.root, source_arguments(args.source), args.explicit_root)
         elif not uninstall(args.root, args.explicit_root):
             return 3

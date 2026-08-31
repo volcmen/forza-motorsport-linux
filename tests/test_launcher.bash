@@ -464,6 +464,33 @@ test_rejects_a_concurrent_launcher_without_stopping_the_owner() {
     assert_log_contains 'stop xodus-forza.service'
 }
 
+test_lock_open_preserves_a_preexisting_regular_file() {
+    local lock_path="$XDG_RUNTIME_DIR/forza-linux.lock"
+    printf 'preexisting lock contents\n' >"$lock_path"
+    run_launcher /usr/bin/true
+    assert_eq "$status" 0 || return 1
+    assert_eq "$(<"$lock_path")" 'preexisting lock contents'
+}
+
+test_lock_open_rejects_a_symlink_without_touching_its_target() {
+    local lock_path="$XDG_RUNTIME_DIR/forza-linux.lock" outside="$TEST_ROOT/outside-lock"
+    printf 'outside lock sentinel\n' >"$outside"
+    ln -s -- "$outside" "$lock_path"
+    run_launcher /usr/bin/true
+    assert_eq "$status" 1 || return 1
+    assert_eq "$(<"$outside")" 'outside lock sentinel' || return 1
+    assert_log_not_contains 'start xodus-forza.service'
+}
+
+test_lock_open_rejects_a_directory() {
+    local lock_path="$XDG_RUNTIME_DIR/forza-linux.lock"
+    mkdir -- "$lock_path"
+    run_launcher /usr/bin/true
+    assert_eq "$status" 1 || return 1
+    [[ -d $lock_path && ! -L $lock_path ]] || fail 'lock directory was changed'
+    assert_log_not_contains 'start xodus-forza.service'
+}
+
 test_restart_after_token_consumption_fails_closed() {
     local game ready release launcher_pid restart_status
     game=$(make_waiting_game)
@@ -670,6 +697,9 @@ for test_name in \
     test_refuses_empty_ownership_capture_without_stopping \
     test_consumes_a_mode_0600_token_and_removes_it_after_cleanup \
     test_rejects_a_concurrent_launcher_without_stopping_the_owner \
+    test_lock_open_preserves_a_preexisting_regular_file \
+    test_lock_open_rejects_a_symlink_without_touching_its_target \
+    test_lock_open_rejects_a_directory \
     test_restart_after_token_consumption_fails_closed \
     test_removes_a_stale_socket_before_starting \
     test_times_out_without_a_fresh_socket_within_five_seconds \

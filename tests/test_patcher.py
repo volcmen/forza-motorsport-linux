@@ -2,6 +2,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import os
 import stat
 import sys
 from dataclasses import replace
@@ -228,18 +229,16 @@ def test_apply_target_restores_verified_backup_after_post_replace_failure(
     target = tmp_path / "windows.gaming.input.dll"
     original = synthetic_original(controller_spec)
     target.write_bytes(original)
-    real_sha256 = patcher.sha256
-    target_checks = 0
+    real_replace = patcher._atomic_replace_at
+    replacements = 0
 
-    def fail_only_the_post_replace_check(path):
-        nonlocal target_checks
-        if path == target:
-            target_checks += 1
-            if target_checks == 2:
-                return "0" * 64
-        return real_sha256(path)
+    def report_wrong_identity_once(*args, **kwargs):
+        nonlocal replacements
+        identity = real_replace(*args, **kwargs)
+        replacements += 1
+        return (0, 0) if replacements == 1 else identity
 
-    monkeypatch.setattr(patcher, "sha256", fail_only_the_post_replace_check)
+    monkeypatch.setattr(patcher, "_atomic_replace_at", report_wrong_identity_once)
 
     with pytest.raises(PatchMismatch, match="patched target verification failed"):
         apply_target(target, controller_spec, tmp_path / "backups")
@@ -313,6 +312,84 @@ def test_backup_name_collision_never_overwrites_existing_backup(
 
     assert collisions[0].read_bytes() == b"concurrent backup"
     assert result.backup != collisions[0]
+
+
+def test_apply_target_restores_concurrent_unknown_replacement(
+    tmp_path, controller_spec
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    target.write_bytes(synthetic_original(controller_spec))
+    replacement = tmp_path / "concurrent-replacement"
+    replacement.write_bytes(b"concurrent unknown target")
+
+    def replace_after_backup(_entry):
+        os.replace(replacement, target)
+
+    with pytest.raises(patcher.PatcherError, match="changed during publication"):
+        apply_target(
+            target,
+            controller_spec,
+            tmp_path / "backups",
+            on_backup=replace_after_backup,
+        )
+
+    assert target.read_bytes() == b"concurrent unknown target"
+    backups = list((tmp_path / "backups").iterdir())
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == synthetic_original(controller_spec)
+
+
+@pytest.mark.parametrize("tool_name", ("GE-Proton11-3-FM", "OtherTool"))
+def test_apply_forza_rejects_backup_root_inside_any_compatibility_tool(
+    tmp_path, synthetic_specs, tool_name
+):
+    populate_forza_root(tmp_path, synthetic_specs)
+    targets = resolve_forza_targets(tmp_path)
+    backup_root = tmp_path / "compatibilitytools.d" / tool_name / "backups"
+
+    with pytest.raises(patcher.PatcherError, match="outside compatibilitytools.d"):
+        apply_forza(tmp_path, synthetic_specs, backup_root)
+
+    assert all(
+        inspect_target(target, synthetic_specs[target.name]) is PatchState.ORIGINAL
+        for target in targets
+    )
+    assert not backup_root.exists()
+
+
+def test_apply_target_rejects_backup_root_inside_unrelated_compatibility_tool(
+    tmp_path, controller_spec
+):
+    target = tmp_path / "prefix" / "windows.gaming.input.dll"
+    target.parent.mkdir()
+    target.write_bytes(synthetic_original(controller_spec))
+    backup_root = tmp_path / "compatibilitytools.d" / "OtherTool" / "backups"
+
+    with pytest.raises(patcher.PatcherError, match="outside compatibilitytools.d"):
+        apply_target(target, controller_spec, backup_root)
+
+    assert target.read_bytes() == synthetic_original(controller_spec)
+    assert not backup_root.exists()
+
+
+def test_apply_forza_rejects_backup_root_symlinked_into_compatibility_tools(
+    tmp_path, synthetic_specs
+):
+    populate_forza_root(tmp_path, synthetic_specs)
+    targets = resolve_forza_targets(tmp_path)
+    inside = tmp_path / "compatibilitytools.d" / "OtherTool"
+    inside.mkdir()
+    alias = tmp_path / "backup-alias"
+    alias.symlink_to(inside, target_is_directory=True)
+
+    with pytest.raises(patcher.PatcherError, match="outside compatibilitytools.d"):
+        apply_forza(tmp_path, synthetic_specs, alias / "backups")
+
+    assert all(
+        inspect_target(target, synthetic_specs[target.name]) is PatchState.ORIGINAL
+        for target in targets
+    )
+    assert not (inside / "backups").exists()
 
 
 @pytest.mark.parametrize("mutation", ("incomplete", "duplicate"))
@@ -397,14 +474,14 @@ def test_apply_forza_rolls_back_only_published_targets_after_pre_replace_failure
     populate_forza_root(tmp_path, synthetic_specs)
     targets = resolve_forza_targets(tmp_path)
     backup_root = tmp_path / "backups"
-    real_replace = patcher._atomic_replace
+    real_replace = patcher._atomic_replace_at
 
-    def fail_second_target(path, data, mode):
+    def fail_second_target(parent_fd, leaf, path, *args):
         if path == targets[1]:
             raise OSError("target two replace failure")
-        return real_replace(path, data, mode)
+        return real_replace(parent_fd, leaf, path, *args)
 
-    monkeypatch.setattr(patcher, "_atomic_replace", fail_second_target)
+    monkeypatch.setattr(patcher, "_atomic_replace_at", fail_second_target)
 
     with pytest.raises(OSError, match="target two replace failure"):
         apply_forza(tmp_path, synthetic_specs, backup_root)

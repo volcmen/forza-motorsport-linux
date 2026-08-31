@@ -7,9 +7,10 @@ HELPER="$ROOT/scripts/secure-user-files"
 install_root=${FORZA_INSTALL_ROOT:-}
 xodus_build=
 explicit_root=0
+check_only=0
 
 usage() {
-    printf '%s\n' "usage: $0 [--root PATH] --xodus-build-dir PATH" >&2
+    printf '%s\n' "usage: $0 [--check] [--root PATH] --xodus-build-dir PATH" >&2
     exit 64
 }
 
@@ -26,6 +27,10 @@ while (($#)); do
             xodus_build=$2
             shift 2
             ;;
+        --check)
+            check_only=1
+            shift
+            ;;
         --help) usage ;;
         *) usage ;;
     esac
@@ -38,9 +43,7 @@ done
     exit 1
 }
 
-arguments=(install --root "$install_root")
-((explicit_root)) && arguments+=(--explicit-root)
-arguments+=(
+source_arguments=(
     --source ".local/bin/forza-linux=$ROOT/bin/forza-linux"
     --source ".local/bin/forza-doctor=$ROOT/bin/forza-doctor"
     --source ".local/libexec/forza-motorsport-linux/patch-known-build=$ROOT/scripts/patch-known-build"
@@ -51,6 +54,19 @@ arguments+=(
     --source ".config/systemd/user/xodus-forza.service=$ROOT/config/xodus-forza.service"
 )
 
+if ! command -v systemctl >/dev/null 2>&1; then
+    printf '%s\n' 'FAIL dependency: systemctl is unavailable' >&2
+    printf '%s\n' 'ACTION: install systemd user tools before installing' >&2
+    exit 1
+fi
+printf '%s\n' 'PASS dependency: systemctl is available'
+"$HELPER" check --root "$install_root" "${source_arguments[@]}" || exit $?
+printf '%s\n' 'PLAN reload: systemctl --user daemon-reload'
+((check_only)) && exit 0
+
+arguments=(install --root "$install_root")
+((explicit_root)) && arguments+=(--explicit-root)
+arguments+=("${source_arguments[@]}")
 "$HELPER" "${arguments[@]}" || exit $?
 systemctl --user daemon-reload || {
     printf '%s\n' 'error: cannot reload user systemd daemon' >&2

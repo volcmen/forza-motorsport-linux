@@ -93,11 +93,55 @@ if [[ -z $runtime_dir ]]; then
 fi
 
 umask 0077
-exec {coordinator_fd}>"$runtime_dir/forza-linux.lock"
-if ! flock -n "$coordinator_fd"; then
-    printf 'error: another Forza launcher is already running\n' >&2
-    exit 1
+lock_path="$runtime_dir/forza-linux.lock"
+if [[ ${FORZA_LOCK_BOOTSTRAP_PID:-} != "$$" || ${FORZA_LOCK_FD:-} != 9 ]]; then
+    exec python3 -c '
+import fcntl
+import os
+import stat
+import sys
+
+launcher = os.path.abspath(sys.argv[1])
+lock_path = sys.argv[2]
+try:
+    descriptor = os.open(
+        lock_path,
+        os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+    )
+except OSError as error:
+    print(f"error: cannot open safe Forza launcher lock: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+info = os.fstat(descriptor)
+if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+    os.close(descriptor)
+    print("error: Forza launcher lock must be a current-user regular file", file=sys.stderr)
+    raise SystemExit(1)
+try:
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    os.close(descriptor)
+    print("error: another Forza launcher is already running", file=sys.stderr)
+    raise SystemExit(1)
+except OSError as error:
+    os.close(descriptor)
+    print(f"error: cannot lock Forza launcher coordinator: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+if descriptor != 9:
+    os.dup2(descriptor, 9, inheritable=True)
+    os.close(descriptor)
+else:
+    os.set_inheritable(descriptor, True)
+environment = os.environ.copy()
+environment["FORZA_LOCK_BOOTSTRAP_PID"] = str(os.getpid())
+environment["FORZA_LOCK_FD"] = "9"
+os.execve(launcher, [launcher, *sys.argv[3:]], environment)
+' "$0" "$lock_path" "$@"
 fi
+coordinator_fd=$FORZA_LOCK_FD
+unset FORZA_LOCK_BOOTSTRAP_PID FORZA_LOCK_FD
 
 if [[ -n ${PAM_KWALLET5_LOGIN:-} && -S ${PAM_KWALLET5_LOGIN} ]]; then
     "$systemctl_bin" --user start plasma-kwallet-pam.service || true

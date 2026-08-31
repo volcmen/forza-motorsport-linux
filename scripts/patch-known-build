@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
+import secrets
 import stat
 import sys
 import tempfile
@@ -20,6 +23,21 @@ from pathlib import Path, PurePosixPath
 APP_ID = "2440510"
 COMPATIBILITY_TOOL = "GE-Proton11-3-FM"
 DEFAULT_MANIFEST = Path(__file__).parents[1] / "manifests" / "supported-builds.toml"
+DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+RENAME_NOREPLACE = 1
+RENAME_EXCHANGE = 2
+TOKEN_BYTES = 12
+LIBC = ctypes.CDLL(None, use_errno=True)
+RENAMEAT2 = getattr(LIBC, "renameat2", None)
+if RENAMEAT2 is not None:
+    RENAMEAT2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    RENAMEAT2.restype = ctypes.c_int
 
 
 class PatcherError(RuntimeError):
@@ -99,13 +117,68 @@ class RollbackEntry:
     active: bool = True
 
 
+def _absolute_lexical(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _open_parent_nofollow(path: Path) -> tuple[int, str]:
+    absolute = _absolute_lexical(path)
+    parts = absolute.parts
+    if len(parts) < 2:
+        raise PatcherError(f"target path has no basename: {path}")
+    descriptor = os.open("/", DIRECTORY)
+    try:
+        for part in parts[1:-1]:
+            next_descriptor = os.open(part, DIRECTORY, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor, parts[-1]
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _read_regular_at(
+    parent_fd: int, leaf: str, label: str
+) -> tuple[bytes, int, os.stat_result]:
+    try:
+        descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except FileNotFoundError as error:
+        raise TargetMissing(f"{label} does not exist: {leaf}") from error
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise PatcherError(f"{label} path contains a symlink or non-directory: {leaf}") from error
+        raise
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise PatcherError(f"{label} is not a regular file: {leaf}")
+        chunks: list[bytes] = []
+        while block := os.read(descriptor, 1024 * 1024):
+            chunks.append(block)
+        return b"".join(chunks), stat.S_IMODE(info.st_mode), info
+    finally:
+        os.close(descriptor)
+
+
+def _read_regular_path(path: Path, label: str) -> tuple[bytes, int, os.stat_result]:
+    try:
+        parent_fd, leaf = _open_parent_nofollow(path)
+    except FileNotFoundError as error:
+        raise TargetMissing(f"{label} does not exist: {path}") from error
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise PatcherError(f"{label} path contains a symlink or non-directory: {path}") from error
+        raise
+    try:
+        return _read_regular_at(parent_fd, leaf, label)
+    finally:
+        os.close(parent_fd)
+
+
 def sha256(path: Path) -> str:
-    _require_regular_file(path, "target")
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    data, _, _ = _read_regular_path(path, "target")
+    return hashlib.sha256(data).hexdigest()
 
 
 def inspect_target(path: Path, spec: PatchSpec) -> PatchState:
@@ -161,60 +234,102 @@ def apply_target(
     backup_root: Path,
     on_backup: Callable[[RollbackEntry], None] | None = None,
 ) -> PatchResult:
-    if inspect_target(path, spec) is not PatchState.ORIGINAL:
-        raise UnknownBuild(f"target is not the reviewed original build: {path}")
-
-    original = path.read_bytes()
-    before = hashlib.sha256(original).hexdigest()
-    if before != spec.original_sha256:
-        raise UnknownBuild(f"target changed during validation: {path}")
-    patched = _apply_edits(original, spec)
-    if hashlib.sha256(patched).hexdigest() != spec.patched_sha256:
-        raise PatchMismatch(f"patch result does not match reviewed digest: {path}")
-
-    mode = stat.S_IMODE(path.stat().st_mode)
-    backup_root.mkdir(parents=True, exist_ok=True)
-    backup = _write_exclusive_backup(
-        backup_root, path.name, spec.original_sha256, original, mode
-    )
-    if sha256(backup) != spec.original_sha256:
-        raise PatchMismatch(f"backup verification failed: {backup}")
-    rollback = RollbackEntry(path, backup, spec, mode)
-    if on_backup is not None:
-        on_backup(rollback)
     try:
-        _atomic_replace(path, patched, mode)
-        after = sha256(path)
-        if after != spec.patched_sha256:
-            raise PatchMismatch(f"patched target verification failed: {path}")
-    except Exception as primary:
+        parent_fd, leaf = _open_parent_nofollow(path)
+    except FileNotFoundError as error:
+        raise TargetMissing(f"target does not exist: {path}") from error
+    try:
+        original, mode, target_info = _read_regular_at(parent_fd, leaf, "target")
+        before = hashlib.sha256(original).hexdigest()
+        if before != spec.original_sha256:
+            raise UnknownBuild(f"target is not the reviewed original build: {path}")
+        patched = _apply_edits(original, spec)
+        if hashlib.sha256(patched).hexdigest() != spec.patched_sha256:
+            raise PatchMismatch(f"patch result does not match reviewed digest: {path}")
+
+        _validate_backup_root_for_target(path, backup_root)
+        backup_root.mkdir(parents=True, exist_ok=True)
+        backup = _write_exclusive_backup(
+            backup_root, path.name, spec.original_sha256, original, mode
+        )
+        if sha256(backup) != spec.original_sha256:
+            raise PatchMismatch(f"backup verification failed: {backup}")
+        rollback = RollbackEntry(path, backup, spec, mode, active=False)
+        if on_backup is not None:
+            on_backup(rollback)
+        rollback.active = True
         try:
-            _rollback_entries((rollback,))
-        except RollbackError as rollback_error:
-            raise TransactionError(primary, rollback_error) from primary
-        raise
-    return PatchResult(before=before, after=after, backup=backup)
+            published_identity = _atomic_replace_at(
+                parent_fd,
+                leaf,
+                path,
+                patched,
+                mode,
+                (target_info.st_dev, target_info.st_ino),
+                spec.original_sha256,
+            )
+            final, final_mode, final_info = _read_regular_at(parent_fd, leaf, "target")
+            after = hashlib.sha256(final).hexdigest()
+            if (
+                (final_info.st_dev, final_info.st_ino) != published_identity
+                or final_mode != mode
+                or after != spec.patched_sha256
+            ):
+                raise PatchMismatch(f"patched target verification failed: {path}")
+        except Exception as primary:
+            try:
+                state = inspect_target(path, spec)
+            except (OSError, PatcherError):
+                state = None
+            if state in {PatchState.ORIGINAL, PatchState.UNKNOWN}:
+                rollback.active = False
+            if rollback.active:
+                try:
+                    _rollback_entries((rollback,))
+                except RollbackError as rollback_error:
+                    raise TransactionError(primary, rollback_error) from primary
+            raise
+        return PatchResult(before=before, after=after, backup=backup)
+    finally:
+        os.close(parent_fd)
 
 
 def restore_target(path: Path, backup: Path, spec: PatchSpec) -> PatchResult:
-    if inspect_target(path, spec) is not PatchState.PATCHED:
-        raise UnknownBuild(f"target is not the reviewed patched build: {path}")
-    _require_regular_file(backup, "backup")
-    before = sha256(path)
-    original = backup.read_bytes()
-    if hashlib.sha256(original).hexdigest() != spec.original_sha256:
-        raise UnknownBuild(f"backup is not the reviewed original build: {backup}")
-
-    _atomic_replace(path, original, stat.S_IMODE(path.stat().st_mode))
-    after = sha256(path)
-    if after != spec.original_sha256:
-        raise PatchMismatch(f"restored target verification failed: {path}")
-    return PatchResult(before=before, after=after, backup=backup)
+    parent_fd, leaf = _open_parent_nofollow(path)
+    try:
+        current, mode, target_info = _read_regular_at(parent_fd, leaf, "target")
+        before = hashlib.sha256(current).hexdigest()
+        if before != spec.patched_sha256:
+            raise UnknownBuild(f"target is not the reviewed patched build: {path}")
+        original, _, _ = _read_regular_path(backup, "backup")
+        if hashlib.sha256(original).hexdigest() != spec.original_sha256:
+            raise UnknownBuild(f"backup is not the reviewed original build: {backup}")
+        restored_identity = _atomic_replace_at(
+            parent_fd,
+            leaf,
+            path,
+            original,
+            mode,
+            (target_info.st_dev, target_info.st_ino),
+            spec.patched_sha256,
+        )
+        restored, restored_mode, restored_info = _read_regular_at(parent_fd, leaf, "target")
+        after = hashlib.sha256(restored).hexdigest()
+        if (
+            (restored_info.st_dev, restored_info.st_ino) != restored_identity
+            or restored_mode != mode
+            or after != spec.original_sha256
+        ):
+            raise PatchMismatch(f"restored target verification failed: {path}")
+        return PatchResult(before=before, after=after, backup=backup)
+    finally:
+        os.close(parent_fd)
 
 
 def apply_forza(
     steam_root: Path, specs: Mapping[str, PatchSpec], backup_root: Path
 ) -> ForzaPatchResult:
+    _validate_backup_root(steam_root / "compatibilitytools.d", backup_root)
     targets = resolve_forza_targets(steam_root)
     pairs = [(target, _spec_for_target(target, specs)) for target in targets]
     states = [(target, spec, inspect_target(target, spec)) for target, spec in pairs]
@@ -316,35 +431,173 @@ def _apply_edits(original: bytes, spec: PatchSpec) -> bytes:
 
 
 def _require_regular_file(path: Path, label: str) -> None:
-    if not path.exists():
-        raise TargetMissing(f"{label} does not exist: {path}")
-    if path.is_symlink() or not path.is_file():
-        raise PatcherError(f"{label} is not a regular file: {path}")
+    _read_regular_path(path, label)
 
 
-def _atomic_replace(path: Path, data: bytes, mode: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
+def _renameat2(
+    source_fd: int,
+    source: str,
+    destination_fd: int,
+    destination: str,
+    flags: int,
+) -> None:
+    if RENAMEAT2 is None:
+        raise PatcherError("renameat2 is unavailable")
+    result = RENAMEAT2(
+        source_fd,
+        os.fsencode(source),
+        destination_fd,
+        os.fsencode(destination),
+        flags,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.ENOSYS, errno.EINVAL}:
+        raise PatcherError("required renameat2 operation is unavailable")
+    raise OSError(error_number, os.strerror(error_number), destination)
+
+
+def _random_name(parent_fd: int, leaf: str, data: bytes, mode: int) -> tuple[str, tuple[int, int]]:
+    for _ in range(100):
+        temporary = f".{leaf}.forza-{secrets.token_hex(TOKEN_BYTES)}"
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                mode,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            continue
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(descriptor, view)
+                view = view[written:]
+            os.fchmod(descriptor, mode)
+            os.fsync(descriptor)
+            info = os.fstat(descriptor)
+            return temporary, (info.st_dev, info.st_ino)
+        except Exception:
+            try:
+                os.unlink(temporary, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            raise
+        finally:
+            os.close(descriptor)
+    raise PatcherError("could not reserve a target staging name")
+
+
+def _restore_displaced_after_conflict(
+    parent_fd: int,
+    leaf: str,
+    displaced: str,
+    published_identity: tuple[int, int],
+) -> bool:
+    quarantine = f".{leaf}.forza-published-{secrets.token_hex(TOKEN_BYTES)}"
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fchmod(stream.fileno(), mode)
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
+        _renameat2(parent_fd, leaf, parent_fd, quarantine, RENAME_NOREPLACE)
+    except FileNotFoundError:
+        quarantine = ""
+    if quarantine:
+        _, _, current_info = _read_regular_at(parent_fd, quarantine, "published target")
+        if (current_info.st_dev, current_info.st_ino) != published_identity:
+            try:
+                _renameat2(parent_fd, quarantine, parent_fd, leaf, RENAME_NOREPLACE)
+            except OSError as error:
+                if error.errno != errno.EEXIST:
+                    raise
+            return False
+    try:
+        _renameat2(parent_fd, displaced, parent_fd, leaf, RENAME_NOREPLACE)
+    except OSError as error:
+        if error.errno != errno.EEXIST:
+            raise
+        return False
+    if quarantine:
+        _, _, patched_info = _read_regular_at(parent_fd, quarantine, "published target")
+        if (patched_info.st_dev, patched_info.st_ino) == published_identity:
+            os.unlink(quarantine, dir_fd=parent_fd)
+    os.fsync(parent_fd)
+    return True
+
+
+def _atomic_replace_at(
+    parent_fd: int,
+    leaf: str,
+    display_path: Path,
+    data: bytes,
+    mode: int,
+    expected_identity: tuple[int, int],
+    expected_hash: str,
+) -> tuple[int, int]:
+    temporary, published_identity = _random_name(parent_fd, leaf, data, mode)
+    exchanged = False
+    try:
+        _renameat2(parent_fd, temporary, parent_fd, leaf, RENAME_EXCHANGE)
+        exchanged = True
+        os.fsync(parent_fd)
+        displaced, displaced_mode, displaced_info = _read_regular_at(
+            parent_fd, temporary, "displaced target"
+        )
+        if (
+            (displaced_info.st_dev, displaced_info.st_ino) != expected_identity
+            or displaced_mode != mode
+            or hashlib.sha256(displaced).hexdigest() != expected_hash
+        ):
+            restored = _restore_displaced_after_conflict(
+                parent_fd, leaf, temporary, published_identity
+            )
+            exchanged = False
+            if not restored:
+                temporary = ""
+            raise UnknownBuild(f"target changed during publication: {display_path}")
+        os.unlink(temporary, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        exchanged = False
+        return published_identity
+    finally:
+        if not exchanged and temporary:
+            try:
+                os.unlink(temporary, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
 
 
 def _fsync_directory(directory: Path) -> None:
-    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    descriptor = os.open(directory, DIRECTORY)
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _resolved_for_scope(path: Path) -> Path:
+    try:
+        return _absolute_lexical(path).resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise PatcherError(f"cannot resolve path safely: {path}") from error
+
+
+def _validate_backup_root(compatibility_tools_root: Path, backup_root: Path) -> None:
+    compatibility_tools = _resolved_for_scope(compatibility_tools_root)
+    backup = _resolved_for_scope(backup_root)
+    if backup == compatibility_tools or compatibility_tools in backup.parents:
+        raise PatcherError("backup root must resolve outside compatibilitytools.d")
+
+
+def _validate_backup_root_for_target(path: Path, backup_root: Path) -> None:
+    if "compatibilitytools.d" in _resolved_for_scope(backup_root).parts:
+        raise PatcherError("backup root must resolve outside compatibilitytools.d")
+    absolute = _absolute_lexical(path)
+    try:
+        marker = absolute.parts.index("compatibilitytools.d")
+    except ValueError:
+        return
+    compatibility_tools = Path(*absolute.parts[: marker + 1])
+    _validate_backup_root(compatibility_tools, backup_root)
 
 
 def _atomic_create_new(path: Path, data: bytes, mode: int) -> None:

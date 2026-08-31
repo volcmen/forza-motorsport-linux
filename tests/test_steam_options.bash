@@ -39,15 +39,15 @@ tear_down() {
 
 test_options_use_runtime_uid_and_installed_launcher_path() {
     set_up
-    local output uid
+    local output uid quoted_launcher expected
     uid=$(id -u)
     output=$("$GENERATOR")
+    printf -v quoted_launcher '%q' "$TEST_ROOT/.local/bin/forza-linux"
+    expected="WINEDLLOVERRIDES=xgameruntime=b PROTON_VKD3D_HEAP=1 VKD3D_CONFIG=skip_application_workarounds,descriptor_heap,avoid_image_buffer_aliasing PRESSURE_VESSEL_FILESYSTEMS_RW=/run/user/$uid/xodus.sock $quoted_launcher %command%"
     assert_eq "$(printf '%s\n' "$output" | wc -l)" 1
-    assert_contains "$output" "PRESSURE_VESSEL_FILESYSTEMS_RW=/run/user/$uid/xodus.sock"
-    assert_contains "$output" 'WINEDLLOVERRIDES=xgameruntime=b'
-    assert_contains "$output" '%command%'
-    assert_contains "$output" '.local/bin/forza-linux'
+    assert_eq "$output" "$expected"
     assert_not_contains "$output" 'PROTON_DISABLE_HIDRAW'
+    assert_not_contains "$output" 'PROTON_ENABLE_WAYLAND'
     assert_not_contains "$output" 'SkipTargetHardwareProfiler'
     tear_down
 }

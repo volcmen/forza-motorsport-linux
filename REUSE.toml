@@ -4,6 +4,18 @@ SPDX-PackageSupplier = "volcmen"
 SPDX-PackageDownloadLocation = "NOASSERTION"
 
 [[annotations]]
-path = ["README.md", "justfile", "pyproject.toml", ".gitignore", "tests/**"]
+path = [
+    ".github/**",
+    ".gitignore",
+    "README.md",
+    "bin/**",
+    "config/**",
+    "docs/**",
+    "justfile",
+    "manifests/**",
+    "pyproject.toml",
+    "scripts/**",
+    "tests/**",
+]
 SPDX-FileCopyrightText = "2026 volcmen"
 SPDX-License-Identifier = "GPL-3.0-or-later"

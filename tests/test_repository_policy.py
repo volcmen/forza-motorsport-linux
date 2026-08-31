@@ -37,7 +37,6 @@ def test_repository_policy_rejects_renamed_pe_binary(tmp_path):
 
 def test_declared_licenses_exist():
     assert (ROOT / "LICENSES/GPL-3.0-or-later.txt").is_file()
-    assert (ROOT / "LICENSES/LGPL-2.1-or-later.txt").is_file()
 
 
 def test_readme_names_supported_and_unsupported_boundaries():
@@ -56,9 +55,36 @@ def test_readme_names_supported_and_unsupported_boundaries():
 def test_verify_workflow_installs_just_before_running_the_gate():
     workflow = (ROOT / ".github/workflows/verify.yml").read_text()
     setup = "uses: extractions/setup-just@v3"
+    python_tools = "uv sync --group dev"
     gate = "run: just verify"
     assert setup in workflow
+    assert python_tools in workflow
     assert workflow.index(setup) < workflow.index(gate)
+    assert workflow.index(python_tools) < workflow.index(gate)
+
+
+def test_verify_gate_runs_every_behavior_and_format_suite():
+    gate = subprocess.run(
+        ["just", "--dry-run", "verify"],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    ).stdout
+    required = [
+        "bash tests/test_launcher.bash",
+        "bash tests/test_doctor.bash",
+        "bash tests/test_steam_options.bash",
+        "bash tests/test_installation.bash",
+        "systemd-analyze --user verify config/xodus-forza.service",
+        "shellcheck",
+        "shfmt",
+        "uv run ruff check",
+        "uv run reuse lint",
+        "git diff --check",
+    ]
+    assert all(command in gate for command in required)
 
 
 def test_readme_documents_source_provenance_and_required_runtime_placement():

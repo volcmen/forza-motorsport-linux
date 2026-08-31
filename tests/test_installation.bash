@@ -29,6 +29,7 @@ fail() {
     return 1
 }
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected [$2], got [$1]"; }
+assert_contains() { [[ "$1" == *"$2"* ]] || fail "expected [$1] to contain [$2]"; }
 assert_file_exists() { [[ -f $1 && ! -L $1 ]] || fail "regular file missing [$1]"; }
 assert_path_absent() { [[ ! -e $1 && ! -L $1 ]] || fail "path unexpectedly exists [$1]"; }
 assert_command_fails() {
@@ -84,6 +85,10 @@ tear_down() {
 
 run_install() {
     PATH="$FAKE_BIN:$PATH" FORZA_INSTALL_ROOT="$FAKE_ROOT" "$INSTALL" --root "$FAKE_ROOT" --xodus-build-dir "$XODUS_BUILD"
+}
+
+run_check() {
+    PATH="$FAKE_BIN:$PATH" FORZA_INSTALL_ROOT="$FAKE_ROOT" "$INSTALL" --check --root "$FAKE_ROOT" --xodus-build-dir "$XODUS_BUILD"
 }
 
 run_uninstall() {
@@ -146,6 +151,75 @@ test_round_trip_touches_only_manifested_paths() {
     assert_file_exists "$FAKE_ROOT/keep-me" || return 1
     assert_path_absent "$ESCAPE_SENTINEL" || return 1
     assert_log_is_daemon_reload_only
+    tear_down
+}
+
+test_check_is_read_only_and_reports_the_exact_install_plan() {
+    set_up
+    local before after output relative
+    before=$(snapshot_directory "$FAKE_ROOT")
+    output=$(run_check) || return 1
+    after=$(snapshot_directory "$FAKE_ROOT")
+    assert_eq "$after" "$before" || return 1
+    [[ ! -s $SYSTEMCTL_LOG ]] || fail '--check invoked systemctl'
+    assert_contains "$output" 'PASS dependency: systemctl is available' || return 1
+    for relative in "${INSTALLED_RELATIVE_PATHS[@]}"; do
+        assert_contains "$output" "PASS source: $relative" || return 1
+        assert_contains "$output" "PLAN install: $FAKE_ROOT/$relative" || return 1
+    done
+    assert_contains "$output" "PLAN write: $(manifest_path)" || return 1
+    assert_contains "$output" 'PLAN reload: systemctl --user daemon-reload'
+    tear_down
+}
+
+test_check_reports_destination_conflict_and_action_without_mutation() {
+    set_up
+    local conflict="$FAKE_ROOT/.local/bin/forza-linux" before after output
+    mkdir -p -- "${conflict%/*}"
+    printf 'user file\n' >"$conflict"
+    before=$(snapshot_directory "$FAKE_ROOT")
+    if output=$(run_check 2>&1); then
+        fail '--check accepted a conflicting destination'
+    fi
+    after=$(snapshot_directory "$FAKE_ROOT")
+    assert_eq "$after" "$before" || return 1
+    [[ ! -s $SYSTEMCTL_LOG ]] || fail '--check invoked systemctl'
+    assert_contains "$output" "CONFLICT destination: $conflict" || return 1
+    assert_contains "$output" 'ACTION: move the conflicting file aside or restore the matching install manifest'
+    tear_down
+}
+
+test_normal_install_prints_the_plan_before_staging_mutation() {
+    set_up
+    local output_file="$WORK_ROOT/install-output" installer_pid stage_seen=0 relative
+    (
+        PATH="$FAKE_BIN:$PATH" FORZA_INSTALL_ROOT="$FAKE_ROOT" \
+            FORZA_INSTALL_PAUSE_BEFORE_PUBLISH=1 \
+            "$INSTALL" --root "$FAKE_ROOT" --xodus-build-dir "$XODUS_BUILD" >"$output_file" 2>&1
+    ) &
+    installer_pid=$!
+    for _ in {1..100}; do
+        for relative in "$FAKE_ROOT"/.forza-install-*; do
+            [[ -d $relative && ! -L $relative ]] || continue
+            stage_seen=1
+            break 2
+        done
+        sleep 0.01
+    done
+    ((stage_seen)) || {
+        wait "$installer_pid" || true
+        fail 'installer never created its staging directory'
+        return 1
+    }
+    for relative in "${INSTALLED_RELATIVE_PATHS[@]}"; do
+        rg -F -- "PLAN install: $FAKE_ROOT/$relative" "$output_file" >/dev/null || {
+            wait "$installer_pid" || true
+            fail "plan was not printed before staging: $relative"
+            return 1
+        }
+    done
+    wait "$installer_pid" || return 1
+    assert_installed_files_match_manifest
     tear_down
 }
 
@@ -247,6 +321,28 @@ test_mid_publish_failure_rolls_back_all_new_files() {
     assert_manifested_files_absent || return 1
     assert_file_exists "$FAKE_ROOT/keep-me" || return 1
     assert_path_absent "$ESCAPE_SENTINEL"
+    tear_down
+}
+
+test_caught_mid_publish_failure_allows_immediate_retry() {
+    set_up
+    export FORZA_INSTALL_FAIL_AFTER_PUBLISH=3
+    assert_command_fails run_install || return 1
+    unset FORZA_INSTALL_FAIL_AFTER_PUBLISH
+    run_install || return 1
+    assert_installed_files_match_manifest || return 1
+    assert_path_absent "$(journal_path)"
+    tear_down
+}
+
+test_caught_pre_manifest_failure_allows_immediate_retry() {
+    set_up
+    export FORZA_INSTALL_FAIL_BEFORE_MANIFEST=1
+    assert_command_fails run_install || return 1
+    unset FORZA_INSTALL_FAIL_BEFORE_MANIFEST
+    run_install || return 1
+    assert_installed_files_match_manifest || return 1
+    assert_path_absent "$(journal_path)"
     tear_down
 }
 
@@ -683,6 +779,9 @@ run_test() {
 }
 
 run_test test_round_trip_touches_only_manifested_paths
+run_test test_check_is_read_only_and_reports_the_exact_install_plan
+run_test test_check_reports_destination_conflict_and_action_without_mutation
+run_test test_normal_install_prints_the_plan_before_staging_mutation
 run_test test_identical_reinstall_keeps_bytes_and_manifest_stable
 run_test test_fresh_identical_destination_is_rejected_without_a_manifest
 run_test test_fresh_install_requires_complete_xodus_build
@@ -691,6 +790,8 @@ run_test test_xodus_build_rejects_an_ancestor_symlink
 run_test test_root_ancestor_symlink_is_rejected_without_outside_write
 run_test test_conflicting_existing_file_is_preserved
 run_test test_mid_publish_failure_rolls_back_all_new_files
+run_test test_caught_mid_publish_failure_allows_immediate_retry
+run_test test_caught_pre_manifest_failure_allows_immediate_retry
 run_test test_rollback_retires_owned_payloads_to_recovery
 run_test test_crash_after_publish_recovers_journal_before_next_install
 run_test test_crash_after_manifest_preserves_commit_and_retires_journal

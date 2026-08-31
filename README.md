@@ -41,9 +41,10 @@ From a checkout, run:
 
 ```bash
 bin/forza-doctor
+scripts/install-user --check --xodus-build-dir /absolute/path/to/xodus-build
 ```
 
-It exits nonzero for missing prerequisites and prints `PASS`, `WARN`, and `FAIL`. Before installation, a missing installed patcher or manifest is expected. KDE Wallet is checked through the D-Bus **Secret Service** interface (`org.freedesktop.secrets`): an existing owner or activatable KDE provider is accepted. Do not install or substitute GNOME Keyring for this workflow.
+Both commands are read-only. The install check validates every source artifact and destination, reports conflicts with corrective actions, and prints the exact install plan without creating directories, copying files, writing a journal, or invoking systemd. The doctor exits nonzero for missing prerequisites and prints `PASS`, `WARN`, and `FAIL`. It accepts only `disabled` and `static` unit states; mixed or unknown patch states fail. Before installation, a missing installed patcher or manifest is expected. KDE Wallet is checked through the D-Bus **Secret Service** interface (`org.freedesktop.secrets`): an existing owner or activatable KDE provider is accepted. Do not install or substitute GNOME Keyring for this workflow.
 
 ## User-local install
 
@@ -53,7 +54,7 @@ Pass an absolute path to your own Xodus build directory:
 scripts/install-user --xodus-build-dir /absolute/path/to/xodus-build
 ```
 
-The installer writes only the launcher and doctor under `~/.local/bin`, Xodus and the patcher under `~/.local/libexec`, the build manifest under `~/.local/share`, and the user unit under `~/.config/systemd/user`. It reloads the user systemd daemon but does not start or enable the service. Re-run `~/.local/bin/forza-doctor` afterwards.
+The installer prints every destination and action before its first mutation. It writes only the launcher and doctor under `~/.local/bin`, Xodus and the patcher under `~/.local/libexec`, the build manifest under `~/.local/share`, and the user unit under `~/.config/systemd/user`. It reloads the user systemd daemon but does not start or enable the service. Re-run `~/.local/bin/forza-doctor` afterwards.
 
 ## Steam configuration
 
@@ -63,7 +64,7 @@ Generate the single Steam launch-options line from the checkout:
 scripts/print-steam-options
 ```
 
-Paste its output into Forza Motorsport's Steam launch options. It uses the installed `~/.local/bin/forza-linux`, the current user's Xodus socket path, and `WINEDLLOVERRIDES=xgameruntime=b`. It does not edit Steam files. Do not add unrelated Proton flags: this integration is not a collection of generic Proton flags.
+Paste its output into Forza Motorsport's Steam launch options. It emits the approved ordered baseline: `WINEDLLOVERRIDES=xgameruntime=b`, `PROTON_VKD3D_HEAP=1`, `VKD3D_CONFIG=skip_application_workarounds,descriptor_heap,avoid_image_buffer_aliasing`, the current user's Xodus socket path, and the shell-quoted installed launcher before literal `%command%`. It does not edit Steam files. Do not add `PROTON_DISABLE_HIDRAW`, `PROTON_ENABLE_WAYLAND`, `-SkipTargetHardwareProfiler`, or unrelated Proton flags.
 
 ## Known-build patch fallback
 
@@ -81,7 +82,7 @@ backup_root="$HOME/.local/state/forza-motorsport-linux/patch-backups"
 "$patcher" apply-forza --manifest "$manifest" --steam-root "$steam_root" --backup-root "$backup_root"
 ```
 
-The patcher preflights all four in-scope targets before writing, creates verified user-owned backups, and records a backup manifest. Restore only with that manifest:
+The patcher preflights all four in-scope targets before writing, creates verified user-owned backups outside every compatibility-tool directory, and records a backup manifest. Publication is bound to the validated inode and digest through held no-follow directory descriptors; a concurrent unknown replacement is restored or preserved rather than overwritten. Restore only with that manifest:
 
 ```bash
 "$patcher" restore-forza --manifest "$manifest" --steam-root "$steam_root" --backup-manifest /absolute/path/to/forza-patch-TIMESTAMP.json

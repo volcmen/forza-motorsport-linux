@@ -149,7 +149,7 @@ inspect_target() {
 }
 
 report_known_builds() {
-    local target state has_original=0 has_unknown=0
+    local target state original_count=0 patched_count=0 has_unknown=0
     local -a targets=(
         "$steam_root/compatibilitytools.d/$tool_name/files/lib/wine/x86_64-windows/windows.gaming.input.dll"
         "$prefix_root/windows/system32/windows.gaming.input.dll"
@@ -159,17 +159,19 @@ report_known_builds() {
     for target in "${targets[@]}"; do
         state=$(inspect_target "$target")
         case "$state" in
-            patched) ;;
-            original) has_original=1 ;;
+            patched) ((patched_count += 1)) ;;
+            original) ((original_count += 1)) ;;
             *) has_unknown=1 ;;
         esac
     done
     if ((has_unknown)); then
         report FAIL 'controller and mountmgr known-build states' 'unrecognized or unavailable'
-    elif ((has_original)); then
+    elif ((original_count == ${#targets[@]})); then
         report WARN 'controller and mountmgr known-build states' 'reviewed original build needs patching'
-    else
+    elif ((patched_count == ${#targets[@]})); then
         report PASS 'controller and mountmgr known-build states' 'reviewed patched build'
+    else
+        report FAIL 'controller and mountmgr known-build states' 'mixed original and patched targets'
     fi
 }
 
@@ -200,12 +202,17 @@ else
     report FAIL 'Secret Service' 'no owner or activatable KDE provider'
 fi
 
-service_state=$("$systemctl_bin" --user show --property=UnitFileState --value xodus-forza.service 2>/dev/null || true)
-case "$service_state" in
-    disabled) report PASS 'xodus-forza.service disabled state' disabled ;;
-    enabled) report FAIL 'xodus-forza.service disabled state' enabled ;;
-    *) report WARN 'xodus-forza.service disabled state' unavailable ;;
-esac
+if service_state=$("$systemctl_bin" --user show --property=UnitFileState --value xodus-forza.service 2>/dev/null); then
+    case "$service_state" in
+        disabled | static) report PASS 'xodus-forza.service disabled state' "$service_state" ;;
+        missing) report FAIL 'xodus-forza.service disabled state' missing ;;
+        masked) report FAIL 'xodus-forza.service disabled state' masked ;;
+        enabled*) report FAIL 'xodus-forza.service disabled state' "$service_state" ;;
+        *) report FAIL 'xodus-forza.service disabled state' "unknown state: ${service_state:-empty}" ;;
+    esac
+else
+    report FAIL 'xodus-forza.service disabled state' query-error
+fi
 
 report_known_builds
 report_disk_space
