@@ -3,6 +3,7 @@ Description=Xodus service for one Forza Motorsport session
 
 [Service]
 Type=simple
+ExecStartPre=/usr/bin/bash -c 'set -eu; test -f "%t/forza-xodus-owner.pending"; test ! -e "%t/forza-xodus-owner.active"; mv -T -- "%t/forza-xodus-owner.pending" "%t/forza-xodus-owner.active"'
 ExecStart=%h/.local/libexec/xodus-forza/xodus-service
 UMask=0077
 NoNewPrivileges=yes
@@ -11,4 +12,6 @@ ProtectSystem=strict
 ProtectHome=read-only
 # PrivateUsers is intentionally off until Unix peer-credential compatibility is proven;
 # without it in a user manager, ProtectSystem/ReadWritePaths may not enforce socket-only writes.
-ReadWritePaths=%t/xodus.sock
+# The two mode-0600 token paths are the deliberate exception to socket-only writes;
+# ExecStartPre consumes them to bind a launcher reservation to this invocation.
+ReadWritePaths=%t/xodus.sock %t/forza-xodus-owner.pending %t/forza-xodus-owner.active

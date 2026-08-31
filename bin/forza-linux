@@ -8,38 +8,62 @@ runtime_dir=${XDG_RUNTIME_DIR:-}
 started_here=0
 started_invocation_id=
 started_owner_token=
+reservation_token=
 game_pid=
+wait_timer_pid=
 
 service_is_active() {
     "$systemctl_bin" --user is-active --quiet "$service_name"
+}
+
+service_is_inactive() {
+    service_is_active
+    [[ $? -eq 3 ]]
 }
 
 service_invocation_id() {
     "$systemctl_bin" --user show --property=InvocationID --value "$service_name"
 }
 
-service_owner_token() {
-    "$systemctl_bin" --user show --property=Environment --value "$service_name"
+token_file_matches() {
+    local path=$1 expected=$2
+    [[ -f $path && ! -L $path && $(stat -c %a -- "$path") == 600 && $(< "$path") == "$expected" ]]
 }
 
 socket_is_listening() {
     awk -v path="$socket_path" '
         $4 == "00010000" && $5 == "0001" && $6 == "01" && \
-            substr($0, length($0) - length(path) + 1) == path {
+            $8 == path {
             found = 1
         }
         END { exit !found }
     ' /proc/net/unix
 }
 
+stop_wait_timer() {
+    if [[ -n $wait_timer_pid ]]; then
+        kill -TERM "$wait_timer_pid" 2>/dev/null || true
+        wait "$wait_timer_pid" 2>/dev/null || true
+        wait_timer_pid=
+    fi
+}
+
 cleanup() {
+    stop_wait_timer
     if ((started_here)); then
         started_here=0
         if [[ -n $started_invocation_id && -n $started_owner_token ]] && service_is_active && \
             [[ $(service_invocation_id) == "$started_invocation_id" ]] && \
-            [[ $(service_owner_token) == *"FORZA_LAUNCH_OWNER=$started_owner_token"* ]]; then
+            token_file_matches "$active_token_path" "$started_owner_token"; then
             "$systemctl_bin" --user stop "$service_name" || true
+            if service_is_inactive && token_file_matches "$active_token_path" "$started_owner_token"; then
+                rm -f -- "$active_token_path"
+            fi
         fi
+    fi
+    if [[ -n $reservation_token ]] && service_is_inactive && [[ ! -e $active_token_path ]] && \
+        token_file_matches "$pending_token_path" "$reservation_token"; then
+        rm -f -- "$pending_token_path"
     fi
 }
 
@@ -50,6 +74,7 @@ forward_signal() {
         wait "$game_pid" 2>/dev/null || true
         game_pid=
     fi
+    stop_wait_timer
     exit "$exit_status"
 }
 
@@ -78,6 +103,10 @@ if [[ -n ${PAM_KWALLET5_LOGIN:-} && -S ${PAM_KWALLET5_LOGIN} ]]; then
     "$systemctl_bin" --user start plasma-kwallet-pam.service || true
 fi
 
+socket_path="$runtime_dir/xodus.sock"
+pending_token_path="$runtime_dir/forza-xodus-owner.pending"
+active_token_path="$runtime_dir/forza-xodus-owner.active"
+
 if service_is_active; then
     :
 else
@@ -86,17 +115,23 @@ else
         printf 'error: cannot determine whether %s is active\n' "$service_name" >&2
         exit 1
     fi
-    socket_path="$runtime_dir/xodus.sock"
     if [[ -S $socket_path ]]; then
         rm -f -- "$socket_path"
     fi
+    rm -f -- "$pending_token_path" "$active_token_path"
     reservation_token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     if [[ -z $reservation_token ]]; then
         printf 'error: cannot reserve %s ownership\n' "$service_name" >&2
         exit 1
     fi
-    if ! "$systemctl_bin" --user set-property --runtime "$service_name" \
-        "Environment=FORZA_LAUNCH_OWNER=$reservation_token"; then
+    pending_token_temp=$(mktemp "$runtime_dir/.forza-xodus-owner.pending.XXXXXX") || {
+        printf 'error: cannot reserve %s ownership\n' "$service_name" >&2
+        exit 1
+    }
+    chmod 600 -- "$pending_token_temp"
+    printf '%s' "$reservation_token" > "$pending_token_temp"
+    if ! mv -T -- "$pending_token_temp" "$pending_token_path"; then
+        rm -f -- "$pending_token_temp"
         printf 'error: cannot reserve %s ownership\n' "$service_name" >&2
         exit 1
     fi
@@ -109,8 +144,7 @@ else
         exit 1
     fi
     started_invocation_id=$(service_invocation_id)
-    started_owner_token=$(service_owner_token)
-    if [[ -z $started_invocation_id || $started_owner_token != *"FORZA_LAUNCH_OWNER=$reservation_token"* ]]; then
+    if [[ -z $started_invocation_id ]] || ! token_file_matches "$active_token_path" "$reservation_token"; then
         printf 'error: cannot capture %s invocation identity\n' "$service_name" >&2
         started_invocation_id=
         started_owner_token=
@@ -120,33 +154,34 @@ else
     started_here=1
 fi
 
-socket_path="$runtime_dir/xodus.sock"
 monotonic_ms() {
     awk '{ printf "%.0f\n", $1 * 1000 }' /proc/uptime
 }
 
 wait_for_game() {
-    local completed timer_pid wait_status
+    local completed wait_status
     while :; do
         (
             exec {coordinator_fd}>&-
             sleep 0.05
         ) &
-        timer_pid=$!
-        if wait -n -p completed "$game_pid" "$timer_pid"; then
+        wait_timer_pid=$!
+        if wait -n -p completed "$game_pid" "$wait_timer_pid"; then
             wait_status=0
         else
             wait_status=$?
         fi
         if [[ $completed == "$game_pid" ]]; then
+            stop_wait_timer
             game_status=$wait_status
             game_pid=
             return
         fi
+        wait_timer_pid=
     done
 }
 
-deadline=$(( $(monotonic_ms) + 5000 ))
+deadline=$(( $(monotonic_ms) + 4800 ))
 until socket_is_listening && service_is_active; do
     now=$(monotonic_ms)
     if ((now >= deadline)); then

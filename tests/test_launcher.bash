@@ -13,6 +13,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; return 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected [$2], got [$1]"; }
 assert_log_contains() { rg -Fq -- "$1" "$FAKE_LOG" || fail "log does not contain [$1]"; }
 assert_log_not_contains() { ! rg -Fq -- "$1" "$FAKE_LOG" || fail "log unexpectedly contains [$1]"; }
+assert_path_absent() { [[ ! -e "$1" ]] || fail "path unexpectedly exists [$1]"; }
 
 wait_for_file() {
     local path=$1 attempts=100
@@ -56,6 +57,50 @@ PY
     wait_for_file "$1"
 }
 
+start_abstract_suffix_socket() {
+    uv run python - "$1" <<'PY' &
+import signal
+import socket
+import sys
+
+path = "\0forza-test" + sys.argv[1]
+listener = socket.socket(socket.AF_UNIX)
+listener.bind(path)
+listener.listen(1)
+try:
+    signal.pause()
+finally:
+    listener.close()
+PY
+    SOCKET_PIDS+=("$!")
+    sleep 0.05
+}
+
+start_different_filesystem_suffix_socket() {
+    uv run python - "$1" <<'PY' &
+import os
+import signal
+import socket
+import sys
+
+path = sys.argv[1]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+listener = socket.socket(socket.AF_UNIX)
+listener.bind(path)
+listener.listen(1)
+try:
+    signal.pause()
+finally:
+    listener.close()
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+PY
+    SOCKET_PIDS+=("$!")
+    sleep 0.05
+}
+
 activate_preexisting_service() {
     write_fake_state active preexisting preexisting-owner
     start_socket "$FAKE_SOCKET"
@@ -68,19 +113,21 @@ set_up() {
     FAKE_LOG="$TEST_ROOT/systemctl.log"
     FAKE_STATE="$TEST_ROOT/service.state"
     FAKE_COUNTER="$TEST_ROOT/invocation.counter"
-    FAKE_OWNER_FILE="$TEST_ROOT/owner.property"
     : > "$FAKE_LOG"
     write_fake_state inactive none none
     printf '0\n' > "$FAKE_COUNTER"
-    printf 'none\n' > "$FAKE_OWNER_FILE"
-    export FAKE_LOG FAKE_STATE FAKE_COUNTER FAKE_OWNER_FILE
+    export FAKE_LOG FAKE_STATE FAKE_COUNTER
     export FAKE_SOCKET="$XDG_RUNTIME_DIR/xodus.sock"
+    export FAKE_PENDING_TOKEN="$XDG_RUNTIME_DIR/forza-xodus-owner.pending"
+    export FAKE_ACTIVE_TOKEN="$XDG_RUNTIME_DIR/forza-xodus-owner.active"
     export FAKE_PID_FILE="$TEST_ROOT/xodus.pid"
     export FAKE_CREATE_SOCKET=${FAKE_CREATE_SOCKET:-1}
     export FAKE_STOP_STATUS=${FAKE_STOP_STATUS:-0}
-    export FAKE_EXTERNAL_AFTER_SET_PROPERTY=${FAKE_EXTERNAL_AFTER_SET_PROPERTY:-0}
-    export FAKE_EXTERNAL_ON_START=${FAKE_EXTERNAL_ON_START:-0}
     export FAKE_EMPTY_CAPTURE=${FAKE_EMPTY_CAPTURE:-0}
+    export FAKE_EXTERNAL_AFTER_PENDING=${FAKE_EXTERNAL_AFTER_PENDING:-0}
+    export FAKE_EXTERNAL_DURING_START=${FAKE_EXTERNAL_DURING_START:-0}
+    export FAKE_EXTERNAL_AFTER_PENDING_MARKER="$TEST_ROOT/external-pending-seen"
+    export FAKE_EXTERNAL_DURING_START_MARKER="$TEST_ROOT/external-start-seen"
     SOCKET_PIDS=()
 
     SOCKET_SERVER="$TEST_ROOT/socket-server"
@@ -136,16 +183,18 @@ start_xodus() {
     read_state
     printf 'start xodus-forza.service\n' >> "$FAKE_LOG"
     [[ $state == active ]] && return 0
-    if [[ -e $FAKE_SOCKET || -S $FAKE_SOCKET ]]; then
-        printf 'start blocked by existing socket\n' >> "$FAKE_LOG"
-        return 0
+    if [[ ${FAKE_EXTERNAL_DURING_START:-0} == 1 && ! -e $FAKE_EXTERNAL_DURING_START_MARKER ]]; then
+        : > "$FAKE_EXTERNAL_DURING_START_MARKER"
+        external_start
+        return
     fi
+    if [[ ! -f $FAKE_PENDING_TOKEN || -e $FAKE_ACTIVE_TOKEN ]]; then
+        printf 'start rejected without pending token\n' >> "$FAKE_LOG"
+        return 1
+    fi
+    mv -T -- "$FAKE_PENDING_TOKEN" "$FAKE_ACTIVE_TOKEN"
     invocation=$(next_invocation)
-    owner=$(<"$FAKE_OWNER_FILE")
-    if [[ ${FAKE_EXTERNAL_ON_START:-0} == 1 ]]; then
-        owner=external-owner
-    fi
-    write_state active "$invocation" "$owner"
+    write_state active "$invocation" token-consumed
     if [[ ${FAKE_CREATE_SOCKET:-1} == 1 ]]; then
         "$SOCKET_SERVER" "$FAKE_SOCKET" &
         printf '%s\n' "$!" > "$FAKE_PID_FILE"
@@ -153,12 +202,7 @@ start_xodus() {
 }
 
 external_start() {
-    read_state
-    [[ $state == active ]] && return 0
-    invocation=$(next_invocation)
-    write_state active "$invocation" external-owner
-    "$SOCKET_SERVER" "$FAKE_SOCKET" &
-    printf '%s\n' "$!" > "$FAKE_PID_FILE"
+    start_xodus
 }
 
 [[ ${1:-} == --user ]] && shift
@@ -168,6 +212,10 @@ unit=${!#}
 
 case "$command" in
     is-active)
+        if [[ ${FAKE_EXTERNAL_AFTER_PENDING:-0} == 1 && ! -e $FAKE_EXTERNAL_AFTER_PENDING_MARKER && -f $FAKE_PENDING_TOKEN ]]; then
+            : > "$FAKE_EXTERNAL_AFTER_PENDING_MARKER"
+            external_start || true
+        fi
         read_state
         [[ $state == active ]] && exit 0
         exit 3
@@ -175,23 +223,7 @@ case "$command" in
     show)
         read_state
         if [[ $state == active && ${FAKE_EMPTY_CAPTURE:-0} != 1 ]]; then
-            if [[ $* == *InvocationID* ]]; then
-                printf '%s\n' "$invocation"
-            elif [[ $* == *Environment* ]]; then
-                printf 'FORZA_LAUNCH_OWNER=%s\n' "$owner"
-            fi
-        fi
-        ;;
-    set-property)
-        value=
-        for argument in "$@"; do
-            [[ $argument == Environment=FORZA_LAUNCH_OWNER=* ]] && value=$argument
-        done
-        [[ $value == Environment=FORZA_LAUNCH_OWNER=* ]] || exit 64
-        printf '%s\n' "${value#Environment=}" > "$FAKE_OWNER_FILE"
-        printf 'set-property %s\n' "$value" >> "$FAKE_LOG"
-        if [[ ${FAKE_EXTERNAL_AFTER_SET_PROPERTY:-0} == 1 ]]; then
-            external_start
+            [[ $* == *InvocationID* ]] && printf '%s\n' "$invocation"
         fi
         ;;
     start)
@@ -235,6 +267,7 @@ tear_down() {
 }
 
 run_launcher() { "$LAUNCHER" "$@"; status=$?; }
+run_launcher_capturing_stderr() { output=$("$LAUNCHER" "$@" 2>&1); status=$?; }
 
 make_waiting_game() {
     local game="$TEST_ROOT/waiting-game"
@@ -309,6 +342,12 @@ test_starts_and_stops_service_it_owns() {
     assert_log_contains 'stop xodus-forza.service'
 }
 
+test_cleanup_does_not_execute_a_test_operator() {
+    run_launcher_capturing_stderr /usr/bin/true
+    assert_eq "$status" 0 || return 1
+    [[ $output != *'command not found'* ]] || fail "cleanup emitted [$output]"
+}
+
 test_accepts_active_listening_socket_without_ownership() {
     activate_preexisting_service
     run_launcher /usr/bin/true
@@ -326,18 +365,50 @@ test_rejects_active_unlistening_socket() {
     assert_log_not_contains 'stop xodus-forza.service'
 }
 
-test_refuses_external_activation_after_reservation() {
-    export FAKE_EXTERNAL_AFTER_SET_PROPERTY=1
+test_rejects_abstract_suffix_socket() {
+    write_fake_state active preexisting preexisting-owner
+    start_abstract_suffix_socket "$FAKE_SOCKET"
     run_launcher /usr/bin/true
     assert_eq "$status" 1 || return 1
+    assert_log_not_contains 'start xodus-forza.service' || return 1
     assert_log_not_contains 'stop xodus-forza.service'
 }
 
-test_refuses_external_activation_at_start_boundary() {
-    export FAKE_EXTERNAL_ON_START=1
+test_rejects_different_filesystem_suffix_socket() {
+    local other_socket="$TEST_ROOT/other$FAKE_SOCKET"
+    write_fake_state active preexisting preexisting-owner
+    start_different_filesystem_suffix_socket "$other_socket"
     run_launcher /usr/bin/true
     assert_eq "$status" 1 || return 1
+    assert_log_not_contains 'start xodus-forza.service' || return 1
     assert_log_not_contains 'stop xodus-forza.service'
+}
+
+test_rejects_direct_start_before_reservation() {
+    local direct_status
+    "$FAKE_SYSTEMCTL" --user start xodus-forza.service
+    direct_status=$?
+    assert_eq "$direct_status" 1 || return 1
+    assert_log_contains 'start rejected without pending token' || return 1
+    run_launcher /usr/bin/true
+    assert_eq "$status" 0 || return 1
+    assert_log_contains 'stop xodus-forza.service'
+}
+
+test_external_start_during_pending_leaves_the_service_unowned() {
+    export FAKE_EXTERNAL_AFTER_PENDING=1
+    run_launcher /usr/bin/true
+    assert_eq "$status" 1 || return 1
+    assert_log_contains 'start xodus-forza.service' || return 1
+    assert_log_not_contains 'stop xodus-forza.service'
+}
+
+test_start_boundary_consumption_binds_the_reservation() {
+    export FAKE_EXTERNAL_DURING_START=1
+    run_launcher /usr/bin/true
+    assert_eq "$status" 0 || return 1
+    assert_log_contains 'start xodus-forza.service' || return 1
+    assert_log_contains 'stop xodus-forza.service'
 }
 
 test_refuses_empty_ownership_capture_without_stopping() {
@@ -345,6 +416,23 @@ test_refuses_empty_ownership_capture_without_stopping() {
     run_launcher /usr/bin/true
     assert_eq "$status" 1 || return 1
     assert_log_not_contains 'stop xodus-forza.service'
+}
+
+test_consumes_a_mode_0600_token_and_removes_it_after_cleanup() {
+    local game ready release launcher_pid
+    game=$(make_waiting_game)
+    ready="$TEST_ROOT/token-game-ready"
+    release="$TEST_ROOT/token-game-release"
+    FORZA_GAME_READY="$ready" FORZA_GAME_RELEASE="$release" "$LAUNCHER" "$game" &
+    launcher_pid=$!
+    wait_for_file "$ready" || return 1
+    assert_eq "$(stat -c %a "$FAKE_ACTIVE_TOKEN")" 600 || return 1
+    assert_path_absent "$FAKE_PENDING_TOKEN" || return 1
+    assert_log_not_contains 'FORZA_LAUNCH_OWNER' || return 1
+    : > "$release"
+    wait "$launcher_pid"
+    assert_eq "$?" 0 || return 1
+    assert_path_absent "$FAKE_ACTIVE_TOKEN"
 }
 
 test_rejects_a_concurrent_launcher_without_stopping_the_owner() {
@@ -367,8 +455,8 @@ test_rejects_a_concurrent_launcher_without_stopping_the_owner() {
     assert_log_contains 'stop xodus-forza.service'
 }
 
-test_does_not_stop_an_externally_restarted_invocation() {
-    local game ready release launcher_pid
+test_restart_after_token_consumption_fails_closed() {
+    local game ready release launcher_pid restart_status
     game=$(make_waiting_game)
     ready="$TEST_ROOT/game-ready"
     release="$TEST_ROOT/game-release"
@@ -376,9 +464,11 @@ test_does_not_stop_an_externally_restarted_invocation() {
     launcher_pid=$!
     wait_for_file "$ready" || return 1
     "$FAKE_SYSTEMCTL" --user restart xodus-forza.service
+    restart_status=$?
     : > "$release"
     wait "$launcher_pid"
     assert_eq "$?" 0 || return 1
+    assert_eq "$restart_status" 1 || return 1
     assert_log_contains 'restart xodus-forza.service' || return 1
     assert_log_not_contains 'stop xodus-forza.service'
 }
@@ -398,7 +488,7 @@ test_times_out_without_a_fresh_socket_within_five_seconds() {
     run_launcher /usr/bin/true
     elapsed=$(($(monotonic_ms) - started))
     assert_eq "$status" 1 || return 1
-    ((elapsed <= 5100)) || {
+    ((elapsed <= 5000)) || {
         fail "socket wait exceeded five seconds: ${elapsed}ms"
         return 1
     }
@@ -545,9 +635,9 @@ run_test() {
     ((tests_run += 1))
     FAKE_CREATE_SOCKET=1
     FAKE_STOP_STATUS=0
-    FAKE_EXTERNAL_AFTER_SET_PROPERTY=0
-    FAKE_EXTERNAL_ON_START=0
     FAKE_EMPTY_CAPTURE=0
+    FAKE_EXTERNAL_AFTER_PENDING=0
+    FAKE_EXTERNAL_DURING_START=0
     unset PAM_KWALLET5_LOGIN FORZA_SELF_SIGNAL FORZA_LOCK_PATH FORZA_FD_RESULT
     set_up
     if "$name"; then printf 'PASS: %s\n' "$name"; else printf 'FAIL: %s\n' "$name" >&2; ((tests_failed += 1)); fi
@@ -557,13 +647,18 @@ run_test() {
 for test_name in \
     test_rejects_missing_game_command \
     test_starts_and_stops_service_it_owns \
+    test_cleanup_does_not_execute_a_test_operator \
     test_accepts_active_listening_socket_without_ownership \
     test_rejects_active_unlistening_socket \
-    test_refuses_external_activation_after_reservation \
-    test_refuses_external_activation_at_start_boundary \
+    test_rejects_abstract_suffix_socket \
+    test_rejects_different_filesystem_suffix_socket \
+    test_rejects_direct_start_before_reservation \
+    test_external_start_during_pending_leaves_the_service_unowned \
+    test_start_boundary_consumption_binds_the_reservation \
     test_refuses_empty_ownership_capture_without_stopping \
+    test_consumes_a_mode_0600_token_and_removes_it_after_cleanup \
     test_rejects_a_concurrent_launcher_without_stopping_the_owner \
-    test_does_not_stop_an_externally_restarted_invocation \
+    test_restart_after_token_consumption_fails_closed \
     test_removes_a_stale_socket_before_starting \
     test_times_out_without_a_fresh_socket_within_five_seconds \
     test_preserves_exact_game_argv \
