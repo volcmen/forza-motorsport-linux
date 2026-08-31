@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 
 APP_ID = "2440510"
@@ -41,6 +41,19 @@ class PatchMismatch(PatcherError):
 
 class ManifestError(PatcherError):
     """Raised when a patch or backup manifest is malformed or unsafe."""
+
+
+class RollbackError(PatcherError):
+    """Raised when a transaction rollback cannot safely complete."""
+
+
+class TransactionError(PatcherError):
+    """Preserves an operation failure alongside its rollback failure."""
+
+    def __init__(self, primary: Exception, rollback: Exception):
+        super().__init__(f"transaction failed: {primary}; rollback failed: {rollback}")
+        self.primary = primary
+        self.rollback = rollback
 
 
 @dataclass(frozen=True)
@@ -76,6 +89,15 @@ class PatchResult:
 class ForzaPatchResult:
     backup_manifest: Path
     results: tuple[PatchResult, ...]
+
+
+@dataclass
+class RollbackEntry:
+    path: Path
+    backup: Path
+    spec: PatchSpec
+    mode: int
+    active: bool = True
 
 
 def sha256(path: Path) -> str:
@@ -134,7 +156,12 @@ def resolve_forza_targets(steam_root: Path) -> list[Path]:
     ]
 
 
-def apply_target(path: Path, spec: PatchSpec, backup_root: Path) -> PatchResult:
+def apply_target(
+    path: Path,
+    spec: PatchSpec,
+    backup_root: Path,
+    on_backup: Callable[[RollbackEntry], None] | None = None,
+) -> PatchResult:
     if inspect_target(path, spec) is not PatchState.ORIGINAL:
         raise UnknownBuild(f"target is not the reviewed original build: {path}")
 
@@ -146,16 +173,27 @@ def apply_target(path: Path, spec: PatchSpec, backup_root: Path) -> PatchResult:
     if hashlib.sha256(patched).hexdigest() != spec.patched_sha256:
         raise PatchMismatch(f"patch result does not match reviewed digest: {path}")
 
+    mode = stat.S_IMODE(path.stat().st_mode)
     backup_root.mkdir(parents=True, exist_ok=True)
-    backup = _next_backup_path(backup_root, path.name, spec.original_sha256)
-    _atomic_replace(backup, original, stat.S_IMODE(path.stat().st_mode))
+    backup = _write_exclusive_backup(
+        backup_root, path.name, spec.original_sha256, original, mode
+    )
     if sha256(backup) != spec.original_sha256:
         raise PatchMismatch(f"backup verification failed: {backup}")
-
-    _atomic_replace(path, patched, stat.S_IMODE(path.stat().st_mode))
-    after = sha256(path)
-    if after != spec.patched_sha256:
-        raise PatchMismatch(f"patched target verification failed: {path}")
+    rollback = RollbackEntry(path, backup, spec, mode)
+    if on_backup is not None:
+        on_backup(rollback)
+    try:
+        _atomic_replace(path, patched, mode)
+        after = sha256(path)
+        if after != spec.patched_sha256:
+            raise PatchMismatch(f"patched target verification failed: {path}")
+    except Exception as primary:
+        try:
+            _rollback_entries((rollback,))
+        except RollbackError as rollback_error:
+            raise TransactionError(primary, rollback_error) from primary
+        raise
     return PatchResult(before=before, after=after, backup=backup)
 
 
@@ -184,19 +222,26 @@ def apply_forza(
     unknown = [target for target, _, state in states if state is PatchState.UNKNOWN]
     if unknown:
         raise UnknownBuild(f"refusing transaction; unknown target: {unknown[0]}")
+    if all(state is PatchState.PATCHED for _, _, state in states):
+        raise PatcherError("all targets are already patched; no backup manifest was written")
+    if any(state is PatchState.PATCHED for _, _, state in states):
+        raise PatcherError("refusing mixed target states")
 
-    applied: list[tuple[Path, PatchSpec, PatchResult]] = []
+    rollback_entries: list[RollbackEntry] = []
+    results: list[PatchResult] = []
     try:
-        for target, spec, state in states:
-            if state is PatchState.ORIGINAL:
-                applied.append((target, spec, apply_target(target, spec, backup_root)))
-    except Exception:
-        for target, spec, result in reversed(applied):
-            restore_target(target, result.backup, spec)
+        for target, spec, _ in states:
+            results.append(
+                apply_target(target, spec, backup_root, on_backup=rollback_entries.append)
+            )
+        manifest = _write_backup_manifest(steam_root, backup_root, rollback_entries)
+    except Exception as primary:
+        try:
+            _rollback_entries(rollback_entries)
+        except RollbackError as rollback_error:
+            raise TransactionError(primary, rollback_error) from primary
         raise
-
-    manifest = _write_backup_manifest(steam_root, backup_root, applied)
-    return ForzaPatchResult(manifest, tuple(result for _, _, result in applied))
+    return ForzaPatchResult(manifest, tuple(results))
 
 
 def restore_forza(
@@ -286,8 +331,8 @@ def _atomic_replace(path: Path, data: bytes, mode: int) -> None:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(data)
             stream.flush()
+            os.fchmod(stream.fileno(), mode)
             os.fsync(stream.fileno())
-        os.chmod(temporary, mode)
         os.replace(temporary, path)
         _fsync_directory(path.parent)
     except Exception:
@@ -303,14 +348,34 @@ def _fsync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
-def _next_backup_path(backup_root: Path, name: str, original_hash: str) -> Path:
+def _atomic_create_new(path: Path, data: bytes, mode: int) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fchmod(stream.fileno(), mode)
+            os.fsync(stream.fileno())
+        os.link(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_exclusive_backup(
+    backup_root: Path, name: str, original_hash: str, data: bytes, mode: int
+) -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    candidate = backup_root / f"{timestamp}-{original_hash}-{name}"
-    suffix = 1
-    while candidate.exists():
-        candidate = backup_root / f"{timestamp}-{original_hash}-{name}.{suffix}"
-        suffix += 1
-    return candidate
+    for suffix in range(sys.maxsize):
+        ending = "" if suffix == 0 else f".{suffix}"
+        candidate = backup_root / f"{timestamp}-{original_hash}-{name}{ending}"
+        try:
+            _atomic_create_new(candidate, data, mode)
+        except FileExistsError:
+            continue
+        return candidate
+    raise PatcherError("could not reserve a unique backup name")
 
 
 def _spec_for_target(target: Path, specs: Mapping[str, PatchSpec]) -> PatchSpec:
@@ -323,33 +388,56 @@ def _spec_for_target(target: Path, specs: Mapping[str, PatchSpec]) -> PatchSpec:
 def _write_backup_manifest(
     steam_root: Path,
     backup_root: Path,
-    applied: Sequence[tuple[Path, PatchSpec, PatchResult]],
+    applied: Sequence[RollbackEntry],
 ) -> Path:
     entries = []
-    for target, spec, result in applied:
+    for entry in applied:
         entries.append(
             {
-                "target": target.relative_to(steam_root).as_posix(),
-                "file": spec.file,
-                "original_sha256": spec.original_sha256,
-                "patched_sha256": spec.patched_sha256,
-                "backup": result.backup.relative_to(backup_root).as_posix(),
+                "target": entry.path.relative_to(steam_root).as_posix(),
+                "file": entry.spec.file,
+                "original_sha256": entry.spec.original_sha256,
+                "patched_sha256": entry.spec.patched_sha256,
+                "backup": entry.backup.relative_to(backup_root).as_posix(),
             }
         )
     document = json.dumps({"version": 1, "targets": entries}, indent=2, sort_keys=True)
-    manifest = _next_manifest_path(backup_root)
-    _atomic_replace(manifest, (document + "\n").encode(), 0o600)
-    return manifest
-
-
-def _next_manifest_path(backup_root: Path) -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    candidate = backup_root / f"forza-patch-{timestamp}.json"
-    suffix = 1
-    while candidate.exists():
-        candidate = backup_root / f"forza-patch-{timestamp}.{suffix}.json"
-        suffix += 1
-    return candidate
+    data = (document + "\n").encode()
+    for suffix in range(sys.maxsize):
+        ending = "" if suffix == 0 else f".{suffix}"
+        manifest = backup_root / f"forza-patch-{timestamp}{ending}.json"
+        try:
+            _atomic_create_new(manifest, data, 0o600)
+        except FileExistsError:
+            continue
+        return manifest
+    raise PatcherError("could not reserve a unique backup manifest name")
+
+
+def _rollback_entries(entries: Sequence[RollbackEntry]) -> None:
+    active = [entry for entry in entries if entry.active]
+    preflight_errors = []
+    for entry in active:
+        try:
+            if inspect_target(entry.path, entry.spec) is not PatchState.PATCHED:
+                raise UnknownBuild(f"target is not patched: {entry.path}")
+            if sha256(entry.backup) != entry.spec.original_sha256:
+                raise UnknownBuild(f"backup is not original: {entry.backup}")
+        except Exception as error:
+            preflight_errors.append(f"{entry.path}: {error}")
+    if preflight_errors:
+        raise RollbackError("rollback preflight failed: " + "; ".join(preflight_errors))
+
+    restore_errors = []
+    for entry in reversed(active):
+        try:
+            restore_target(entry.path, entry.backup, entry.spec)
+            entry.active = False
+        except Exception as error:
+            restore_errors.append(f"{entry.path}: {error}")
+    if restore_errors:
+        raise RollbackError("rollback restore failed: " + "; ".join(restore_errors))
 
 
 def _backup_entries(
@@ -377,7 +465,9 @@ def _backup_entries(
         file_name = entry.get("file")
         if not all(isinstance(value, str) for value in (target_name, backup_name, file_name)):
             raise ManifestError("backup target entry is incomplete")
-        if target_name in seen or target_name not in allowed:
+        if target_name in seen:
+            raise ManifestError(f"backup manifest has a duplicate target: {target_name}")
+        if target_name not in allowed:
             raise ManifestError(f"backup target is outside Forza scope: {target_name}")
         seen.add(target_name)
         target = allowed[target_name]
@@ -391,6 +481,8 @@ def _backup_entries(
             raise ManifestError(f"backup hashes do not match manifest: {target_name}")
         backup = _safe_relative_path(backup_root, backup_name)
         parsed.append((target, backup, spec))
+    if seen != set(allowed):
+        raise ManifestError("backup manifest must contain exactly the four Forza targets")
     return parsed
 
 
@@ -398,7 +490,16 @@ def _safe_relative_path(root: Path, value: str) -> Path:
     candidate = PurePosixPath(value)
     if candidate.is_absolute() or ".." in candidate.parts:
         raise ManifestError(f"backup path is not relative: {value}")
-    return root.joinpath(*candidate.parts)
+    resolved_root = root.resolve(strict=True)
+    current = root
+    for part in candidate.parts:
+        current /= part
+        if current.is_symlink():
+            raise ManifestError(f"backup path contains a symlink: {value}")
+    resolved_candidate = current.resolve(strict=False)
+    if resolved_root not in (resolved_candidate, *resolved_candidate.parents):
+        raise ManifestError(f"backup path escapes its root: {value}")
+    return current
 
 
 def _validate_digest(value: str, field: str) -> None:

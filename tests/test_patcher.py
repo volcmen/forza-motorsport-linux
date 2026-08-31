@@ -220,3 +220,172 @@ def test_apply_forza_records_backups_and_restore_forza_preflights_all_pairs(
         restore_forza(tmp_path, result.backup_manifest, synthetic_specs)
 
     assert inspect_target(targets[1], synthetic_specs[targets[1].name]) is PatchState.PATCHED
+
+
+def test_apply_target_restores_verified_backup_after_post_replace_failure(
+    tmp_path, controller_spec, monkeypatch
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    original = synthetic_original(controller_spec)
+    target.write_bytes(original)
+    real_sha256 = patcher.sha256
+    target_checks = 0
+
+    def fail_only_the_post_replace_check(path):
+        nonlocal target_checks
+        if path == target:
+            target_checks += 1
+            if target_checks == 2:
+                return "0" * 64
+        return real_sha256(path)
+
+    monkeypatch.setattr(patcher, "sha256", fail_only_the_post_replace_check)
+
+    with pytest.raises(PatchMismatch, match="patched target verification failed"):
+        apply_target(target, controller_spec, tmp_path / "backups")
+
+    assert target.read_bytes() == original
+    assert len(list((tmp_path / "backups").iterdir())) == 1
+
+
+def test_apply_forza_rolls_back_when_backup_manifest_write_fails(
+    tmp_path, synthetic_specs, monkeypatch
+):
+    populate_forza_root(tmp_path, synthetic_specs)
+    targets = resolve_forza_targets(tmp_path)
+
+    def fail_manifest(*_args):
+        raise OSError("manifest write failure")
+
+    monkeypatch.setattr(patcher, "_write_backup_manifest", fail_manifest)
+
+    with pytest.raises(OSError, match="manifest write failure"):
+        apply_forza(tmp_path, synthetic_specs, tmp_path / "backups")
+
+    assert all(
+        inspect_target(target, synthetic_specs[target.name]) is PatchState.ORIGINAL
+        for target in targets
+    )
+
+
+def test_apply_forza_reports_original_and_aggregated_rollback_preflight_errors(
+    tmp_path, synthetic_specs, monkeypatch
+):
+    populate_forza_root(tmp_path, synthetic_specs)
+    targets = resolve_forza_targets(tmp_path)
+
+    def corrupt_backup_then_fail(_steam_root, backup_root, _applied):
+        next(backup_root.glob("*.dll")).write_bytes(b"corrupt backup")
+        raise OSError("manifest write failure")
+
+    monkeypatch.setattr(patcher, "_write_backup_manifest", corrupt_backup_then_fail)
+
+    with pytest.raises(
+        patcher.PatcherError,
+        match="manifest write failure.*rollback preflight failed",
+    ):
+        apply_forza(tmp_path, synthetic_specs, tmp_path / "backups")
+
+    assert all(
+        inspect_target(target, synthetic_specs[target.name]) is PatchState.PATCHED
+        for target in targets
+    )
+
+
+def test_backup_name_collision_never_overwrites_existing_backup(
+    tmp_path, controller_spec, monkeypatch
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    target.write_bytes(synthetic_original(controller_spec))
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
+    real_link = patcher.os.link
+    collisions = []
+
+    def create_concurrent_backup(source, destination, *args, **kwargs):
+        if not collisions and Path(destination).parent == backup_root:
+            Path(destination).write_bytes(b"concurrent backup")
+            collisions.append(Path(destination))
+        return real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(patcher.os, "link", create_concurrent_backup)
+    result = apply_target(target, controller_spec, backup_root)
+
+    assert collisions[0].read_bytes() == b"concurrent backup"
+    assert result.backup != collisions[0]
+
+
+@pytest.mark.parametrize("mutation", ("incomplete", "duplicate"))
+def test_restore_forza_rejects_incomplete_or_duplicate_backup_manifest(
+    tmp_path, synthetic_specs, mutation
+):
+    populate_forza_root(tmp_path, synthetic_specs)
+    result = apply_forza(tmp_path, synthetic_specs, tmp_path / "backups")
+    record = json.loads(result.backup_manifest.read_text())
+    if mutation == "incomplete":
+        record["targets"].pop()
+    else:
+        record["targets"].append(dict(record["targets"][0]))
+    result.backup_manifest.write_text(json.dumps(record))
+
+    with pytest.raises(patcher.PatcherError):
+        restore_forza(tmp_path, result.backup_manifest, synthetic_specs)
+
+    assert all(
+        inspect_target(target, synthetic_specs[target.name]) is PatchState.PATCHED
+        for target in resolve_forza_targets(tmp_path)
+    )
+
+
+def test_apply_forza_rejects_mixed_or_already_patched_target_states(
+    tmp_path, synthetic_specs
+):
+    populate_forza_root(tmp_path, synthetic_specs)
+    targets = resolve_forza_targets(tmp_path)
+    apply_target(targets[0], synthetic_specs[targets[0].name], tmp_path / "manual-backup")
+
+    with pytest.raises(patcher.PatcherError, match="mixed target states"):
+        apply_forza(tmp_path, synthetic_specs, tmp_path / "backups")
+
+    assert inspect_target(targets[0], synthetic_specs[targets[0].name]) is PatchState.PATCHED
+    assert all(
+        inspect_target(target, synthetic_specs[target.name]) is PatchState.ORIGINAL
+        for target in targets[1:]
+    )
+
+    restore_target(
+        targets[0],
+        next((tmp_path / "manual-backup").iterdir()),
+        synthetic_specs[targets[0].name],
+    )
+    result = apply_forza(tmp_path, synthetic_specs, tmp_path / "backups")
+
+    with pytest.raises(patcher.PatcherError, match="all targets are already patched"):
+        apply_forza(tmp_path, synthetic_specs, tmp_path / "backups")
+
+    assert result.backup_manifest.exists()
+    assert len(list((tmp_path / "backups").glob("*.json"))) == 1
+
+
+def test_restore_forza_rejects_symlinked_backup_component(
+    tmp_path, synthetic_specs
+):
+    populate_forza_root(tmp_path, synthetic_specs)
+    result = apply_forza(tmp_path, synthetic_specs, tmp_path / "backups")
+    record = json.loads(result.backup_manifest.read_text())
+    backup_root = result.backup_manifest.parent
+    original_backup = backup_root / record["targets"][0]["backup"]
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "escaped").write_bytes(original_backup.read_bytes())
+    (backup_root / "nested").symlink_to(outside, target_is_directory=True)
+    record["targets"][0]["backup"] = "nested/escaped"
+    result.backup_manifest.write_text(json.dumps(record))
+
+    with pytest.raises(patcher.PatcherError, match="symlink"):
+        restore_forza(tmp_path, result.backup_manifest, synthetic_specs)
+
+    assert all(
+        inspect_target(target, synthetic_specs[target.name]) is PatchState.PATCHED
+        for target in resolve_forza_targets(tmp_path)
+    )
