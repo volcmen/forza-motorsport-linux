@@ -7,6 +7,7 @@ systemctl_bin=${FORZA_SYSTEMCTL:-systemctl}
 runtime_dir=${XDG_RUNTIME_DIR:-}
 started_here=0
 started_invocation_id=
+started_owner_token=
 game_pid=
 
 service_is_active() {
@@ -17,14 +18,26 @@ service_invocation_id() {
     "$systemctl_bin" --user show --property=InvocationID --value "$service_name"
 }
 
-game_child_has_exited() {
-    [[ ! -e /proc/$game_pid ]] || [[ $(awk '{ print $3 }' "/proc/$game_pid/stat" 2>/dev/null) == Z ]]
+service_owner_token() {
+    "$systemctl_bin" --user show --property=Environment --value "$service_name"
+}
+
+socket_is_listening() {
+    awk -v path="$socket_path" '
+        $4 == "00010000" && $5 == "0001" && $6 == "01" && \
+            substr($0, length($0) - length(path) + 1) == path {
+            found = 1
+        }
+        END { exit !found }
+    ' /proc/net/unix
 }
 
 cleanup() {
     if ((started_here)); then
         started_here=0
-        if service_is_active && [[ $(service_invocation_id) == "$started_invocation_id" ]]; then
+        if [[ -n $started_invocation_id && -n $started_owner_token ]] && service_is_active && \
+            [[ $(service_invocation_id) == "$started_invocation_id" ]] && \
+            [[ $(service_owner_token) == *"FORZA_LAUNCH_OWNER=$started_owner_token"* ]]; then
             "$systemctl_bin" --user stop "$service_name" || true
         fi
     fi
@@ -77,16 +90,34 @@ else
     if [[ -S $socket_path ]]; then
         rm -f -- "$socket_path"
     fi
+    reservation_token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    if [[ -z $reservation_token ]]; then
+        printf 'error: cannot reserve %s ownership\n' "$service_name" >&2
+        exit 1
+    fi
+    if ! "$systemctl_bin" --user set-property --runtime "$service_name" \
+        "Environment=FORZA_LAUNCH_OWNER=$reservation_token"; then
+        printf 'error: cannot reserve %s ownership\n' "$service_name" >&2
+        exit 1
+    fi
+    if service_is_active; then
+        printf 'error: %s became active during ownership reservation\n' "$service_name" >&2
+        exit 1
+    fi
     if ! "$systemctl_bin" --user start "$service_name"; then
         printf 'error: cannot start %s\n' "$service_name" >&2
         exit 1
     fi
-    started_here=1
     started_invocation_id=$(service_invocation_id)
-    if [[ -z $started_invocation_id ]]; then
+    started_owner_token=$(service_owner_token)
+    if [[ -z $started_invocation_id || $started_owner_token != *"FORZA_LAUNCH_OWNER=$reservation_token"* ]]; then
         printf 'error: cannot capture %s invocation identity\n' "$service_name" >&2
+        started_invocation_id=
+        started_owner_token=
         exit 1
     fi
+    started_owner_token=$reservation_token
+    started_here=1
 fi
 
 socket_path="$runtime_dir/xodus.sock"
@@ -94,24 +125,46 @@ monotonic_ms() {
     awk '{ printf "%.0f\n", $1 * 1000 }' /proc/uptime
 }
 
+wait_for_game() {
+    local completed timer_pid wait_status
+    while :; do
+        (
+            exec {coordinator_fd}>&-
+            sleep 0.05
+        ) &
+        timer_pid=$!
+        if wait -n -p completed "$game_pid" "$timer_pid"; then
+            wait_status=0
+        else
+            wait_status=$?
+        fi
+        if [[ $completed == "$game_pid" ]]; then
+            game_status=$wait_status
+            game_pid=
+            return
+        fi
+    done
+}
+
 deadline=$(( $(monotonic_ms) + 5000 ))
-until [[ -S $socket_path ]] && service_is_active; do
-    if (( $(monotonic_ms) >= deadline )); then
+until socket_is_listening && service_is_active; do
+    now=$(monotonic_ms)
+    if ((now >= deadline)); then
         printf 'error: timed out waiting for %s\n' "$socket_path" >&2
         exit 1
     fi
-    sleep 0.1
+    remaining=$((deadline - now))
+    sleep_seconds=$(awk -v milliseconds="$remaining" 'BEGIN {
+        if (milliseconds > 50) print "0.05";
+        else printf "%.3f\n", milliseconds / 1000;
+    }')
+    sleep "$sleep_seconds"
 done
 
-env --default-signal=INT --default-signal=TERM "$@" &
+(
+    exec {coordinator_fd}>&-
+    exec env --default-signal=INT --default-signal=TERM "$@"
+) &
 game_pid=$!
-until game_child_has_exited; do
-    sleep 0.05
-done
-if wait "$game_pid"; then
-    game_status=0
-else
-    game_status=$?
-fi
-game_pid=
+wait_for_game
 exit "$game_status"
