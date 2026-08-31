@@ -639,6 +639,41 @@ def test_recovery_fsync_failure_reports_exact_suffixed_path(
     assert str(expected) in str(raised.value)
 
 
+def test_unsupported_recovery_rename_reports_exact_intact_private_object(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    target.write_bytes(b"published staging")
+    source = f".{target.name}.forza-private"
+    source_path = tmp_path / source
+    source_path.symlink_to("concurrent-link-text")
+    source_inode = source_path.lstat().st_ino
+
+    def reject_recovery_rename(*_args):
+        raise patcher.PatcherError("required renameat2 operation is unavailable")
+
+    monkeypatch.setattr(patcher, "_renameat2", reject_recovery_rename)
+    parent_fd = os.open(tmp_path, patcher.DIRECTORY)
+    try:
+        with pytest.raises(patcher.RollbackError) as raised:
+            patcher._preserve_conflict_object(
+                parent_fd,
+                target.name,
+                source,
+                target,
+                "displaced-target",
+            )
+    finally:
+        os.close(parent_fd)
+
+    assert source_path.is_symlink()
+    assert source_path.lstat().st_ino == source_inode
+    assert os.readlink(source_path) == "concurrent-link-text"
+    assert target.read_bytes() == b"published staging"
+    assert not list(tmp_path.glob(f".{target.name}.forza-recovery-*"))
+    assert str(source_path) in str(raised.value)
+
+
 def test_conflict_restore_never_unlinks_a_name_swap_after_identity_check(
     tmp_path, monkeypatch
 ):

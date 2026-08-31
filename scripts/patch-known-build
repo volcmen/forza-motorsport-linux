@@ -585,8 +585,8 @@ def _preserve_conflict_object(
             _renameat2(parent_fd, source, parent_fd, recovery, RENAME_NOREPLACE)
         except FileNotFoundError:
             return None
-        except OSError as error:
-            if error.errno == errno.EEXIST:
+        except (OSError, PatcherError) as error:
+            if isinstance(error, OSError) and error.errno == errno.EEXIST:
                 continue
             raise RollbackError(
                 f"concurrent object remains at {source_path}; recovery rename failed"
