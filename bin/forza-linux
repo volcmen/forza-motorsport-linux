@@ -6,17 +6,43 @@ service_name=xodus-forza.service
 systemctl_bin=${FORZA_SYSTEMCTL:-systemctl}
 runtime_dir=${XDG_RUNTIME_DIR:-}
 started_here=0
+started_invocation_id=
+game_pid=
+
+service_is_active() {
+    "$systemctl_bin" --user is-active --quiet "$service_name"
+}
+
+service_invocation_id() {
+    "$systemctl_bin" --user show --property=InvocationID --value "$service_name"
+}
+
+game_child_has_exited() {
+    [[ ! -e /proc/$game_pid ]] || [[ $(awk '{ print $3 }' "/proc/$game_pid/stat" 2>/dev/null) == Z ]]
+}
 
 cleanup() {
     if ((started_here)); then
         started_here=0
-        "$systemctl_bin" --user stop "$service_name" || true
+        if service_is_active && [[ $(service_invocation_id) == "$started_invocation_id" ]]; then
+            "$systemctl_bin" --user stop "$service_name" || true
+        fi
     fi
 }
 
+forward_signal() {
+    local signal=$1 exit_status=$2
+    if [[ -n $game_pid ]]; then
+        kill -"$signal" "$game_pid" 2>/dev/null || true
+        wait "$game_pid" 2>/dev/null || true
+        game_pid=
+    fi
+    exit "$exit_status"
+}
+
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'forward_signal INT 130' INT
+trap 'forward_signal TERM 143' TERM
 
 if (($# == 0)); then
     printf 'error: game command is required\n' >&2
@@ -28,11 +54,18 @@ if [[ -z $runtime_dir ]]; then
     exit 1
 fi
 
+umask 0077
+exec {coordinator_fd}>"$runtime_dir/forza-linux.lock"
+if ! flock -n "$coordinator_fd"; then
+    printf 'error: another Forza launcher is already running\n' >&2
+    exit 1
+fi
+
 if [[ -n ${PAM_KWALLET5_LOGIN:-} && -S ${PAM_KWALLET5_LOGIN} ]]; then
     "$systemctl_bin" --user start plasma-kwallet-pam.service || true
 fi
 
-if "$systemctl_bin" --user is-active --quiet "$service_name"; then
+if service_is_active; then
     :
 else
     activity_status=$?
@@ -40,23 +73,45 @@ else
         printf 'error: cannot determine whether %s is active\n' "$service_name" >&2
         exit 1
     fi
+    socket_path="$runtime_dir/xodus.sock"
+    if [[ -S $socket_path ]]; then
+        rm -f -- "$socket_path"
+    fi
     if ! "$systemctl_bin" --user start "$service_name"; then
         printf 'error: cannot start %s\n' "$service_name" >&2
         exit 1
     fi
     started_here=1
+    started_invocation_id=$(service_invocation_id)
+    if [[ -z $started_invocation_id ]]; then
+        printf 'error: cannot capture %s invocation identity\n' "$service_name" >&2
+        exit 1
+    fi
 fi
 
 socket_path="$runtime_dir/xodus.sock"
-deadline=$((SECONDS + 5))
-until [[ -S $socket_path ]]; do
-    if ((SECONDS >= deadline)); then
+monotonic_ms() {
+    awk '{ printf "%.0f\n", $1 * 1000 }' /proc/uptime
+}
+
+deadline=$(( $(monotonic_ms) + 5000 ))
+until [[ -S $socket_path ]] && service_is_active; do
+    if (( $(monotonic_ms) >= deadline )); then
         printf 'error: timed out waiting for %s\n' "$socket_path" >&2
         exit 1
     fi
     sleep 0.1
 done
 
-"$@"
-game_status=$?
+env --default-signal=INT --default-signal=TERM "$@" &
+game_pid=$!
+until game_child_has_exited; do
+    sleep 0.05
+done
+if wait "$game_pid"; then
+    game_status=0
+else
+    game_status=$?
+fi
+game_pid=
 exit "$game_status"
