@@ -416,14 +416,21 @@ def _write_backup_manifest(
 
 
 def _rollback_entries(entries: Sequence[RollbackEntry]) -> None:
-    active = [entry for entry in entries if entry.active]
+    active = []
     preflight_errors = []
-    for entry in active:
+    for entry in entries:
+        if not entry.active:
+            continue
         try:
-            if inspect_target(entry.path, entry.spec) is not PatchState.PATCHED:
-                raise UnknownBuild(f"target is not patched: {entry.path}")
+            state = inspect_target(entry.path, entry.spec)
+            if state is PatchState.ORIGINAL:
+                entry.active = False
+                continue
+            if state is not PatchState.PATCHED:
+                raise UnknownBuild(f"target is neither original nor patched: {entry.path}")
             if sha256(entry.backup) != entry.spec.original_sha256:
                 raise UnknownBuild(f"backup is not original: {entry.backup}")
+            active.append(entry)
         except Exception as error:
             preflight_errors.append(f"{entry.path}: {error}")
     if preflight_errors:

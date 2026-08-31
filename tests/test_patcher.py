@@ -389,3 +389,28 @@ def test_restore_forza_rejects_symlinked_backup_component(
         inspect_target(target, synthetic_specs[target.name]) is PatchState.PATCHED
         for target in resolve_forza_targets(tmp_path)
     )
+
+
+def test_apply_forza_rolls_back_only_published_targets_after_pre_replace_failure(
+    tmp_path, synthetic_specs, monkeypatch
+):
+    populate_forza_root(tmp_path, synthetic_specs)
+    targets = resolve_forza_targets(tmp_path)
+    backup_root = tmp_path / "backups"
+    real_replace = patcher._atomic_replace
+
+    def fail_second_target(path, data, mode):
+        if path == targets[1]:
+            raise OSError("target two replace failure")
+        return real_replace(path, data, mode)
+
+    monkeypatch.setattr(patcher, "_atomic_replace", fail_second_target)
+
+    with pytest.raises(OSError, match="target two replace failure"):
+        apply_forza(tmp_path, synthetic_specs, backup_root)
+
+    assert all(
+        inspect_target(target, synthetic_specs[target.name]) is PatchState.ORIGINAL
+        for target in targets
+    )
+    assert not list(backup_root.glob("*.json"))
