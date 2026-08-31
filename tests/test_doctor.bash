@@ -292,6 +292,53 @@ test_secret_service_first_xdg_definition_shadows_lower_priority_provider() {
     tear_down
 }
 
+test_secret_service_accepts_valid_crlf_definition() {
+    local definition
+    set_up
+    definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+    printf '[D-BUS Service]\r\nName=org.freedesktop.secrets\r\nExec="/usr/bin/ksecretd" --daemon\r\n' > "$definition"
+    run_doctor
+    assert_contains "$output" 'PASS Secret Service'
+    tear_down
+}
+
+test_secret_service_rejects_additional_structural_negatives() {
+    local definition
+    set_up
+    definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+    printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
+        'Exec=/usr/bin/ksecretd' '[Other]' 'Name=org.freedesktop.secrets' > "$definition"
+    run_doctor
+    assert_contains "$output" 'FAIL Secret Service'
+    tear_down
+
+    set_up
+    definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+    printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
+        'Exec=/usr/bin/ksecretd' '[Other]' 'Exec=/usr/bin/ksecretd' > "$definition"
+    run_doctor
+    assert_contains "$output" 'FAIL Secret Service'
+    tear_down
+
+    set_up
+    definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+    printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
+        'Exec=/usr/bin/ksecretd' 'Exec=/usr/bin/ksecretd' > "$definition"
+    run_doctor
+    assert_contains "$output" 'FAIL Secret Service'
+    tear_down
+
+    set_up
+    definition="$TEST_ROOT/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+    rm -- "$definition"
+    printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
+        'Exec=/usr/bin/ksecretd' > "$WORK_ROOT/real-secrets.service"
+    ln -s -- "$WORK_ROOT/real-secrets.service" "$definition"
+    run_doctor
+    assert_contains "$output" 'FAIL Secret Service'
+    tear_down
+}
+
 test_service_and_known_build_states_distinguish_pass_warn_and_fail() {
     set_up
     export FORZA_FAKE_SERVICE_STATE=enabled
@@ -355,6 +402,8 @@ run_test test_secret_service_accepts_owner_or_kde_provider_and_fails_without_eit
 run_test test_secret_service_rejects_non_definition_text_and_malformed_exec
 run_test test_secret_service_rejects_wrong_sections_duplicates_and_untrusted_executables
 run_test test_secret_service_first_xdg_definition_shadows_lower_priority_provider
+run_test test_secret_service_accepts_valid_crlf_definition
+run_test test_secret_service_rejects_additional_structural_negatives
 run_test test_service_and_known_build_states_distinguish_pass_warn_and_fail
 run_test test_free_disk_space_has_pass_warn_and_fail_thresholds
 
