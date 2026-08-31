@@ -58,42 +58,76 @@ report_directory() {
 }
 
 has_kde_secret_service_provider() {
-    local candidate data_dir line name= exec= name_count exec_count
-    local -a service_dirs=("$data_root/dbus-1/services")
-    if [[ -z $test_root ]]; then
+    local candidate= check_executable data_dir executable line name= exec=
+    local active_section=0 invalid_key=0 name_count=0 exec_count=0 section_count=0
+    local -a data_dirs=("$data_root")
+    if [[ -n $test_root ]]; then
+        data_dirs+=("$test_root/usr/local/share" "$test_root/usr/share")
+    else
         local -a xdg_data_dirs
         IFS=: read -r -a xdg_data_dirs <<< "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
         for data_dir in "${xdg_data_dirs[@]}"; do
-            service_dirs+=("$data_dir/dbus-1/services")
+            [[ $data_dir == /* ]] && data_dirs+=("$data_dir")
         done
     fi
-    for data_dir in "${service_dirs[@]}"; do
-        candidate="$data_dir/org.freedesktop.secrets.service"
-        [[ -f $candidate ]] || continue
-        name=
-        exec=
-        name_count=0
-        exec_count=0
-        while IFS= read -r line || [[ -n $line ]]; do
-            case "$line" in
-                Name=*)
-                    name=${line#Name=}
-                    ((name_count += 1))
-                    ;;
-                Exec=*)
-                    exec=${line#Exec=}
-                    ((exec_count += 1))
-                    ;;
-            esac
-        done < "$candidate"
-        if ((name_count == 1 && exec_count == 1)) && [[ $name == org.freedesktop.secrets ]] && \
-            [[ $exec == /* ]] && [[ -f $exec && -x $exec ]]; then
-            case "${exec##*/}" in
-                ksecretd | ksecretd5 | ksecretd6 | kwalletd | kwalletd5 | kwalletd6) return 0 ;;
-            esac
+    for data_dir in "${data_dirs[@]}"; do
+        if [[ -e $data_dir/dbus-1/services/org.freedesktop.secrets.service || \
+            -L $data_dir/dbus-1/services/org.freedesktop.secrets.service ]]; then
+            candidate="$data_dir/dbus-1/services/org.freedesktop.secrets.service"
+            break
         fi
     done
-    return 1
+    [[ -n $candidate && -f $candidate && ! -L $candidate ]] || return 1
+
+    while IFS= read -r line || [[ -n $line ]]; do
+        case "$line" in
+            '[D-BUS Service]')
+                active_section=1
+                ((section_count += 1))
+                ;;
+            \[*\]) active_section=0 ;;
+            Name=*)
+                if ((active_section)); then
+                    name=${line#Name=}
+                    ((name_count += 1))
+                else
+                    invalid_key=1
+                fi
+                ;;
+            Exec=*)
+                if ((active_section)); then
+                    exec=${line#Exec=}
+                    ((exec_count += 1))
+                else
+                    invalid_key=1
+                fi
+                ;;
+        esac
+    done < "$candidate"
+    ((section_count == 1 && name_count == 1 && exec_count == 1 && !invalid_key)) || return 1
+    [[ $name == org.freedesktop.secrets ]] || return 1
+    if ! executable=$(python3 - "$exec" <<'PY'
+import shlex
+import sys
+
+try:
+    command = shlex.split(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+if not command:
+    raise SystemExit(1)
+print(command[0])
+PY
+    ); then
+        return 1
+    fi
+    case "$executable" in
+        /usr/bin/ksecretd | /usr/bin/ksecretd5 | /usr/bin/ksecretd6 | /usr/bin/kwalletd | /usr/bin/kwalletd5 | /usr/bin/kwalletd6) ;;
+        *) return 1 ;;
+    esac
+    check_executable=$executable
+    [[ -z $test_root ]] || check_executable="$test_root$executable"
+    [[ -f $check_executable && ! -L $check_executable && -x $check_executable ]]
 }
 
 inspect_target() {
