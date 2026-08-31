@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import os
 import secrets
@@ -26,6 +28,12 @@ PAYLOADS = (
 MANIFEST = ".local/state/forza-motorsport-linux/install-manifest"
 HEADER = "forza-motorsport-linux-install-v1"
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+RENAME_NOREPLACE = 1
+LIBC = ctypes.CDLL(None, use_errno=True)
+RENAMEAT2 = getattr(LIBC, "renameat2", None)
+if RENAMEAT2 is not None:
+    RENAMEAT2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    RENAMEAT2.restype = ctypes.c_int
 
 
 class SecureFilesError(RuntimeError):
@@ -105,13 +113,6 @@ def read_regular_absolute(path: str, *, executable: bool) -> tuple[bytes, int]:
         os.close(parent_fd)
 
 
-def lstat_at(parent_fd: int, leaf: str) -> os.stat_result | None:
-    try:
-        return os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-
-
 def write_new_at(parent_fd: int, leaf: str, data: bytes, mode: int) -> None:
     fd = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent_fd)
     try:
@@ -124,6 +125,18 @@ def write_new_at(parent_fd: int, leaf: str, data: bytes, mode: int) -> None:
         os.close(fd)
 
 
+def rename_noreplace(source_fd: int, source: str, destination_fd: int, destination: str) -> None:
+    if RENAMEAT2 is None:
+        raise SecureFilesError("renameat2 RENAME_NOREPLACE is unavailable")
+    result = RENAMEAT2(source_fd, os.fsencode(source), destination_fd, os.fsencode(destination), RENAME_NOREPLACE)
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.ENOSYS, errno.EINVAL}:
+        raise SecureFilesError("renameat2 RENAME_NOREPLACE is unavailable")
+    raise OSError(error_number, os.strerror(error_number), destination)
+
+
 def read_root_file(root_fd: int, relative: str) -> tuple[bytes, int, os.stat_result]:
     parent_fd, leaf = open_parent(root_fd, relative, create=False)
     try:
@@ -132,18 +145,29 @@ def read_root_file(root_fd: int, relative: str) -> tuple[bytes, int, os.stat_res
         os.close(parent_fd)
 
 
-def remove_tree(directory_fd: int) -> None:
-    for name in os.listdir(directory_fd):
-        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if stat.S_ISDIR(info.st_mode):
-            child_fd = os.open(name, DIRECTORY, dir_fd=directory_fd)
+def remove_tree(directory_fd: int, pause_after_lstat: int, lstat_count: list[int]) -> None:
+    while names := sorted(os.listdir(directory_fd)):
+        for name in names:
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            lstat_count[0] += 1
+            if pause_after_lstat == lstat_count[0]:
+                time.sleep(0.5)
+            if not stat.S_ISDIR(info.st_mode):
+                os.unlink(name, dir_fd=directory_fd)
+                continue
             try:
-                remove_tree(child_fd)
+                child_fd = os.open(name, DIRECTORY, dir_fd=directory_fd)
+            except OSError:
+                current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if stat.S_ISDIR(current.st_mode):
+                    raise
+                os.unlink(name, dir_fd=directory_fd)
+                continue
+            try:
+                remove_tree(child_fd, pause_after_lstat, lstat_count)
             finally:
                 os.close(child_fd)
             os.rmdir(name, dir_fd=directory_fd)
-        else:
-            os.unlink(name, dir_fd=directory_fd)
 
 
 def parse_manifest(data: bytes) -> dict[str, tuple[int, str]]:
@@ -213,9 +237,7 @@ def publish(stage_fd: int, root_fd: int, relative: str) -> os.stat_result:
     source_parent, leaf = open_parent(stage_fd, relative, create=False)
     destination_parent, destination_leaf = open_parent(root_fd, relative, create=True)
     try:
-        if lstat_at(destination_parent, destination_leaf) is not None:
-            raise SecureFilesError(f"refusing conflicting destination: {relative}")
-        os.rename(leaf, destination_leaf, src_dir_fd=source_parent, dst_dir_fd=destination_parent)
+        rename_noreplace(source_parent, leaf, destination_parent, destination_leaf)
         info = os.stat(destination_leaf, dir_fd=destination_parent, follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode):
             raise SecureFilesError(f"published destination is not regular: {relative}")
@@ -225,15 +247,71 @@ def publish(stage_fd: int, root_fd: int, relative: str) -> os.stat_result:
         os.close(destination_parent)
 
 
+def quarantine_name(prefix: str) -> str:
+    return f".{prefix}-{secrets.token_hex(12)}"
+
+
+def preserve_quarantine(parent_fd: int, quarantine: str, leaf: str, relative: str) -> None:
+    try:
+        rename_noreplace(parent_fd, quarantine, parent_fd, leaf)
+        print(f"warning: preserving replaced file: {relative}", file=sys.stderr)
+        return
+    except OSError as error:
+        if error.errno != errno.EEXIST:
+            raise
+    recovery = quarantine_name("forza-recovery")
+    rename_noreplace(parent_fd, quarantine, parent_fd, recovery)
+    print(
+        f"warning: preserving replaced file at recovery name {recovery}: {relative}",
+        file=sys.stderr,
+    )
+
+
+def quarantine_then_verify(
+    parent_fd: int,
+    leaf: str,
+    relative: str,
+    expected_mode: int,
+    expected_hash: str,
+    expected_identity: tuple[int, int] | None,
+) -> bool:
+    quarantine = quarantine_name("forza-quarantine")
+    try:
+        rename_noreplace(parent_fd, leaf, parent_fd, quarantine)
+    except FileNotFoundError:
+        return False
+    try:
+        data, mode, info = read_regular_at(parent_fd, quarantine)
+        matches = mode == expected_mode and digest(data) == expected_hash
+        if expected_identity is not None:
+            matches = matches and (info.st_dev, info.st_ino) == expected_identity
+        if matches:
+            os.unlink(quarantine, dir_fd=parent_fd)
+            return True
+        preserve_quarantine(parent_fd, quarantine, leaf, relative)
+        return False
+    except Exception:
+        try:
+            preserve_quarantine(parent_fd, quarantine, leaf, relative)
+        except (FileNotFoundError, OSError, SecureFilesError):
+            print(f"warning: preserving quarantined file: {relative}", file=sys.stderr)
+        raise
+
+
 def rollback(root_fd: int, published: Iterable[tuple[str, int, int, int, str]]) -> None:
     for relative, device, inode, mode, expected_hash in reversed(tuple(published)):
         try:
             parent_fd, leaf = open_parent(root_fd, relative, create=False)
             try:
-                data, actual_mode, info = read_regular_at(parent_fd, leaf)
-                if (info.st_dev, info.st_ino, actual_mode, digest(data)) == (device, inode, mode, expected_hash):
-                    os.unlink(leaf, dir_fd=parent_fd)
-                else:
+                removed = quarantine_then_verify(
+                    parent_fd,
+                    leaf,
+                    relative,
+                    mode,
+                    expected_hash,
+                    (device, inode),
+                )
+                if not removed:
                     print(f"warning: preserving replaced file during rollback: {relative}", file=sys.stderr)
             finally:
                 os.close(parent_fd)
@@ -294,7 +372,10 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
 
         fail_after = numeric_environment("FORZA_INSTALL_FAIL_AFTER_PUBLISH") if explicit_root else 0
         pause_after = numeric_environment("FORZA_INSTALL_PAUSE_AFTER_PUBLISH") if explicit_root else 0
+        pause_before = numeric_environment("FORZA_INSTALL_PAUSE_BEFORE_PUBLISH") if explicit_root else 0
         for count, relative in enumerate(PAYLOADS, start=1):
+            if pause_before == count:
+                time.sleep(0.5)
             info = publish(stage_fd, root_fd, relative)
             data, mode, _ = read_root_file(root_fd, relative)
             published.append((relative, info.st_dev, info.st_ino, mode, digest(data)))
@@ -311,7 +392,8 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
     finally:
         if stage_fd >= 0:
             try:
-                remove_tree(stage_fd)
+                cleanup_pause = numeric_environment("FORZA_INSTALL_PAUSE_AFTER_CLEANUP_LSTAT") if explicit_root else 0
+                remove_tree(stage_fd, cleanup_pause, [0])
             finally:
                 os.close(stage_fd)
         if stage and stage_info is not None:
@@ -340,10 +422,7 @@ def uninstall(root: str) -> bool:
             try:
                 parent_fd, leaf = open_parent(root_fd, relative, create=False)
                 try:
-                    current, current_mode, _ = read_regular_at(parent_fd, leaf)
-                    if current_mode == mode and digest(current) == expected_hash:
-                        os.unlink(leaf, dir_fd=parent_fd)
-                    else:
+                    if not quarantine_then_verify(parent_fd, leaf, relative, mode, expected_hash, None):
                         print(f"warning: preserving modified file: {relative}", file=sys.stderr)
                 finally:
                     os.close(parent_fd)
@@ -351,14 +430,16 @@ def uninstall(root: str) -> bool:
                 pass
         parent_fd, leaf = open_parent(root_fd, MANIFEST, create=False)
         try:
-            current, _, current_info = read_regular_at(parent_fd, leaf)
-            if (current_info.st_dev, current_info.st_ino, digest(current)) != (
-                manifest_info.st_dev,
-                manifest_info.st_ino,
+            removed = quarantine_then_verify(
+                parent_fd,
+                leaf,
+                MANIFEST,
+                stat.S_IMODE(manifest_info.st_mode),
                 digest(data),
-            ):
+                (manifest_info.st_dev, manifest_info.st_ino),
+            )
+            if not removed:
                 raise SecureFilesError("install manifest changed during uninstall")
-            os.unlink(leaf, dir_fd=parent_fd)
         finally:
             os.close(parent_fd)
         return True

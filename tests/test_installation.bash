@@ -265,6 +265,53 @@ test_parent_swap_during_publish_preserves_outside_sentinel() {
     tear_down
 }
 
+test_concurrent_destination_at_publish_boundary_is_preserved() {
+    set_up
+    local destination="$FAKE_ROOT/.local/bin/forza-doctor" attacker_pid
+    (
+        for _ in {1..100}; do [[ -f $FAKE_ROOT/.local/bin/forza-linux ]] && break; sleep 0.01; done
+        [[ -f $FAKE_ROOT/.local/bin/forza-linux ]] || exit 1
+        printf 'concurrent user destination\n' > "$destination"
+    ) &
+    attacker_pid=$!
+    export FORZA_INSTALL_PAUSE_BEFORE_PUBLISH=2
+    assert_command_fails run_install || return 1
+    wait "$attacker_pid" || return 1
+    unset FORZA_INSTALL_PAUSE_BEFORE_PUBLISH
+    assert_eq "$(<"$destination")" 'concurrent user destination' || return 1
+    assert_path_absent "$(manifest_path)"
+    tear_down
+}
+
+test_cleanup_symlink_swap_never_traverses_outside_root() {
+    set_up
+    local outside="$WORK_ROOT/outside" stage local_dir attacker_pid
+    mkdir -p -- "$outside"
+    printf 'outside sentinel\n' > "$outside/sentinel"
+    (
+        for _ in {1..100}; do
+            for stage in "$FAKE_ROOT"/.forza-install-*; do
+                local_dir="$stage/.local"
+                [[ ! -e $FAKE_ROOT/.local/bin/forza-linux ]] || continue
+                [[ -d $local_dir && ! -L $local_dir ]] || continue
+                mv -- "$local_dir" "$stage/local-real"
+                ln -s -- "$outside" "$local_dir"
+                exit 0
+            done
+            sleep 0.01
+        done
+        exit 1
+    ) &
+    attacker_pid=$!
+    export FORZA_INSTALL_FAIL_AFTER_PUBLISH=1 FORZA_INSTALL_PAUSE_AFTER_CLEANUP_LSTAT=1
+    assert_command_fails run_install || return 1
+    wait "$attacker_pid" || return 1
+    unset FORZA_INSTALL_FAIL_AFTER_PUBLISH FORZA_INSTALL_PAUSE_AFTER_CLEANUP_LSTAT
+    assert_eq "$(<"$outside/sentinel")" 'outside sentinel' || return 1
+    assert_path_absent "$outside/bin/forza-linux"
+    tear_down
+}
+
 test_failure_before_manifest_rolls_back_published_files() {
     set_up
     export FORZA_INSTALL_FAIL_BEFORE_MANIFEST=1
@@ -387,7 +434,8 @@ run_test() {
     ((tests_run += 1))
     current_test_failed=0
     unset FORZA_INSTALL_FAIL_AFTER_PUBLISH FORZA_INSTALL_FAIL_BEFORE_MANIFEST \
-        FORZA_INSTALL_PAUSE_AFTER_PUBLISH
+        FORZA_INSTALL_PAUSE_AFTER_PUBLISH FORZA_INSTALL_PAUSE_BEFORE_PUBLISH \
+        FORZA_INSTALL_PAUSE_AFTER_CLEANUP_LSTAT
     "$1" || current_test_failed=1
     if ((current_test_failed == 0)); then
         printf 'PASS: %s\n' "$1"
@@ -409,6 +457,8 @@ run_test test_conflicting_existing_file_is_preserved
 run_test test_mid_publish_failure_rolls_back_all_new_files
 run_test test_rollback_preserves_a_replacement_made_during_failure
 run_test test_parent_swap_during_publish_preserves_outside_sentinel
+run_test test_concurrent_destination_at_publish_boundary_is_preserved
+run_test test_cleanup_symlink_swap_never_traverses_outside_root
 run_test test_failure_before_manifest_rolls_back_published_files
 run_test test_uninstall_rejects_malicious_manifest_paths_before_delete
 run_test test_uninstall_rejects_duplicate_and_out_of_allowlist_manifest_entries
