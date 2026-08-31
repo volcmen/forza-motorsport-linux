@@ -87,6 +87,23 @@ run_uninstall() {
 }
 
 manifest_path() { printf '%s\n' "$FAKE_ROOT/$MANIFEST_RELATIVE_PATH"; }
+journal_path() { printf '%s\n' "$FAKE_ROOT/.local/state/forza-motorsport-linux/transaction-journal"; }
+
+recovery_contains_hash() {
+    local expected=$1 candidate
+    while IFS= read -r -d '' candidate; do
+        [[ $(sha256sum -- "$candidate" | awk '{print $1}') == "$expected" ]] && return 0
+    done < <(find "$FAKE_ROOT/.local/state/forza-motorsport-linux/recovery" -type f -print0 2>/dev/null)
+    return 1
+}
+
+installed_identity_snapshot() {
+    local relative
+    for relative in "${INSTALLED_RELATIVE_PATHS[@]}" "$MANIFEST_RELATIVE_PATH"; do
+        stat -c '%n %d:%i %a %s' -- "$FAKE_ROOT/$relative"
+        sha256sum -- "$FAKE_ROOT/$relative"
+    done
+}
 
 assert_installed_files_match_manifest() {
     local relative path mode digest manifest
@@ -238,13 +255,75 @@ test_rollback_retires_owned_payloads_to_recovery() {
 
 test_crash_after_publish_recovers_journal_before_next_install() {
     set_up
+    local expected_hash
+    expected_hash=$(sha256sum -- "$ROOT/bin/forza-linux" | awk '{print $1}')
     export FORZA_INSTALL_CRASH_AFTER_PUBLISH=1
     assert_command_fails run_install || return 1
     unset FORZA_INSTALL_CRASH_AFTER_PUBLISH
-    assert_file_exists "$FAKE_ROOT/.local/state/forza-motorsport-linux/transaction-journal" || return 1
+    assert_file_exists "$(journal_path)" || return 1
     run_install || return 1
     assert_installed_files_match_manifest || return 1
     [[ -d $FAKE_ROOT/.local/state/forza-motorsport-linux/recovery ]] || fail 'journal recovery directory missing'
+    recovery_contains_hash "$expected_hash" || fail 'crash recovery did not retain the exact published payload'
+    tear_down
+}
+
+test_crash_after_manifest_preserves_commit_and_retires_journal() {
+    set_up
+    local before after
+    export FORZA_INSTALL_CRASH_AFTER_MANIFEST=1
+    assert_command_fails run_install || return 1
+    unset FORZA_INSTALL_CRASH_AFTER_MANIFEST
+    assert_installed_files_match_manifest || return 1
+    assert_file_exists "$(journal_path)" || return 1
+    before=$(installed_identity_snapshot)
+    run_install || return 1
+    after=$(installed_identity_snapshot)
+    assert_eq "$after" "$before" || return 1
+    assert_path_absent "$(journal_path)"
+    tear_down
+}
+
+test_hostile_journal_cannot_retire_local_bin() {
+    set_up
+    local journal transaction='aaaaaaaaaaaaaaaaaaaaaaaa' relative sentinel
+    sentinel="$FAKE_ROOT/.local/bin/user-sentinel"
+    mkdir -p -- "${sentinel%/*}" "$(dirname -- "$(journal_path)")"
+    printf 'user sentinel\n' > "$sentinel"
+    journal=$(journal_path)
+    printf 'forza-motorsport-linux-journal-v1\t%s\t.local/bin\n' "$transaction" > "$journal"
+    for relative in "${INSTALLED_RELATIVE_PATHS[@]}"; do
+        printf '%s\t1\t2\t755\t%s\n' "$relative" '0000000000000000000000000000000000000000000000000000000000000000' >> "$journal"
+    done
+    assert_command_fails run_uninstall || return 1
+    assert_eq "$(<"$sentinel")" 'user sentinel' || return 1
+    assert_file_exists "$journal"
+    tear_down
+}
+
+test_recovery_wrong_mode_fails_before_deposit() {
+    set_up
+    local recovery="$FAKE_ROOT/.local/state/forza-motorsport-linux/recovery"
+    mkdir -p -- "$recovery"
+    chmod 755 -- "$recovery"
+    export FORZA_INSTALL_FAIL_AFTER_PUBLISH=1
+    assert_command_fails run_install || return 1
+    unset FORZA_INSTALL_FAIL_AFTER_PUBLISH
+    [[ -z $(find "$recovery" -mindepth 1 -print -quit) ]] || fail 'wrong-mode recovery received transaction data'
+    tear_down
+}
+
+test_recovery_symlink_fails_without_outside_deposit() {
+    set_up
+    local state="$FAKE_ROOT/.local/state/forza-motorsport-linux" outside="$WORK_ROOT/outside-recovery"
+    mkdir -p -- "$state" "$outside"
+    printf 'outside sentinel\n' > "$outside/sentinel"
+    ln -s -- "$outside" "$state/recovery"
+    export FORZA_INSTALL_FAIL_AFTER_PUBLISH=1
+    assert_command_fails run_install || return 1
+    unset FORZA_INSTALL_FAIL_AFTER_PUBLISH
+    assert_eq "$(<"$outside/sentinel")" 'outside sentinel' || return 1
+    assert_eq "$(find "$outside" -mindepth 1 -maxdepth 1 | wc -l)" '1'
     tear_down
 }
 
@@ -413,6 +492,27 @@ test_uninstall_preserves_modified_installed_file_with_warning() {
     tear_down
 }
 
+test_uninstall_preserves_manifest_replacement() {
+    set_up
+    run_install || return 1
+    local manifest replacement attacker_pid
+    manifest=$(manifest_path)
+    replacement="$WORK_ROOT/replacement-manifest"
+    (
+        for _ in {1..100}; do [[ -e $FAKE_ROOT/.forza-test-before-manifest-retire ]] && break; sleep 0.01; done
+        [[ -e $FAKE_ROOT/.forza-test-before-manifest-retire ]] || exit 1
+        printf 'user replacement manifest\n' > "$replacement"
+        mv -f -- "$replacement" "$manifest"
+    ) &
+    attacker_pid=$!
+    export FORZA_UNINSTALL_PAUSE_BEFORE_MANIFEST_RETIRE=1
+    assert_command_fails run_uninstall || return 1
+    wait "$attacker_pid" || return 1
+    unset FORZA_UNINSTALL_PAUSE_BEFORE_MANIFEST_RETIRE
+    assert_eq "$(<"$manifest")" 'user replacement manifest'
+    tear_down
+}
+
 test_uninstall_preserves_preexisting_empty_project_directory() {
     set_up
     mkdir -p -- "$FAKE_ROOT/.local/libexec/xodus-forza"
@@ -458,7 +558,8 @@ run_test() {
     unset FORZA_INSTALL_FAIL_AFTER_PUBLISH FORZA_INSTALL_FAIL_BEFORE_MANIFEST \
         FORZA_INSTALL_PAUSE_AFTER_PUBLISH FORZA_INSTALL_PAUSE_BEFORE_PUBLISH \
         FORZA_INSTALL_PAUSE_AFTER_CLEANUP_LSTAT FORZA_INSTALL_PAUSE_BEFORE_STAGE_RETIRE \
-        FORZA_INSTALL_CRASH_AFTER_PUBLISH
+        FORZA_INSTALL_CRASH_AFTER_PUBLISH FORZA_INSTALL_CRASH_AFTER_MANIFEST \
+        FORZA_UNINSTALL_PAUSE_BEFORE_MANIFEST_RETIRE
     "$1" || current_test_failed=1
     if ((current_test_failed == 0)); then
         printf 'PASS: %s\n' "$1"
@@ -480,6 +581,10 @@ run_test test_conflicting_existing_file_is_preserved
 run_test test_mid_publish_failure_rolls_back_all_new_files
 run_test test_rollback_retires_owned_payloads_to_recovery
 run_test test_crash_after_publish_recovers_journal_before_next_install
+run_test test_crash_after_manifest_preserves_commit_and_retires_journal
+run_test test_hostile_journal_cannot_retire_local_bin
+run_test test_recovery_wrong_mode_fails_before_deposit
+run_test test_recovery_symlink_fails_without_outside_deposit
 run_test test_rollback_preserves_a_replacement_made_during_failure
 run_test test_parent_swap_during_publish_preserves_outside_sentinel
 run_test test_concurrent_destination_at_publish_boundary_is_preserved
@@ -488,6 +593,7 @@ run_test test_failure_before_manifest_rolls_back_published_files
 run_test test_uninstall_rejects_malicious_manifest_paths_before_delete
 run_test test_uninstall_rejects_duplicate_and_out_of_allowlist_manifest_entries
 run_test test_uninstall_preserves_modified_installed_file_with_warning
+run_test test_uninstall_preserves_manifest_replacement
 run_test test_uninstall_preserves_preexisting_empty_project_directory
 run_test test_uninstall_is_idempotent_and_only_daemon_reloads
 run_test test_forza_install_root_seam_never_uses_home

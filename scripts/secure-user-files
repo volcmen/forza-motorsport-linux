@@ -14,7 +14,6 @@ import sys
 import time
 from collections.abc import Iterable
 
-
 PAYLOADS = (
     ".local/bin/forza-linux",
     ".local/bin/forza-doctor",
@@ -30,8 +29,11 @@ STATE_ROOT = ".local/state/forza-motorsport-linux"
 RECOVERY_ROOT = f"{STATE_ROOT}/recovery"
 JOURNAL = f"{STATE_ROOT}/transaction-journal"
 HEADER = "forza-motorsport-linux-install-v1"
+JOURNAL_HEADER = "forza-motorsport-linux-journal-v2"
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 RENAME_NOREPLACE = 1
+TOKEN_BYTES = 12
+TOKEN_LENGTH = TOKEN_BYTES * 2
 LIBC = ctypes.CDLL(None, use_errno=True)
 RENAMEAT2 = getattr(LIBC, "renameat2", None)
 if RENAMEAT2 is not None:
@@ -52,6 +54,11 @@ def relative_parts(relative: str) -> list[str]:
     if not relative or relative.startswith("/") or any(part in {"", ".", ".."} for part in parts):
         raise SecureFilesError(f"unsafe relative path: {relative}")
     return parts
+
+
+def validate_token(value: str, label: str) -> None:
+    if len(value) != TOKEN_LENGTH or any(character not in "0123456789abcdef" for character in value):
+        raise SecureFilesError(f"invalid {label}")
 
 
 def open_absolute_directory(path: str) -> int:
@@ -80,6 +87,7 @@ def open_parent(root_fd: int, relative: str, *, create: bool) -> tuple[int, str]
                 if not create:
                     raise
                 os.mkdir(part, 0o755, dir_fd=fd)
+                os.fsync(fd)
                 next_fd = os.open(part, DIRECTORY, dir_fd=fd)
             os.close(fd)
             fd = next_fd
@@ -116,7 +124,7 @@ def read_regular_absolute(path: str, *, executable: bool) -> tuple[bytes, int]:
         os.close(parent_fd)
 
 
-def write_new_at(parent_fd: int, leaf: str, data: bytes, mode: int) -> None:
+def write_new_at(parent_fd: int, leaf: str, data: bytes, mode: int) -> os.stat_result:
     fd = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent_fd)
     try:
         view = memoryview(data)
@@ -124,6 +132,8 @@ def write_new_at(parent_fd: int, leaf: str, data: bytes, mode: int) -> None:
             written = os.write(fd, view)
             view = view[written:]
         os.fchmod(fd, mode)
+        os.fsync(fd)
+        return os.fstat(fd)
     finally:
         os.close(fd)
 
@@ -138,6 +148,13 @@ def rename_noreplace(source_fd: int, source: str, destination_fd: int, destinati
     if error_number in {errno.ENOSYS, errno.EINVAL}:
         raise SecureFilesError("renameat2 RENAME_NOREPLACE is unavailable")
     raise OSError(error_number, os.strerror(error_number), destination)
+
+
+def durable_rename_noreplace(source_fd: int, source: str, destination_fd: int, destination: str) -> None:
+    rename_noreplace(source_fd, source, destination_fd, destination)
+    os.fsync(source_fd)
+    if destination_fd != source_fd:
+        os.fsync(destination_fd)
 
 
 def read_root_file(root_fd: int, relative: str) -> tuple[bytes, int, os.stat_result]:
@@ -158,6 +175,7 @@ def open_directory_relative(root_fd: int, relative: str, *, create: bool) -> int
                 if not create:
                     raise
                 os.mkdir(part, 0o700, dir_fd=fd)
+                os.fsync(fd)
                 next_fd = os.open(part, DIRECTORY, dir_fd=fd)
             os.close(fd)
             fd = next_fd
@@ -167,17 +185,43 @@ def open_directory_relative(root_fd: int, relative: str, *, create: bool) -> int
         raise
 
 
+def open_secure_child_directory(parent_fd: int, leaf: str) -> int:
+    try:
+        os.mkdir(leaf, 0o700, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except FileExistsError:
+        pass
+    fd = os.open(leaf, DIRECTORY, dir_fd=parent_fd)
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise SecureFilesError(f"recovery directory has unsafe ownership or mode: {leaf}")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
 def recovery_directory(root_fd: int, transaction: str) -> int:
-    return open_directory_relative(root_fd, f"{RECOVERY_ROOT}/{transaction}", create=True)
+    validate_token(transaction, "transaction id")
+    state_fd = open_directory_relative(root_fd, STATE_ROOT, create=True)
+    try:
+        recovery_fd = open_secure_child_directory(state_fd, "recovery")
+    finally:
+        os.close(state_fd)
+    try:
+        return open_secure_child_directory(recovery_fd, transaction)
+    finally:
+        os.close(recovery_fd)
 
 
 def retire_name(parent_fd: int, leaf: str, root_fd: int, transaction: str, label: str) -> None:
     recovery_fd = recovery_directory(root_fd, transaction)
     try:
         for _ in range(100):
-            name = f"{label}-{secrets.token_hex(12)}"
+            name = f"{label}-{secrets.token_hex(TOKEN_BYTES)}"
             try:
-                rename_noreplace(parent_fd, leaf, recovery_fd, name)
+                durable_rename_noreplace(parent_fd, leaf, recovery_fd, name)
                 return
             except OSError as error:
                 if error.errno != errno.EEXIST:
@@ -231,55 +275,121 @@ def manifest_bytes(records: dict[str, tuple[int, str]]) -> bytes:
     return ("\n".join(lines) + "\n").encode()
 
 
-def journal_bytes(transaction: str, stage: str, records: dict[str, tuple[int, int, int, str]]) -> bytes:
-    lines = [f"forza-motorsport-linux-journal-v1\t{transaction}\t{stage}"]
+def journal_bytes(
+    transaction: str,
+    stage: str,
+    stage_identity: tuple[int, int],
+    records: dict[str, tuple[int, int, int, str]],
+) -> bytes:
+    stage_device, stage_inode = stage_identity
+    lines = [f"{JOURNAL_HEADER}\t{transaction}\t{stage}\t{stage_device}\t{stage_inode}"]
     for relative in PAYLOADS:
         device, inode, mode, file_hash = records[relative]
         lines.append(f"{relative}\t{device}\t{inode}\t{mode:o}\t{file_hash}")
     return ("\n".join(lines) + "\n").encode()
 
 
-def parse_journal(data: bytes) -> tuple[str, str, dict[str, tuple[int, int, int, str]]]:
-    lines = data.decode("utf-8").splitlines()
+def parse_journal(
+    data: bytes,
+) -> tuple[str, str, tuple[int, int], dict[str, tuple[int, int, int, str]]]:
+    try:
+        lines = data.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise SecureFilesError("transaction journal is not UTF-8") from error
     header = lines[0].split("\t") if lines else []
-    if len(header) != 3 or header[0] != "forza-motorsport-linux-journal-v1":
+    if len(lines) != len(PAYLOADS) + 1 or len(header) != 5 or header[0] != JOURNAL_HEADER:
         raise SecureFilesError("unrecognized transaction journal")
-    transaction, stage = header[1:]
-    relative_parts(transaction)
-    relative_parts(stage)
+    transaction, stage, stage_device, stage_inode = header[1:]
+    validate_token(transaction, "transaction id")
+    if stage != f".forza-install-{transaction}":
+        raise SecureFilesError("transaction journal has an unsafe staging name")
+    if not stage_device.isdigit() or not stage_inode.isdigit():
+        raise SecureFilesError("transaction journal has an invalid staging identity")
+    stage_identity = (int(stage_device), int(stage_inode))
+    if 0 in stage_identity:
+        raise SecureFilesError("transaction journal has an invalid staging identity")
     records: dict[str, tuple[int, int, int, str]] = {}
     for line in lines[1:]:
         fields = line.split("\t")
         if len(fields) != 5 or fields[0] not in PAYLOADS or fields[0] in records:
             raise SecureFilesError("malformed transaction journal")
         relative, device, inode, mode, file_hash = fields
-        if not all(value.isdigit() for value in (device, inode, mode)) or len(file_hash) != 64:
+        if (
+            not device.isdigit()
+            or not inode.isdigit()
+            or not mode
+            or any(character not in "01234567" for character in mode)
+            or len(file_hash) != 64
+            or any(character not in "0123456789abcdef" for character in file_hash)
+        ):
             raise SecureFilesError("malformed transaction journal")
-        records[relative] = (int(device), int(inode), int(mode, 8), file_hash)
+        identity = (int(device), int(inode))
+        if 0 in identity:
+            raise SecureFilesError("malformed transaction journal")
+        records[relative] = (*identity, int(mode, 8), file_hash)
     if set(records) != set(PAYLOADS):
         raise SecureFilesError("transaction journal does not list every payload")
-    return transaction, stage, records
+    return transaction, stage, stage_identity, records
 
 
-def retire_stage(root_fd: int, stage: str, stage_info: os.stat_result | None, transaction: str) -> None:
+def restore_retired_stage(recovery_fd: int, quarantine: str, root_fd: int, stage: str) -> None:
+    try:
+        durable_rename_noreplace(recovery_fd, quarantine, root_fd, stage)
+        print("warning: preserving substituted staging entry", file=sys.stderr)
+    except OSError as error:
+        if error.errno != errno.EEXIST:
+            raise
+        print("warning: preserving substituted staging entry in project recovery", file=sys.stderr)
+
+
+def retire_stage(
+    root_fd: int,
+    stage: str,
+    stage_info: os.stat_result | tuple[int, int] | None,
+    transaction: str,
+) -> None:
     if stage_info is None:
         return
+    expected_identity = (
+        (stage_info.st_dev, stage_info.st_ino) if isinstance(stage_info, os.stat_result) else stage_info
+    )
+    recovery_fd = recovery_directory(root_fd, transaction)
     try:
-        current = os.stat(stage, dir_fd=root_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    if (current.st_dev, current.st_ino) != (stage_info.st_dev, stage_info.st_ino):
-        print("warning: preserving substituted staging directory", file=sys.stderr)
-        return
-    retire_name(root_fd, stage, root_fd, transaction, "stage")
+        for _ in range(100):
+            quarantine = f"stage-{secrets.token_hex(TOKEN_BYTES)}"
+            try:
+                durable_rename_noreplace(root_fd, stage, recovery_fd, quarantine)
+                break
+            except FileNotFoundError:
+                return
+            except OSError as error:
+                if error.errno != errno.EEXIST:
+                    raise
+        else:
+            raise SecureFilesError("cannot reserve unique stage recovery name")
+        try:
+            retired_fd = os.open(quarantine, DIRECTORY, dir_fd=recovery_fd)
+        except OSError:
+            restore_retired_stage(recovery_fd, quarantine, root_fd, stage)
+            return
+        try:
+            retired_info = os.fstat(retired_fd)
+        finally:
+            os.close(retired_fd)
+        if (retired_info.st_dev, retired_info.st_ino) != expected_identity:
+            restore_retired_stage(recovery_fd, quarantine, root_fd, stage)
+    finally:
+        os.close(recovery_fd)
 
 
 def recover_interrupted(root_fd: int) -> None:
     try:
-        data, _, _ = read_root_file(root_fd, JOURNAL)
+        data, journal_mode, journal_info = read_root_file(root_fd, JOURNAL)
     except FileNotFoundError:
         return
-    transaction, stage, records = parse_journal(data)
+    transaction, stage, stage_identity, records = parse_journal(data)
+    recovery_fd = recovery_directory(root_fd, transaction)
+    os.close(recovery_fd)
     try:
         manifest_data, _, _ = read_root_file(root_fd, MANIFEST)
         committed = current_matches(root_fd, parse_manifest(manifest_data))
@@ -293,28 +403,37 @@ def recover_interrupted(root_fd: int) -> None:
                     quarantine_then_verify(parent_fd, leaf, relative, mode, file_hash, (device, inode), root_fd, transaction)
                 finally:
                     os.close(parent_fd)
-            except (FileNotFoundError, OSError, SecureFilesError):
+            except FileNotFoundError:
                 continue
     journal_parent, journal_leaf = open_parent(root_fd, JOURNAL, create=False)
     try:
-        retire_name(journal_parent, journal_leaf, root_fd, transaction, "journal")
+        if not quarantine_then_verify(
+            journal_parent,
+            journal_leaf,
+            JOURNAL,
+            journal_mode,
+            digest(data),
+            (journal_info.st_dev, journal_info.st_ino),
+            root_fd,
+            transaction,
+            owned_label="journal",
+        ):
+            raise SecureFilesError("transaction journal changed during recovery")
     finally:
         os.close(journal_parent)
-    try:
-        stage_info = os.stat(stage, dir_fd=root_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        stage_info = None
-    retire_stage(root_fd, stage, stage_info, transaction)
+    retire_stage(root_fd, stage, stage_identity, transaction)
 
 
-def stage_name(root_fd: int) -> tuple[str, int]:
+def stage_name(root_fd: int) -> tuple[str, str, int]:
     for _ in range(100):
-        name = f".forza-install-{secrets.token_hex(12)}"
+        transaction = secrets.token_hex(TOKEN_BYTES)
+        name = f".forza-install-{transaction}"
         try:
             os.mkdir(name, 0o700, dir_fd=root_fd)
         except FileExistsError:
             continue
-        return name, os.open(name, DIRECTORY, dir_fd=root_fd)
+        os.fsync(root_fd)
+        return transaction, name, os.open(name, DIRECTORY, dir_fd=root_fd)
     raise SecureFilesError("cannot create unique staging directory")
 
 
@@ -322,6 +441,7 @@ def stage_file(stage_fd: int, relative: str, data: bytes, mode: int) -> None:
     parent_fd, leaf = open_parent(stage_fd, relative, create=True)
     try:
         write_new_at(parent_fd, leaf, data, mode)
+        os.fsync(parent_fd)
     finally:
         os.close(parent_fd)
 
@@ -330,23 +450,39 @@ def publish(stage_fd: int, root_fd: int, relative: str) -> os.stat_result:
     source_parent, leaf = open_parent(stage_fd, relative, create=False)
     destination_parent, destination_leaf = open_parent(root_fd, relative, create=True)
     try:
-        rename_noreplace(source_parent, leaf, destination_parent, destination_leaf)
-        info = os.stat(destination_leaf, dir_fd=destination_parent, follow_symlinks=False)
+        info = os.stat(leaf, dir_fd=source_parent, follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode):
-            raise SecureFilesError(f"published destination is not regular: {relative}")
+            raise SecureFilesError(f"staged source is not regular: {relative}")
+        durable_rename_noreplace(source_parent, leaf, destination_parent, destination_leaf)
         return info
     finally:
         os.close(source_parent)
         os.close(destination_parent)
 
 
+def fsync_root_file(root_fd: int, relative: str, expected_identity: tuple[int, int]) -> None:
+    parent_fd, leaf = open_parent(root_fd, relative, create=False)
+    try:
+        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != expected_identity:
+                raise SecureFilesError(f"published file changed before durability: {relative}")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def quarantine_name(prefix: str) -> str:
-    return f".{prefix}-{secrets.token_hex(12)}"
+    return f".{prefix}-{secrets.token_hex(TOKEN_BYTES)}"
 
 
 def preserve_quarantine(parent_fd: int, quarantine: str, leaf: str, root_fd: int, transaction: str, relative: str) -> None:
     try:
-        rename_noreplace(parent_fd, quarantine, parent_fd, leaf)
+        durable_rename_noreplace(parent_fd, quarantine, parent_fd, leaf)
         print(f"warning: preserving replaced file: {relative}", file=sys.stderr)
         return
     except OSError as error:
@@ -368,10 +504,12 @@ def quarantine_then_verify(
     expected_identity: tuple[int, int] | None,
     root_fd: int,
     transaction: str,
+    *,
+    owned_label: str = "owned",
 ) -> bool:
     quarantine = quarantine_name("forza-quarantine")
     try:
-        rename_noreplace(parent_fd, leaf, parent_fd, quarantine)
+        durable_rename_noreplace(parent_fd, leaf, parent_fd, quarantine)
     except FileNotFoundError:
         return False
     try:
@@ -380,7 +518,7 @@ def quarantine_then_verify(
         if expected_identity is not None:
             matches = matches and (info.st_dev, info.st_ino) == expected_identity
         if matches:
-            retire_name(parent_fd, quarantine, root_fd, transaction, "owned")
+            retire_name(parent_fd, quarantine, root_fd, transaction, owned_label)
             return True
         preserve_quarantine(parent_fd, quarantine, leaf, root_fd, transaction, relative)
         return False
@@ -429,7 +567,8 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
     stage_fd = -1
     stage = ""
     stage_info: os.stat_result | None = None
-    transaction = secrets.token_hex(12)
+    transaction = ""
+    committed = False
     published: list[tuple[str, int, int, int, str]] = []
     try:
         recover_interrupted(root_fd)
@@ -466,8 +605,10 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
         if owned:
             return
 
-        stage, stage_fd = stage_name(root_fd)
+        transaction, stage, stage_fd = stage_name(root_fd)
         stage_info = os.fstat(stage_fd)
+        transaction_recovery_fd = recovery_directory(root_fd, transaction)
+        os.close(transaction_recovery_fd)
         journal_records: dict[str, tuple[int, int, int, str]] = {}
         for relative in PAYLOADS:
             data, mode = payload_data[relative]
@@ -475,9 +616,12 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
             _, _, info = read_root_file(stage_fd, relative)
             journal_records[relative] = (info.st_dev, info.st_ino, mode, digest(data))
         stage_file(stage_fd, MANIFEST, staged_manifest, 0o600)
+        os.fsync(stage_fd)
+        stage_identity = (stage_info.st_dev, stage_info.st_ino)
+        journal_data = journal_bytes(transaction, stage, stage_identity, journal_records)
         journal_parent, journal_leaf = open_parent(root_fd, JOURNAL, create=True)
         try:
-            write_new_at(journal_parent, journal_leaf, journal_bytes(transaction, stage, journal_records), 0o600)
+            journal_info = write_new_at(journal_parent, journal_leaf, journal_data, 0o600)
             os.fsync(journal_parent)
         finally:
             os.close(journal_parent)
@@ -485,28 +629,56 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
         fail_after = numeric_environment("FORZA_INSTALL_FAIL_AFTER_PUBLISH") if explicit_root else 0
         pause_after = numeric_environment("FORZA_INSTALL_PAUSE_AFTER_PUBLISH") if explicit_root else 0
         pause_before = numeric_environment("FORZA_INSTALL_PAUSE_BEFORE_PUBLISH") if explicit_root else 0
+        crash_after = numeric_environment("FORZA_INSTALL_CRASH_AFTER_PUBLISH") if explicit_root else 0
         for count, relative in enumerate(PAYLOADS, start=1):
             if pause_before == count:
                 time.sleep(0.5)
             info = publish(stage_fd, root_fd, relative)
-            data, mode, _ = read_root_file(root_fd, relative)
-            published.append((relative, info.st_dev, info.st_ino, mode, digest(data)))
+            mode, expected_hash = records[relative]
+            published.append((relative, info.st_dev, info.st_ino, mode, expected_hash))
             if pause_after == count:
                 time.sleep(0.5)
-            if explicit_root and numeric_environment("FORZA_INSTALL_CRASH_AFTER_PUBLISH") == count:
+            if crash_after == count:
                 os._exit(99)
             if fail_after == count:
                 raise SecureFilesError("simulated publish interruption")
-        if explicit_root and os.environ.get("FORZA_INSTALL_FAIL_BEFORE_MANIFEST") == "1":
+        fail_before_manifest = numeric_environment("FORZA_INSTALL_FAIL_BEFORE_MANIFEST") if explicit_root else 0
+        if fail_before_manifest == 1:
             raise SecureFilesError("simulated failure before manifest publication")
-        publish(stage_fd, root_fd, MANIFEST)
+        manifest_info = publish(stage_fd, root_fd, MANIFEST)
+        published.append(
+            (
+                MANIFEST,
+                manifest_info.st_dev,
+                manifest_info.st_ino,
+                0o600,
+                digest(staged_manifest),
+            )
+        )
+        fsync_root_file(root_fd, MANIFEST, (manifest_info.st_dev, manifest_info.st_ino))
+        committed = True
+        crash_after_manifest = numeric_environment("FORZA_INSTALL_CRASH_AFTER_MANIFEST") if explicit_root else 0
+        if crash_after_manifest == 1:
+            os._exit(99)
         journal_parent, journal_leaf = open_parent(root_fd, JOURNAL, create=False)
         try:
-            retire_name(journal_parent, journal_leaf, root_fd, transaction, "journal")
+            if not quarantine_then_verify(
+                journal_parent,
+                journal_leaf,
+                JOURNAL,
+                0o600,
+                digest(journal_data),
+                (journal_info.st_dev, journal_info.st_ino),
+                root_fd,
+                transaction,
+                owned_label="journal",
+            ):
+                raise SecureFilesError("transaction journal changed before retirement")
         finally:
             os.close(journal_parent)
     except Exception:
-        rollback(root_fd, published, transaction)
+        if not committed:
+            rollback(root_fd, published, transaction)
         raise
     finally:
         if stage_fd >= 0:
@@ -518,16 +690,18 @@ def install(root: str, sources: dict[str, str], explicit_root: bool) -> None:
         os.close(root_fd)
 
 
-def uninstall(root: str) -> bool:
+def uninstall(root: str, explicit_root: bool = False) -> bool:
     root_fd = open_absolute_directory(root)
-    transaction = secrets.token_hex(12)
+    transaction = secrets.token_hex(TOKEN_BYTES)
     try:
         recover_interrupted(root_fd)
         try:
-            data, _, manifest_info = read_root_file(root_fd, MANIFEST)
+            data, manifest_mode, manifest_info = read_root_file(root_fd, MANIFEST)
         except FileNotFoundError:
             return False
         records = parse_manifest(data)
+        transaction_recovery_fd = recovery_directory(root_fd, transaction)
+        os.close(transaction_recovery_fd)
         for relative in PAYLOADS:
             parent_fd, leaf = open_parent(root_fd, relative, create=False)
             os.close(parent_fd)
@@ -544,13 +718,20 @@ def uninstall(root: str) -> bool:
                     os.close(parent_fd)
             except FileNotFoundError:
                 pass
+        pause_before_manifest = (
+            numeric_environment("FORZA_UNINSTALL_PAUSE_BEFORE_MANIFEST_RETIRE") if explicit_root else 0
+        )
+        if pause_before_manifest == 1:
+            write_new_at(root_fd, ".forza-test-before-manifest-retire", b"ready\n", 0o600)
+            os.fsync(root_fd)
+            time.sleep(0.5)
         parent_fd, leaf = open_parent(root_fd, MANIFEST, create=False)
         try:
             removed = quarantine_then_verify(
                 parent_fd,
                 leaf,
                 MANIFEST,
-                stat.S_IMODE(manifest_info.st_mode),
+                manifest_mode,
                 digest(data),
                 (manifest_info.st_dev, manifest_info.st_ino),
                 root_fd,
@@ -586,11 +767,12 @@ def main() -> int:
     install_parser.add_argument("--explicit-root", action="store_true")
     uninstall_parser = subparsers.add_parser("uninstall")
     uninstall_parser.add_argument("--root", required=True)
+    uninstall_parser.add_argument("--explicit-root", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "install":
             install(args.root, source_arguments(args.source), args.explicit_root)
-        elif not uninstall(args.root):
+        elif not uninstall(args.root, args.explicit_root):
             return 3
     except (OSError, SecureFilesError) as error:
         print(f"error: {error}", file=sys.stderr)

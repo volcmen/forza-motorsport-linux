@@ -5,6 +5,7 @@ set -u
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 HELPER="$ROOT/scripts/secure-user-files"
 install_root=${FORZA_INSTALL_ROOT:-}
+explicit_root=0
 
 usage() {
     printf '%s\n' "usage: $0 [--root PATH]" >&2
@@ -16,6 +17,7 @@ while (($#)); do
         --root)
             (($# >= 2)) || usage
             install_root=$2
+            explicit_root=1
             shift 2
             ;;
         --help) usage ;;
@@ -29,7 +31,10 @@ done
     exit 1
 }
 
-"$HELPER" uninstall --root "$install_root"
+arguments=(uninstall --root "$install_root")
+((explicit_root)) && arguments+=(--explicit-root)
+
+"$HELPER" "${arguments[@]}"
 helper_status=$?
 case "$helper_status" in
     0)
