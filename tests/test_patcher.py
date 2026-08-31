@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -475,6 +476,51 @@ def test_apply_target_restores_concurrent_nonregular_replacement(
     assert_only_patched_recovery_remains(target, controller_spec)
 
 
+def test_directory_fsync_failure_after_exchange_restores_concurrent_symlink(
+    tmp_path, controller_spec, monkeypatch, capsys
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    target.write_bytes(synthetic_original(controller_spec))
+    replacement = None
+    real_fsync = patcher.os.fsync
+    failed = False
+
+    def fail_first_target_directory_fsync(descriptor):
+        nonlocal failed
+        descriptor_path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        if (
+            not failed
+            and stat.S_ISDIR(os.fstat(descriptor).st_mode)
+            and descriptor_path == target.parent
+        ):
+            failed = True
+            raise OSError("simulated publication directory fsync failure")
+        return real_fsync(descriptor)
+
+    def replace_after_backup(_entry):
+        nonlocal replacement
+        replacement = replace_with_nonregular(target, "symlink")
+
+    monkeypatch.setattr(patcher.os, "fsync", fail_first_target_directory_fsync)
+    with pytest.raises(
+        patcher.PatcherError, match="publication durability failed"
+    ) as raised:
+        apply_target(
+            target,
+            controller_spec,
+            tmp_path / "backups",
+            on_backup=replace_after_backup,
+        )
+
+    assert failed
+    assert replacement is not None
+    assert_nonregular_replacement(target, "symlink", *replacement)
+    assert_only_patched_recovery_remains(target, controller_spec)
+    recovery = target.with_name(f".{target.name}.forza-recovery-publication-conflict")
+    assert str(target) in str(raised.value)
+    assert str(recovery) in capsys.readouterr().err
+
+
 def test_conflict_restore_reports_secondary_public_replacement(tmp_path, capsys):
     target = tmp_path / "windows.gaming.input.dll"
     target.write_bytes(b"second concurrent public target")
@@ -502,6 +548,95 @@ def test_conflict_restore_reports_secondary_public_replacement(tmp_path, capsys)
     assert recovery.stat().st_ino == target_inode
     assert str(recovery) in capsys.readouterr().err
     assert not (tmp_path / displaced).exists()
+
+
+def test_second_exchange_io_failure_reports_deterministic_object_locations(
+    tmp_path, controller_spec, monkeypatch
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    original = synthetic_original(controller_spec)
+    patched = synthetic_patched(controller_spec)
+    target.write_bytes(original)
+    expected_identity = (target.stat().st_dev, target.stat().st_ino)
+    concurrent = tmp_path / "concurrent-symlink"
+    concurrent.symlink_to("concurrent-link-text")
+    concurrent_inode = concurrent.lstat().st_ino
+    os.replace(concurrent, target)
+    real_renameat2 = patcher._renameat2
+    exchange_calls = 0
+
+    def fail_restorative_exchange(source_fd, source, destination_fd, destination, flags):
+        nonlocal exchange_calls
+        if flags == patcher.RENAME_EXCHANGE:
+            exchange_calls += 1
+            if exchange_calls == 2:
+                raise OSError(errno.EIO, "simulated restorative exchange failure")
+        return real_renameat2(source_fd, source, destination_fd, destination, flags)
+
+    monkeypatch.setattr(patcher, "_renameat2", fail_restorative_exchange)
+    parent_fd = os.open(tmp_path, patcher.DIRECTORY)
+    try:
+        with pytest.raises(patcher.PatcherError) as raised:
+            patcher._atomic_replace_at(
+                parent_fd,
+                target.name,
+                target,
+                patched,
+                0o644,
+                expected_identity,
+                sha256_bytes(original),
+            )
+    finally:
+        os.close(parent_fd)
+
+    recovery = target.with_name(f".{target.name}.forza-recovery-displaced-target")
+    assert exchange_calls == 2
+    assert target.read_bytes() == patched
+    assert recovery.is_symlink()
+    assert recovery.lstat().st_ino == concurrent_inode
+    assert os.readlink(recovery) == "concurrent-link-text"
+    assert sorted(target.parent.glob(f".{target.name}.forza-*")) == [recovery]
+    assert str(target) in str(raised.value)
+    assert str(recovery) in str(raised.value)
+
+
+def test_recovery_fsync_failure_reports_exact_suffixed_path(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    source = f".{target.name}.forza-source"
+    (tmp_path / source).symlink_to("concurrent-link-text")
+    source_inode = (tmp_path / source).lstat().st_ino
+    collision = target.with_name(f".{target.name}.forza-recovery-displaced-target")
+    collision.write_bytes(b"existing recovery")
+    expected = target.with_name(
+        f".{target.name}.forza-recovery-displaced-target.1"
+    )
+    parent_fd = os.open(tmp_path, patcher.DIRECTORY)
+
+    def fail_recovery_fsync(descriptor):
+        if descriptor == parent_fd:
+            raise OSError("simulated recovery fsync failure")
+        raise AssertionError(f"unexpected fsync descriptor: {descriptor}")
+
+    monkeypatch.setattr(patcher.os, "fsync", fail_recovery_fsync)
+    try:
+        with pytest.raises(patcher.RollbackError) as raised:
+            patcher._preserve_conflict_object(
+                parent_fd,
+                target.name,
+                source,
+                target,
+                "displaced-target",
+            )
+    finally:
+        os.close(parent_fd)
+
+    assert expected.is_symlink()
+    assert expected.lstat().st_ino == source_inode
+    assert os.readlink(expected) == "concurrent-link-text"
+    assert not (tmp_path / source).exists()
+    assert str(expected) in str(raised.value)
 
 
 def test_conflict_restore_never_unlinks_a_name_swap_after_identity_check(
@@ -588,6 +723,55 @@ def test_conflict_restore_handles_a_disappearing_name(
         assert vanished.lstat().st_ino == displaced_inode
         assert os.readlink(vanished) == "concurrent-link"
     assert not list(tmp_path.glob(f".{target.name}.forza-*"))
+
+
+def test_failed_missing_name_fallback_preserves_displaced_object(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "windows.gaming.input.dll"
+    target.write_bytes(b"known published patch")
+    vanished_patch = tmp_path / "concurrently-moved-patch"
+    displaced = f".{target.name}.forza-displaced"
+    (tmp_path / displaced).symlink_to("concurrent-link")
+    displaced_inode = (tmp_path / displaced).lstat().st_ino
+    real_renameat2 = patcher._renameat2
+    exchange_failed = False
+
+    def fail_exchange_then_fallback(source_fd, source, destination_fd, destination, flags):
+        nonlocal exchange_failed
+        if flags == patcher.RENAME_EXCHANGE and not exchange_failed:
+            exchange_failed = True
+            os.replace(target, vanished_patch)
+            raise FileNotFoundError
+        if (
+            flags == patcher.RENAME_NOREPLACE
+            and source == displaced
+            and destination == target.name
+        ):
+            raise OSError(errno.EIO, "simulated fallback restore failure")
+        return real_renameat2(source_fd, source, destination_fd, destination, flags)
+
+    monkeypatch.setattr(patcher, "_renameat2", fail_exchange_then_fallback)
+    parent_fd = os.open(tmp_path, patcher.DIRECTORY)
+    try:
+        with pytest.raises(patcher.RollbackError) as raised:
+            patcher._restore_displaced_after_conflict(
+                parent_fd,
+                target.name,
+                displaced,
+                target,
+            )
+    finally:
+        os.close(parent_fd)
+
+    recovery = target.with_name(f".{target.name}.forza-recovery-displaced-target")
+    assert recovery.is_symlink()
+    assert recovery.lstat().st_ino == displaced_inode
+    assert os.readlink(recovery) == "concurrent-link"
+    assert not list(tmp_path.glob(f".{target.name}.forza-displaced"))
+    assert vanished_patch.read_bytes() == b"known published patch"
+    assert str(target) in str(raised.value)
+    assert str(recovery) in str(raised.value)
 
 
 @pytest.mark.parametrize("replacement_type", ("symlink", "directory"))

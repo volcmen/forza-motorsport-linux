@@ -514,20 +514,58 @@ def _restore_displaced_after_conflict(
             _renameat2(parent_fd, displaced, parent_fd, leaf, RENAME_NOREPLACE)
         except FileNotFoundError:
             return False
-        except OSError as error:
-            if error.errno != errno.EEXIST:
-                raise
-            _preserve_conflict_object(
+        except (OSError, PatcherError) as error:
+            if isinstance(error, OSError) and error.errno == errno.EEXIST:
+                _preserve_conflict_object(
+                    parent_fd, leaf, displaced, display_path, "displaced-target"
+                )
+                return False
+            recovered_path = _preserve_conflict_object(
                 parent_fd, leaf, displaced, display_path, "displaced-target"
             )
-            return False
-        os.fsync(parent_fd)
+            if recovered_path is None:
+                displaced_status = (
+                    f"displaced target no longer exists at "
+                    f"{display_path.with_name(displaced)}"
+                )
+            else:
+                displaced_status = f"displaced target preserved at {recovered_path}"
+            raise RollbackError(
+                f"fallback restoration failed for {display_path}; "
+                f"{displaced_status}; public target remains at {display_path}"
+            ) from error
+        try:
+            os.fsync(parent_fd)
+        except OSError as error:
+            raise RollbackError(
+                f"displaced target restored at {display_path}; directory fsync failed"
+            ) from error
         return True
+    except (OSError, PatcherError) as error:
+        recovered_path = _preserve_conflict_object(
+            parent_fd, leaf, displaced, display_path, "displaced-target"
+        )
+        if recovered_path is None:
+            displaced_status = (
+                f"displaced target no longer exists at "
+                f"{display_path.with_name(displaced)}"
+            )
+        else:
+            displaced_status = f"displaced target preserved at {recovered_path}"
+        raise RollbackError(
+            f"restorative exchange failed for {display_path}; "
+            f"{displaced_status}; "
+            f"published staging remains at {display_path}"
+        ) from error
 
-    _preserve_conflict_object(
-        parent_fd, leaf, displaced, display_path, "publication-conflict"
-    )
-    os.fsync(parent_fd)
+    try:
+        _preserve_conflict_object(
+            parent_fd, leaf, displaced, display_path, "publication-conflict"
+        )
+    except RollbackError as error:
+        raise RollbackError(
+            f"displaced target restored at {display_path}; {error}"
+        ) from error
     return True
 
 
@@ -537,11 +575,12 @@ def _preserve_conflict_object(
     source: str,
     display_path: Path,
     label: str,
-) -> str | None:
+) -> Path | None:
     source_path = display_path.with_name(source)
     for suffix in range(100):
         ending = "" if suffix == 0 else f".{suffix}"
         recovery = f".{leaf}.forza-recovery-{label}{ending}"
+        recovered_path = display_path.with_name(recovery)
         try:
             _renameat2(parent_fd, source, parent_fd, recovery, RENAME_NOREPLACE)
         except FileNotFoundError:
@@ -552,10 +591,14 @@ def _preserve_conflict_object(
             raise RollbackError(
                 f"concurrent object remains at {source_path}; recovery rename failed"
             ) from error
-        os.fsync(parent_fd)
-        recovered_path = display_path.with_name(recovery)
+        try:
+            os.fsync(parent_fd)
+        except OSError as error:
+            raise RollbackError(
+                f"concurrent object preserved at {recovered_path}; directory fsync failed"
+            ) from error
         print(f"warning: preserved concurrent object at {recovered_path}", file=sys.stderr)
-        return recovery
+        return recovered_path
     raise RollbackError(
         f"concurrent object remains at {source_path}; cannot reserve recovery name"
     )
@@ -575,7 +618,18 @@ def _atomic_replace_at(
     try:
         _renameat2(parent_fd, temporary, parent_fd, leaf, RENAME_EXCHANGE)
         exchanged = True
-        os.fsync(parent_fd)
+        try:
+            os.fsync(parent_fd)
+        except OSError as error:
+            restored = _restore_displaced_after_conflict(
+                parent_fd, leaf, temporary, display_path
+            )
+            exchanged = False
+            temporary = ""
+            raise _PublicationConflict(
+                f"target publication durability failed: {display_path}",
+                target_restored=restored,
+            ) from error
         try:
             displaced, displaced_mode, displaced_info = _read_regular_at(
                 parent_fd, temporary, "displaced target"
