@@ -54,7 +54,8 @@ ways:
 - The added tests cover short-header, header-only, 9-, 10-, and 11-byte
   partial, full-descriptor, zero-padding, and unrelated-property cases. Wine's
   compatibility expectations remain strict while `broken()` allowances record
-  the observed native-Windows alternatives without weakening the Wine checks.
+  accepted or possible native-Windows alternatives without weakening the Wine
+  checks. Native Windows was not run for this task.
 
 The modified Wine source remains under its existing LGPL-2.1-or-later source
 headers. The GPL-3.0-or-later SPDX declaration at the top of this file applies
