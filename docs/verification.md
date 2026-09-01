@@ -62,13 +62,17 @@ files, commands, exit states, and semantic limitations.
 
 The scoped Xodus social branch was developed from official `xodus/main` at
 `a92abacb0743f16c769279b9057c8c28435e5ef9`. The final reviewed source range is
-`a92abacb0743f16c769279b9057c8c28435e5ef9..08c995b389f2bbc5d0dbc9d51bcadf1453368266`;
-the final source commit is `08c995b389f2bbc5d0dbc9d51bcadf1453368266`
-(`fix: serialize social overlay actions`). The separate Xodus
+`a92abacb0743f16c769279b9057c8c28435e5ef9..315c343b9412f6cae9bae7f0c49c4b597b5a0502`;
+the final source commit is `315c343b9412f6cae9bae7f0c49c4b597b5a0502`
+(`feat: version the invite-only social overlay request`). Every later
+XGameRuntime build/install/evidence step must consume that exact SHA. The
+separate Xodus
 maintainer-documentation commits are
 `966cb58586db725a1d1201a34457eb2e4a62f33f` and
 `e8bcd8fcfc473e7ad019c3ee8d32841ee6f98fd3`, followed by final lifecycle
-documentation commit `207a721e6a1cc95be04ffaeedc67a4d673d45ca2`.
+documentation commit `207a721e6a1cc95be04ffaeedc67a4d673d45ca2`
+and versioned-XDUI documentation commit
+`b76690da6ff59ace8981bf0428cd729fcd15673d`.
 
 The local source commits in that range are:
 
@@ -87,6 +91,7 @@ The local source commits in that range are:
 | `2b7982a523d6135e6ad4d8f9ca6cf1c877d26047` | Cancellation-safe session-cache invalidation |
 | `903fc4843d25cbfa84db262e41d29a7ca4f8e319` | Bounded activation delivery and fail-closed socket permissions |
 | `08c995b389f2bbc5d0dbc9d51bcadf1453368266` | Shared overlay in-flight gate and capacity-one request queue |
+| `315c343b9412f6cae9bae7f0c49c4b597b5a0502` | Versioned full/invite-only XDUI request and acknowledgement |
 
 The final lifecycle fixes prefer nonempty PeopleHub `displayName` and fall back
 to nonempty `gamertag`. They preserve authorization expiry, remint an expired
@@ -102,6 +107,15 @@ fails closed unless the socket is restricted to exactly `0600`. Refresh,
 Invite, Join, and row activation share one overlay busy gate across button,
 keyboard, controller, and row paths; the nonblocking request queue has capacity
 one and the busy state disables network-action controls until resolution.
+
+XDUI version 1 sends a two-byte version/mode request. Pre-acknowledgement
+rejection returns only `2`; an accepted request receives `0xa1` before exactly
+one terminal `0`, `1`, or `2`. Mode `1` launches only the fixed invite-only UI,
+hides/disables Join, and binds terminal success to a matching Invite request.
+Keyboard and controller activation both dispatch Invite in that mode. Offline
+cutover tests prove that an old payload-free client cannot launch the new UI
+and that a new client rejects an old terminal status as acknowledgement while
+the legacy child is reaped.
 
 ### Automated source gates
 
@@ -120,7 +134,7 @@ cargo test -p xodus --offline -- --skip test_get_xbox_live_dev_token
 cargo test -p xodus-service --offline
 cargo test -p xodus-overlay --offline
 cargo test --workspace --offline -- --skip test_get_xbox_live_dev_token
-cargo build --release -p xodus-service -p xodus-overlay --offline
+cargo build --release -p xodus-service -p xodus-cli -p xodus-overlay --offline
 rg -n 'Authorization:|XBL3\.0|ms-xbl-multiplayer://inviteAccept\?.+' docs crates || true
 git diff --check
 ```
@@ -143,11 +157,11 @@ Results on 2026-09-01:
   **GREEN**, no issues.
 - Protocol compatibility tests: **GREEN**, 6 passed, including a literal XDSO
   version-1 frame assertion.
-- Filtered offline workspace tests: **GREEN**, 109 passed, 1 ignored, and 1
+- Filtered offline workspace tests: **GREEN**, 117 passed, 1 ignored, and 1
   filtered out across 16 suites. `test_get_xbox_live_dev_token` was explicitly
   skipped because it is an upstream anonymous live Microsoft test.
-- Targeted offline release build for `xodus-service` and `xodus-overlay`:
-  **GREEN**.
+- Targeted offline release build for `xodus-service`, `xodus-cli`, and
+  `xodus-overlay`: **GREEN**.
 - Privacy scan: 15 matches, all existing authorization format strings, static
   documentation templates, synthetic test/protocol data, or the literal scan
   expression itself.
