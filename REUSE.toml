@@ -16,6 +16,7 @@ path = [
     "pyproject.toml",
     "scripts/**",
     "tests/**",
+    "tools/**",
 ]
 SPDX-FileCopyrightText = "2026 volcmen"
 SPDX-License-Identifier = "GPL-3.0-or-later"

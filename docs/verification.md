@@ -196,3 +196,16 @@ artifact was installed. The live Xodus checkout, installed service, keychain,
 compatibility prefix, Steam configuration, and game were not mutated or
 started. The branch remains local: it has not been pushed and no public pull
 request exists.
+
+## Local WineGDK XGameRuntime checkpoint
+
+WineGDK commit `27028929130a168a5ed355c3740b2c8e00bb9c62` is the reviewed
+Task 0.5 source checkpoint for owned XUser handles and main-Xodus IPC lifetime.
+The repository's exact-artifact overlay gate produced three green matrices:
+21 tests with the fixture disabled (1 intentional skip), 29 tests for two
+bounded socket-refusal lifecycles, and 27 tests for two synthetic Ping
+lifecycles, all with zero failures. See
+[`xgameruntime-baseline.md`](evidence/xgameruntime-baseline.md) for the source
+revision, artifact hashes, false-positive loader discovery, and isolation
+boundary. Social Unix calls `5..10`, XGameUi, XGameInvite, installation, and
+manual Forza validation are still outstanding at this checkpoint.

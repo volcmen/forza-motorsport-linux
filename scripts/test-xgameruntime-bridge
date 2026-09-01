@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+    printf 'usage: %s WINEGDK_BUILD GE_PROTON_FILES WINEPREFIX FIXTURE\n' "$0" >&2
+    exit 64
+}
+
+[[ $# -eq 4 ]] || usage
+
+build_dir=$1
+ge_files=$2
+wine_prefix=$3
+fixture=$4
+
+for path in "$build_dir" "$ge_files" "$wine_prefix"; do
+    [[ $path = /* && -d $path ]] || usage
+done
+[[ $fixture = /* && -f $fixture ]] || usage
+
+runtime_dir=$(mktemp -d /tmp/forza-xgameruntime-test.XXXXXX)
+overlay_dir=$(mktemp -d "$build_dir/.ge-overlay.XXXXXX")
+fixture_pid=
+
+remove_test_tree() {
+    local path=$1
+    local expected_prefix=$2
+
+    case "$path" in
+        "$expected_prefix"*) rm -rf --one-file-system -- "$path" ;;
+        *)
+            printf 'refusing unsafe cleanup path: %s\n' "$path" >&2
+            return 1
+            ;;
+    esac
+}
+
+cleanup() {
+    local status=$?
+
+    if [[ -n $fixture_pid ]] && kill -0 "$fixture_pid" 2>/dev/null; then
+        kill "$fixture_pid" 2>/dev/null || true
+        wait "$fixture_pid" 2>/dev/null || true
+    fi
+    remove_test_tree "$overlay_dir" "$build_dir/.ge-overlay."
+    remove_test_tree "$runtime_dir" /tmp/forza-xgameruntime-test.
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+make -C "$build_dir/dlls/xgameruntime" -j2
+make -C "$build_dir/dlls/xgameruntime/tests" -j2
+
+cp -al "$ge_files/." "$overlay_dir/"
+unlink "$overlay_dir/lib/wine/x86_64-windows/xgameruntime.dll"
+unlink "$overlay_dir/lib/wine/x86_64-unix/xgameruntime.so"
+install -m 0644 \
+    "$build_dir/dlls/xgameruntime/x86_64-windows/xgameruntime.dll" \
+    "$overlay_dir/lib/wine/x86_64-windows/xgameruntime.dll"
+install -m 0755 \
+    "$build_dir/dlls/xgameruntime/xgameruntime.so" \
+    "$overlay_dir/lib/wine/x86_64-unix/xgameruntime.so"
+
+cmp -s \
+    "$build_dir/dlls/xgameruntime/x86_64-windows/xgameruntime.dll" \
+    "$overlay_dir/lib/wine/x86_64-windows/xgameruntime.dll"
+cmp -s \
+    "$build_dir/dlls/xgameruntime/xgameruntime.so" \
+    "$overlay_dir/lib/wine/x86_64-unix/xgameruntime.so"
+
+run_test() {
+    local mode=$1
+    local -a mode_env=()
+
+    if [[ -n $mode ]]; then
+        mode_env=(XGAMERUNTIME_TEST_XODUS="$mode")
+    fi
+
+    env \
+        WINEPREFIX="$wine_prefix" \
+        WINEDEBUG=-all \
+        WINEDLLOVERRIDES=xgameruntime=b \
+        XDG_RUNTIME_DIR="$runtime_dir" \
+        WINETEST_PLATFORM=wine \
+        WINETEST_DEBUG=2 \
+        WINETEST_REPORT_SUCCESS=1 \
+        "${mode_env[@]}" \
+        timeout --foreground 25s \
+        "$overlay_dir/bin/wine" \
+        "$build_dir/dlls/xgameruntime/tests/x86_64-windows/xgameruntime_test.exe" \
+        xgameruntime
+}
+
+printf 'gate 1/3: baseline with social fixture disabled\n'
+run_test ""
+
+printf 'gate 2/3: bounded refusal and repeatable teardown\n'
+run_test failure
+
+printf 'gate 3/3: two synthetic Ping lifecycles\n'
+uv run "$fixture" "$runtime_dir/xodus.sock" --connections 2 \
+    >"$runtime_dir/fixture.log" 2>&1 &
+fixture_pid=$!
+for _ in {1..100}; do
+    if rg -q '^READY$' "$runtime_dir/fixture.log"; then
+        break
+    fi
+    kill -0 "$fixture_pid" 2>/dev/null || {
+        cat "$runtime_dir/fixture.log" >&2
+        exit 1
+    }
+    sleep 0.05
+done
+rg -q '^READY$' "$runtime_dir/fixture.log"
+run_test success
+wait "$fixture_pid"
+fixture_pid=
+
+printf 'all XGameRuntime bridge gates passed\n'
