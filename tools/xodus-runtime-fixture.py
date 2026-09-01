@@ -18,6 +18,10 @@ TOKEN_RESPONSE = (
     b"<MSATokenResponse><Token>fixture-token</Token>"
     b"<Expiry>4102444800</Expiry></MSATokenResponse>\0"
 )
+INVITE_URI = (
+    b"ms-xbl-multiplayer://inviteAccept?"
+    b"invitedUser=123456789&sender=987654321&connectionString=fixture"
+)
 
 
 def read_exact(stream: socket.socket, size: int) -> bytes:
@@ -36,7 +40,11 @@ def send_xml(stream: socket.socket, message_type: int, body: bytes) -> None:
 
 
 def serve_main(
-    stream: socket.socket, initial: bytes, scenario: str, socket_path: Path
+    stream: socket.socket,
+    initial: bytes,
+    scenario: str,
+    socket_path: Path,
+    invite_connected: threading.Event,
 ) -> None:
     prefix = initial
     with stream:
@@ -53,6 +61,12 @@ def serve_main(
                 raise RuntimeError("main stream used an unexpected frame magic")
             if message_type == 1:
                 send_xml(stream, 2, body)
+                if scenario == "invite-subscriber-unavailable":
+                    socket_path.unlink(missing_ok=True)
+                if scenario == "invite-main-failure":
+                    if not invite_connected.wait(timeout=5):
+                        raise RuntimeError("invite subscriber did not connect")
+                    return
             elif message_type == 3:
                 try:
                     request = ET.fromstring(body.rstrip(b"\0").decode("utf-8"))
@@ -100,6 +114,38 @@ def serve_social(
             raise RuntimeError(f"unexpected social scenario {scenario}")
 
 
+def serve_invite(
+    stream: socket.socket,
+    scenario: str,
+    attempt: int,
+    invite_connected: threading.Event,
+    ready_marker: Path | None,
+) -> None:
+    with stream:
+        invite_connected.set()
+        if scenario == "invite-reconnect" and attempt == 1:
+            return
+        if scenario in ("invite-unregister", "invite-main-failure"):
+            while stream.recv(1):
+                pass
+            return
+        if scenario == "invite-multiple":
+            if not ready_marker:
+                raise RuntimeError("multiple-registration fixture needs a barrier")
+            for _ in range(500):
+                if ready_marker.exists():
+                    break
+                time.sleep(0.01)
+            else:
+                raise RuntimeError("multiple-registration barrier timed out")
+
+        frame = struct.pack("<I", len(INVITE_URI)) + INVITE_URI
+        for byte in frame:
+            stream.sendall(bytes((byte,)))
+        while stream.recv(1):
+            pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("socket_path", type=Path)
@@ -113,6 +159,16 @@ def main() -> None:
             "wait-cancel",
             "unavailable",
             "preack-timeout",
+            "invite-delivery",
+            "invite-self-unregister",
+            "invite-unregister",
+            "invite-reconnect",
+            "invite-multiple",
+            "invite-default-queue",
+            "invite-wait-pending",
+            "invite-concurrent-waiters",
+            "invite-main-failure",
+            "invite-subscriber-unavailable",
         ),
     )
     parser.add_argument("--ready-marker", type=Path)
@@ -124,18 +180,44 @@ def main() -> None:
     if args.ready_marker:
         args.ready_marker.unlink(missing_ok=True)
 
-    expected_connections = 1 if args.scenario == "unavailable" else 2
+    if args.scenario in ("unavailable", "invite-subscriber-unavailable"):
+        expected_connections = 1
+    elif args.scenario == "invite-reconnect":
+        expected_connections = 3
+    else:
+        expected_connections = 2
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     failures: list[BaseException] = []
     workers: list[threading.Thread] = []
+    invite_attempts = 0
+    invite_attempts_lock = threading.Lock()
+    invite_connected = threading.Event()
 
     def serve(stream: socket.socket) -> None:
+        nonlocal invite_attempts
         try:
             initial = read_exact(stream, 4)
             if initial == HEADER.pack(XML_MAGIC, 0, 0)[:4]:
-                serve_main(stream, initial, args.scenario, args.socket_path)
+                serve_main(
+                    stream,
+                    initial,
+                    args.scenario,
+                    args.socket_path,
+                    invite_connected,
+                )
             elif initial == b"XDUI":
                 serve_social(stream, initial, args.scenario, args.ready_marker)
+            elif initial == b"XDSI":
+                with invite_attempts_lock:
+                    invite_attempts += 1
+                    attempt = invite_attempts
+                serve_invite(
+                    stream,
+                    args.scenario,
+                    attempt,
+                    invite_connected,
+                    args.ready_marker,
+                )
             else:
                 raise RuntimeError(f"unexpected transport preamble {initial!r}")
         except BaseException as error:  # noqa: BLE001 - surfaced on the main thread

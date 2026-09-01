@@ -58,7 +58,7 @@ trap 'exit 143' TERM
 make --no-print-directory -s -C "$build_dir/dlls/xgameruntime" -j2
 make --no-print-directory -s -C "$build_dir/dlls/xgameruntime/tests" -j2
 
-printf 'gate 0/9: native private-socket and social transport contracts\n'
+printf 'gate 0/19: native private-socket and social transport contracts\n'
 env \
     LD_LIBRARY_PATH="$build_dir/dlls/ntdll${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     uv run "$transport_test" "$build_dir/dlls/xgameruntime/xgameruntime.so"
@@ -107,14 +107,14 @@ run_test() {
         xgameruntime
 }
 
-printf 'gate 1/9: baseline with social fixture disabled\n'
+printf 'gate 1/19: baseline with social fixture disabled\n'
 run_test ""
 
-printf 'gate 2/9: bounded refusal and repeatable teardown\n'
+printf 'gate 2/19: bounded refusal and repeatable teardown\n'
 run_test failure
 
-printf 'gate 3/9: two synthetic Ping lifecycles\n'
-uv run "$fixture" "$runtime_dir/xodus.sock" --connections 2 \
+printf 'gate 3/19: two synthetic main-stream lifecycles\n'
+uv run "$runtime_fixture" "$runtime_dir/xodus.sock" --scenario success \
     >"$runtime_dir/fixture.log" 2>&1 &
 fixture_pid=$!
 for _ in {1..100}; do
@@ -138,13 +138,17 @@ run_social_scenario() {
     local ready_marker=
     local log_path="$runtime_dir/social-$scenario.log"
     local -a fixture_args=("$runtime_dir/xodus.sock" --scenario "$scenario")
+    local test_mode="social-$scenario"
 
-    if [[ $scenario == wait-cancel ]]; then
+    if [[ $scenario == wait-cancel || $scenario == invite-multiple ]]; then
         ready_marker="$runtime_dir/social-ready"
         fixture_args+=(--ready-marker "$ready_marker")
     fi
+    if [[ $scenario == invite-* ]]; then
+        test_mode="$scenario"
+    fi
 
-    printf 'gate %s/9: hermetic multiplayer activity %s\n' "$gate" "$scenario"
+    printf 'gate %s/19: hermetic %s\n' "$gate" "$scenario"
     uv run "$runtime_fixture" "${fixture_args[@]}" >"$log_path" 2>&1 &
     fixture_pid=$!
     for _ in {1..100}; do
@@ -158,8 +162,12 @@ run_social_scenario() {
         sleep 0.05
     done
     rg -q '^READY$' "$log_path"
-    run_test "social-$scenario" "$ready_marker"
-    wait "$fixture_pid"
+    run_test "$test_mode" "$ready_marker"
+    if ! wait "$fixture_pid"; then
+        cat "$log_path" >&2
+        fixture_pid=
+        return 1
+    fi
     fixture_pid=
 }
 
@@ -169,5 +177,15 @@ run_social_scenario 6 immediate-fail
 run_social_scenario 7 wait-cancel
 run_social_scenario 8 unavailable
 run_social_scenario 9 preack-timeout
+run_social_scenario 10 invite-delivery
+run_social_scenario 11 invite-self-unregister
+run_social_scenario 12 invite-unregister
+run_social_scenario 13 invite-reconnect
+run_social_scenario 14 invite-multiple
+run_social_scenario 15 invite-default-queue
+run_social_scenario 16 invite-wait-pending
+run_social_scenario 17 invite-concurrent-waiters
+run_social_scenario 18 invite-main-failure
+run_social_scenario 19 invite-subscriber-unavailable
 
 printf 'all XGameRuntime bridge gates passed\n'
