@@ -519,13 +519,15 @@ git -C <winegdk-source> diff --check
 
 Run the native transport fixture separately through `uv`. Record exact test
 counts, build artifacts, SHA-256 values, source Git revisions, and any Wine
-bootstrap limitation. Record the exact five inputs that Task 4.5's
+bootstrap limitation. Record the exact ten inputs that Task 4.5's
 `lock-evidence` operation will bind; do not hand-write a private manifest. Add
 `patches/xgameruntime/README.md` and update `docs/verification.md` without live
 identities or URI values. Final source review must cover ABI, cancellation,
 callback lifetime, Unix descriptor ownership, privacy, and clean worktrees.
 
 ## Task 4.5 — Add one recoverable runtime-component transaction
+
+Implementation amendment after source and live-layout review: use one outer journal with all eight allowlisted user payloads and the updated user install manifest as ordered records, instead of introducing a nested `secure-user-files` upgrade receipt and second recovery state machine. The launcher is published first: before that rename no functional component is changed, and after it unfinished state is launch-blocking. Targeted tests run the existing secure `check` and `uninstall` operations against the accepted result. A missing manifest with existing allowlisted files requires explicit, digest-bound `--adopt-unmanaged` approval. This preserves ordinary ownership/uninstall behavior while giving every user payload, manifest, and Wine rename one recovery intent in the same journal. This amendment supersedes the nested `user_upgrade`/receipt design; all no-follow, staging, lock, drift, retention, and manual-acceptance requirements remain in force.
 
 Before any live installation, implement and test
 `<integration-source>/scripts/install-runtime-components` with standard-library
@@ -539,8 +541,8 @@ accepts only absolute `--compat-tool-root`, `--user-root`,
 `--artifact-evidence-manifest` inputs. It has `lock-evidence`, `plan`, `install`,
 `status`, `rollback`, `accept`, and `restore-runtime` operations; `plan` is
 read-only and `install` requires the exact plan digest. `lock-evidence` verifies
-the WineGDK and Xodus worktrees are clean at the exact reviewed SHAs, opens all
-five build artifacts no-follow, rejects unsafe modes, and writes the private
+the integration, WineGDK, and Xodus worktrees are clean, with WineGDK/Xodus at
+the exact reviewed SHAs, opens all ten artifacts no-follow, rejects unsafe modes, and writes the private
 mode-`0600` evidence manifest below the mode-`0700` transaction state root. It
 contains revisions, role-relative source paths, fixed target modes, and artifact
 hashes but no credential or invite value. The private evidence manifest, not
@@ -550,14 +552,20 @@ The only logical artifact roles and destinations are:
 
 | Role | Source below reviewed build | Destination below approved root |
 | --- | --- | --- |
+| `launcher-gate` | `bin/forza-linux` | `<user-root>/.local/bin/forza-linux` |
+| `doctor` | `bin/forza-doctor` | `<user-root>/.local/bin/forza-doctor` |
+| `known-build-patcher` | `scripts/patch-known-build` | `<user-root>/.local/libexec/forza-motorsport-linux/patch-known-build` |
+| `supported-builds` | `manifests/supported-builds.toml` | `<user-root>/.local/share/forza-motorsport-linux/supported-builds.toml` |
 | `xgameruntime-pe64` | `dlls/xgameruntime/x86_64-windows/xgameruntime.dll` | `<compat-tool-root>/files/lib/wine/x86_64-windows/xgameruntime.dll` |
 | `xgameruntime-unix64` | `dlls/xgameruntime/xgameruntime.so` | `<compat-tool-root>/files/lib/wine/x86_64-unix/xgameruntime.so` |
 | `xodus-service` | `xodus-service` | `<user-root>/.local/libexec/xodus-forza/xodus-service` |
 | `xodus-cli` | `xodus-cli` | `<user-root>/.local/libexec/xodus-forza/xodus-cli` |
 | `xodus-overlay` | `xodus-overlay` | `<user-root>/.local/libexec/xodus-forza/xodus-overlay` |
+| `systemd-unit` | `config/xodus-forza.service` | `<user-root>/.config/systemd/user/xodus-forza.service` |
 
-Every role has fixed installed mode `0755`; the private evidence manifest and
-plan digest include that target mode beside the artifact hash. Reject sources or
+Executable roles have fixed installed mode `0755`; `supported-builds` and
+`systemd-unit` have fixed mode `0644`. The private evidence manifest and plan
+digest include each target mode beside the artifact hash. Reject sources or
 plans with setuid, setgid, sticky, group-write, or other-write bits, reject any
 target-mode drift, and record/verify installed mode as well as hash.
 
@@ -569,29 +577,15 @@ changed plan input. It walks roots/parents with directory file descriptors and
 `O_DIRECTORY|O_NOFOLLOW`, opens files with `O_NOFOLLOW`, and never authorizes a
 destination from an unresolved string or glob.
 
-The three Xodus destinations remain owned by the existing
-`forza-motorsport-linux-install-v1` manifest. Add explicit, fail-closed
-`prepare-upgrade`, `commit-upgrade`, and `restore-upgrade` helper operations:
-
-- preparation requires the current eight user payloads to match the current
-  install manifest, stages the complete new eight-payload set (unchanged
-  launcher/config files plus the three new Xodus binaries), and writes a private
-  receipt containing the old/new manifest hashes and recovery identities without
-  changing installed files;
-- commit atomically publishes that staged set with the existing no-follow
-  per-file journal/recovery primitives and publishes the new ownership manifest;
-- restore requires installed files and manifest to match the receipt's new
-  hashes, then restores the old files and old manifest; unexpected material is
-  preserved and yields `recovery_required`;
-- ordinary `install-user --check` against the accepted build must pass after
-  upgrade, and ordinary `uninstall-user` must remove/preserve the accepted Xodus
-  files according to that updated manifest rather than treating them as foreign.
-
-The outer runtime journal first prepares this secure user upgrade and both
-same-directory WineGDK stages. It commits the user upgrade, then the two WineGDK
-roles. On failure it restores WineGDK in reverse and invokes
-`restore-upgrade`; an interruption can resume from the recorded receipt. This
-is one recoverable umbrella transaction, not a claim of cross-root atomicity.
+All eight user destinations remain owned by the existing
+`forza-motorsport-linux-install-v1` manifest. The outer journal records those
+eight payloads, the manifest, and both WineGDK files directly. It requires an
+exact valid existing manifest or empty destinations; a reviewed legacy layout
+without a manifest is accepted only when both `plan` and `install` use
+`--adopt-unmanaged`. The decision and every legacy before-state are bound by the
+plan digest. The resulting accepted install must pass ordinary secure `check`
+and `uninstall` operations. This is one recoverable umbrella transaction, not a
+claim of cross-root atomicity.
 
 `install`, `rollback`, and `restore-runtime` acquire the same exclusive
 `$XDG_RUNTIME_DIR/forza-linux.lock` used by the launcher before service/process
@@ -610,8 +604,7 @@ has this versioned logical schema:
 
 ```text
 version, transaction_id, state, plan_sha256, evidence_manifest_sha256
-source_revisions: {winegdk_git_sha, xodus_git_sha}
-user_upgrade: {receipt, old_manifest_sha256, new_manifest_sha256, phase}
+source_revisions: {integration_git_sha, winegdk_git_sha, xodus_git_sha}
 artifacts[]:
   role, source_sha256, target_mode, destination_root, destination_relative,
   before: {present, type, mode, uid, gid, sha256},
@@ -622,20 +615,18 @@ Record Git source revisions as revision strings only. SHA-256 parity means each
 built artifact's bytes equal its installed counterpart; never compare a Git SHA
 to an artifact SHA-256.
 
-All five reviewed sources and destinations are validated and copied to exclusive
-staging files before the first destination changes: Xodus through the secure
-user-upgrade receipt, WineGDK directly in each destination directory. Each
-staging file receives fixed mode `0755`, is fsynced, and has its mode/hash
+All ten reviewed sources and destinations are validated and copied to exclusive
+same-directory staging files before the first destination changes. Each
+staging file receives its fixed mode, is fsynced, and has its mode/hash
 rechecked.
-For each Wine role in fixed table order, atomically rename an existing
+For each of the eleven user-payload, manifest, and Wine records in fixed order, atomically rename an existing
 destination to a unique adjacent backup, fsync/journal, atomically rename the
 stage into place, fsync/journal, then verify the installed hash. Thus every
 rename stays on one filesystem. The umbrella journal records intent before and
-completion after every user-manifest/Wine phase, so an interruption is
+completion after every phase, so an interruption is
 recoverable; no cross-root atomicity is claimed.
 
-On any failure, rollback walks completed Wine roles in reverse, then restores
-the secure user upgrade and its old manifest. It restores only when
+On any failure, rollback walks every selected record in reverse. It restores only when
 the current destination still matches the journaled installed hash. Unexpected
 material is moved to an adjacent transaction recovery name, never overwritten
 or deleted. A previously absent destination is restored to absence by moving
@@ -645,10 +636,11 @@ explicit later cleanup after manual acceptance; cleanup is outside this plan.
 Any unresolved artifact or ownership-manifest mismatch marks
 `recovery_required` and blocks live launch. `accept` marks the tested transaction
 accepted but retains backups. A later `restore-runtime` restores the original
-WineGDK pair after exact-hash checks while leaving the accepted Xodus files under
+WineGDK pair after exact-hash checks while leaving the accepted user files under
 the normal install manifest; `uninstall-user` then handles those files normally.
-Full pre-accept `rollback` restores both the prior Xodus manifest/files and the
-WineGDK pair.
+Full pre-accept `rollback` restores all prior user files, their manifest, and the
+WineGDK pair. Publishing or restoring the systemd unit requires a successful
+user-manager reload before the recovery-aware launcher can be removed.
 
 Write the tests first and observe RED with:
 
@@ -684,7 +676,7 @@ private transaction covering the WineGDK DLL/Unixlib pair and the exact
 `<xodus-v1-sha>` service/CLI/overlay artifacts:
 
 1. keep the game closed and require the launcher-owned service inactive;
-2. run `plan`, review the five resolved logical roles, source revisions,
+2. run `plan`, review the ten resolved source roles, source revisions,
    before-state metadata, and plan digest, then run `install` with that digest;
 3. prove each build-artifact SHA-256 equals its installed counterpart and record
    the WineGDK/Xodus Git revisions separately;
@@ -699,8 +691,7 @@ private transaction covering the WineGDK DLL/Unixlib pair and the exact
 After any failed live step, first request normal game exit and let the reviewed
 launcher perform its owned service cleanup. Verify the game is gone, the shared
 launcher lock can be acquired, and `xodus-forza.service` is inactive; only then
-run rollback and verify all five restored entries plus the old user ownership
-manifest. If orderly shutdown cannot complete, preserve the journal, perform no
+run rollback and verify all eleven restored records. If orderly shutdown cannot complete, preserve the journal, perform no
 filesystem mutation, mark/block the next launch, and report manual recovery
 required. A partial rollback or `recovery_required` is a failure, not success.
 No public claim is made until exact installed hashes and the manual matrix pass.

@@ -87,6 +87,13 @@ def test_verify_gate_runs_every_behavior_and_format_suite():
     assert all(command in gate for command in required)
 
 
+def test_xodus_unit_allows_creation_of_runtime_socket_and_tokens():
+    lines = (ROOT / "config/xodus-forza.service").read_text().splitlines()
+    writable = [line for line in lines if line.startswith("ReadWritePaths=")]
+
+    assert writable == ["ReadWritePaths=%t"]
+
+
 def test_readme_documents_source_provenance_and_required_runtime_placement():
     readme = (ROOT / "README.md").read_text()
     required = [

@@ -11,7 +11,7 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 # PrivateUsers is intentionally off until Unix peer-credential compatibility is proven;
-# without it in a user manager, ProtectSystem/ReadWritePaths may not enforce socket-only writes.
-# The two mode-0600 token paths are the deliberate exception to socket-only writes;
-# ExecStartPre consumes them to bind a launcher reservation to this invocation.
-ReadWritePaths=%t/xodus.sock %t/forza-xodus-owner.pending %t/forza-xodus-owner.active
+# without it in a user manager, filesystem namespacing is not a security boundary.
+# The service must create xodus.sock and atomically rename the launcher token after
+# namespace setup, so its existing per-user runtime directory must remain writable.
+ReadWritePaths=%t

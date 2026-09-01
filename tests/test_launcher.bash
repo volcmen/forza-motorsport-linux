@@ -14,6 +14,7 @@ fail() {
     return 1
 }
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected [$2], got [$1]"; }
+assert_contains() { [[ "$1" == *"$2"* ]] || fail "expected [$1] to contain [$2]"; }
 assert_log_contains() { rg -Fq -- "$1" "$FAKE_LOG" || fail "log does not contain [$1]"; }
 assert_log_not_contains() { ! rg -Fq -- "$1" "$FAKE_LOG" || fail "log unexpectedly contains [$1]"; }
 assert_path_absent() { [[ ! -e "$1" ]] || fail "path unexpectedly exists [$1]"; }
@@ -112,7 +113,9 @@ activate_preexisting_service() {
 set_up() {
     TEST_ROOT=$(mktemp -d)
     export XDG_RUNTIME_DIR="$TEST_ROOT/runtime"
-    mkdir -p "$XDG_RUNTIME_DIR"
+    export FORZA_RUNTIME_TESTING=1
+    export FORZA_RUNTIME_TEST_USER_ROOT="$TEST_ROOT/user"
+    mkdir -p "$XDG_RUNTIME_DIR" "$FORZA_RUNTIME_TEST_USER_ROOT"
     FAKE_LOG="$TEST_ROOT/systemctl.log"
     FAKE_STATE="$TEST_ROOT/service.state"
     FAKE_COUNTER="$TEST_ROOT/invocation.counter"
@@ -129,6 +132,7 @@ set_up() {
     export FAKE_EMPTY_CAPTURE=${FAKE_EMPTY_CAPTURE:-0}
     export FAKE_EXTERNAL_AFTER_PENDING=${FAKE_EXTERNAL_AFTER_PENDING:-0}
     export FAKE_EXTERNAL_DURING_START=${FAKE_EXTERNAL_DURING_START:-0}
+    export FAKE_SOCKET_PERSISTS=${FAKE_SOCKET_PERSISTS:-0}
     export FAKE_EXTERNAL_AFTER_PENDING_MARKER="$TEST_ROOT/external-pending-seen"
     export FAKE_EXTERNAL_DURING_START_MARKER="$TEST_ROOT/external-start-seen"
     SOCKET_PIDS=()
@@ -154,10 +158,11 @@ try:
     signal.pause()
 finally:
     listener.close()
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
+    if os.environ.get("FAKE_SOCKET_PERSISTS") != "1":
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
 PY
 EOF
     chmod +x "$SOCKET_SERVER"
@@ -176,10 +181,17 @@ next_invocation() {
     printf '%s\n' "$number" > "$FAKE_COUNTER"
     printf 'test-invocation-%s\n' "$number"
 }
+
 stop_socket() {
     if [[ -f $FAKE_PID_FILE ]]; then
-        kill "$(<"$FAKE_PID_FILE")" 2>/dev/null || true
-        rm -f -- "$FAKE_PID_FILE" "$FAKE_SOCKET"
+        socket_pid=$(<"$FAKE_PID_FILE")
+        kill "$socket_pid" 2>/dev/null || true
+        for _ in {1..100}; do
+            kill -0 "$socket_pid" 2>/dev/null || break
+            sleep 0.01
+        done
+        rm -f -- "$FAKE_PID_FILE"
+        [[ ${FAKE_SOCKET_PERSISTS:-0} == 1 ]] || rm -f -- "$FAKE_SOCKET"
     fi
 }
 start_xodus() {
@@ -260,6 +272,17 @@ esac
 EOF
     chmod +x "$FAKE_SYSTEMCTL"
     export FORZA_SYSTEMCTL="$FAKE_SYSTEMCTL"
+}
+
+write_runtime_transaction() {
+    local state=$1
+    local root="$FORZA_RUNTIME_TEST_USER_ROOT/.local/state/forza-motorsport-linux/runtime-transactions"
+    local transaction=aaaaaaaaaaaaaaaaaaaaaaaa
+    mkdir -p -- "$root/$transaction"
+    chmod 700 -- "$root" "$root/$transaction"
+    printf '{"version":1,"transaction_id":"%s","state":"%s"}\n' \
+        "$transaction" "$state" >"$root/$transaction/journal.json"
+    chmod 600 -- "$root/$transaction/journal.json"
 }
 
 tear_down() {
@@ -344,11 +367,49 @@ test_rejects_missing_game_command() {
     assert_log_not_contains 'start xodus-forza.service'
 }
 
+test_refuses_every_unfinished_runtime_transaction_state() {
+    local transaction_state
+    for transaction_state in prepared installing rolling_back recovery_required; do
+        write_runtime_transaction "$transaction_state"
+        run_launcher_capturing_stderr /usr/bin/true
+        assert_eq "$status" 1 || return 1
+        assert_contains "$output" "requires recovery ($transaction_state)" || return 1
+        assert_log_not_contains 'start xodus-forza.service' || return 1
+    done
+}
+
+test_allows_an_installed_runtime_transaction_for_manual_validation() {
+    write_runtime_transaction installed
+    run_launcher /usr/bin/true
+    assert_eq "$status" 0 || return 1
+    assert_log_contains 'start xodus-forza.service'
+}
+
+test_refuses_a_malformed_runtime_transaction_before_service_start() {
+    local root="$FORZA_RUNTIME_TEST_USER_ROOT/.local/state/forza-motorsport-linux/runtime-transactions"
+    mkdir -p -- "$root/bbbbbbbbbbbbbbbbbbbbbbbb"
+    chmod 700 -- "$root" "$root/bbbbbbbbbbbbbbbbbbbbbbbb"
+    run_launcher_capturing_stderr /usr/bin/true
+    assert_eq "$status" 1 || return 1
+    assert_contains "$output" 'cannot validate runtime transaction state' || return 1
+    assert_log_not_contains 'start xodus-forza.service'
+}
+
 test_starts_and_stops_service_it_owns() {
     run_launcher /usr/bin/true
     assert_eq "$status" 0 || return 1
     assert_log_contains 'start xodus-forza.service' || return 1
     assert_log_contains 'stop xodus-forza.service'
+}
+
+test_owned_service_cleanup_removes_an_orphaned_socket() {
+    export FAKE_SOCKET_PERSISTS=1
+    run_launcher /usr/bin/true
+    local launcher_status=$status
+    export FAKE_SOCKET_PERSISTS=0
+    assert_eq "$launcher_status" 0 || return 1
+    assert_log_contains 'stop xodus-forza.service' || return 1
+    assert_path_absent "$FAKE_SOCKET"
 }
 
 test_cleanup_does_not_execute_a_test_operator() {
@@ -674,6 +735,7 @@ run_test() {
     FAKE_EMPTY_CAPTURE=0
     FAKE_EXTERNAL_AFTER_PENDING=0
     FAKE_EXTERNAL_DURING_START=0
+    FAKE_SOCKET_PERSISTS=0
     unset PAM_KWALLET5_LOGIN FORZA_SELF_SIGNAL FORZA_LOCK_PATH FORZA_FD_RESULT
     set_up
     if "$name"; then printf 'PASS: %s\n' "$name"; else
@@ -685,7 +747,11 @@ run_test() {
 
 for test_name in \
     test_rejects_missing_game_command \
+    test_refuses_every_unfinished_runtime_transaction_state \
+    test_allows_an_installed_runtime_transaction_for_manual_validation \
+    test_refuses_a_malformed_runtime_transaction_before_service_start \
     test_starts_and_stops_service_it_owns \
+    test_owned_service_cleanup_removes_an_orphaned_socket \
     test_cleanup_does_not_execute_a_test_operator \
     test_accepts_active_listening_socket_without_ownership \
     test_rejects_active_unlistening_socket \

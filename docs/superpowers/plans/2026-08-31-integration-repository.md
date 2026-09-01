@@ -330,7 +330,7 @@ trap cleanup EXIT INT TERM
 
 Validate a nonempty command, complete `plasma-kwallet-pam.service` only when `PAM_KWALLET5_LOGIN` names an existing socket, start Xodus only when inactive, wait at most five seconds for the real Unix socket, run `"$@"`, save `$?`, clean up, and exit with the saved status.
 
-The unit uses `%h/.local/libexec/xodus-forza/xodus-service`, writes only `%t/xodus.sock`, has `UMask=0077`, and keeps the existing hardening options. It has no `[Install] WantedBy=` entry so accidental enablement is not offered.
+The unit uses `%h/.local/libexec/xodus-forza/xodus-service`, keeps the current user's existing `%t` runtime directory writable so the pre-start token rename and socket creation can occur after namespace setup, has `UMask=0077`, and keeps home/system paths protected. It has no `[Install] WantedBy=` entry so accidental enablement is not offered.
 
 - [ ] **Step 4: Verify lifecycle and systemd syntax**
 

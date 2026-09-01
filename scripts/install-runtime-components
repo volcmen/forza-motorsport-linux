@@ -1,0 +1,1703 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Evidence-bound, recoverable installer for the Forza runtime component set."""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import secrets
+import stat
+import subprocess
+import sys
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+APP_ID = "2440510"
+VERSION = 1
+EVIDENCE_VERSION = 1
+MANIFEST_MODE = 0o600
+SAFE_SOURCE_MASK = 0o7022
+DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+RENAME_NOREPLACE = 1
+STATE_RELATIVE = ".local/state/forza-motorsport-linux/runtime-transactions"
+EVIDENCE_NAME = "artifact-evidence.json"
+INSTALL_MANIFEST = ".local/state/forza-motorsport-linux/install-manifest"
+INSTALL_HEADER = "forza-motorsport-linux-install-v1"
+USER_PAYLOADS = (
+    ".local/bin/forza-linux",
+    ".local/bin/forza-doctor",
+    ".local/libexec/forza-motorsport-linux/patch-known-build",
+    ".local/share/forza-motorsport-linux/supported-builds.toml",
+    ".local/libexec/xodus-forza/xodus-service",
+    ".local/libexec/xodus-forza/xodus-cli",
+    ".local/libexec/xodus-forza/xodus-overlay",
+    ".config/systemd/user/xodus-forza.service",
+)
+REVIEWED_WINEGDK_SHA = "ad16c240c175be84d70052eddadceed7666178fe"
+REVIEWED_XODUS_SHA = "b76690da6ff59ace8981bf0428cd729fcd15673d"
+ROLES = {
+    "launcher-gate": {
+        "source_root": "integration",
+        "source_relative": "bin/forza-linux",
+        "destination_root": "user",
+        "destination_relative": ".local/bin/forza-linux",
+        "target_mode": 0o755,
+    },
+    "doctor": {
+        "source_root": "integration",
+        "source_relative": "bin/forza-doctor",
+        "destination_root": "user",
+        "destination_relative": ".local/bin/forza-doctor",
+        "target_mode": 0o755,
+    },
+    "known-build-patcher": {
+        "source_root": "integration",
+        "source_relative": "scripts/patch-known-build",
+        "destination_root": "user",
+        "destination_relative": ".local/libexec/forza-motorsport-linux/patch-known-build",
+        "target_mode": 0o755,
+    },
+    "supported-builds": {
+        "source_root": "integration",
+        "source_relative": "manifests/supported-builds.toml",
+        "destination_root": "user",
+        "destination_relative": ".local/share/forza-motorsport-linux/supported-builds.toml",
+        "target_mode": 0o644,
+    },
+    "xgameruntime-pe64": {
+        "source_root": "winegdk",
+        "source_relative": "dlls/xgameruntime/x86_64-windows/xgameruntime.dll",
+        "destination_root": "compat-tool",
+        "destination_relative": "files/lib/wine/x86_64-windows/xgameruntime.dll",
+        "target_mode": 0o755,
+    },
+    "xgameruntime-unix64": {
+        "source_root": "winegdk",
+        "source_relative": "dlls/xgameruntime/xgameruntime.so",
+        "destination_root": "compat-tool",
+        "destination_relative": "files/lib/wine/x86_64-unix/xgameruntime.so",
+        "target_mode": 0o755,
+    },
+    "xodus-service": {
+        "source_root": "xodus",
+        "source_relative": "xodus-service",
+        "destination_root": "user",
+        "destination_relative": ".local/libexec/xodus-forza/xodus-service",
+        "target_mode": 0o755,
+    },
+    "xodus-cli": {
+        "source_root": "xodus",
+        "source_relative": "xodus-cli",
+        "destination_root": "user",
+        "destination_relative": ".local/libexec/xodus-forza/xodus-cli",
+        "target_mode": 0o755,
+    },
+    "xodus-overlay": {
+        "source_root": "xodus",
+        "source_relative": "xodus-overlay",
+        "destination_root": "user",
+        "destination_relative": ".local/libexec/xodus-forza/xodus-overlay",
+        "target_mode": 0o755,
+    },
+    "systemd-unit": {
+        "source_root": "integration",
+        "source_relative": "config/xodus-forza.service",
+        "destination_root": "user",
+        "destination_relative": ".config/systemd/user/xodus-forza.service",
+        "target_mode": 0o644,
+    },
+}
+INSTALL_ORDER = (
+    "launcher-gate",
+    "doctor",
+    "known-build-patcher",
+    "supported-builds",
+    "xodus-service",
+    "xodus-cli",
+    "xodus-overlay",
+    "systemd-unit",
+    "user-install-manifest",
+    "xgameruntime-pe64",
+    "xgameruntime-unix64",
+)
+WINE_ROLES = ("xgameruntime-pe64", "xgameruntime-unix64")
+TRANSACTION_STATES = {
+    "prepared",
+    "installing",
+    "installed",
+    "accepted",
+    "rolling_back",
+    "rolled_back",
+    "recovery_required",
+    "runtime_restored",
+}
+ARTIFACT_PHASES = {
+    "stage_pending",
+    "staged",
+    "backup_pending",
+    "backed_up",
+    "backup_skipped",
+    "install_pending",
+    "installed",
+    "restored",
+    "recovery_required",
+}
+
+LIBC = ctypes.CDLL(None, use_errno=True)
+RENAMEAT2 = getattr(LIBC, "renameat2", None)
+if RENAMEAT2 is not None:
+    RENAMEAT2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    RENAMEAT2.restype = ctypes.c_int
+
+
+class RuntimeInstallError(RuntimeError):
+    """The requested runtime operation failed closed."""
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def canonical(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def relative_parts(relative: str) -> list[str]:
+    parts = relative.split("/")
+    if (
+        not relative
+        or relative.startswith("/")
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise RuntimeInstallError(f"unsafe relative path: {relative}")
+    return parts
+
+
+def require_absolute(path: str, label: str) -> Path:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        raise RuntimeInstallError(f"{label} must be an absolute path")
+    return candidate
+
+
+def absolute_argument(label: str):
+    def parse(value: str) -> Path:
+        try:
+            return require_absolute(value, label)
+        except RuntimeInstallError as error:
+            raise argparse.ArgumentTypeError(str(error)) from error
+
+    return parse
+
+
+def valid_digest(value: object, length: int = 64) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def open_absolute_directory(path: Path) -> int:
+    fd = os.open("/", DIRECTORY)
+    try:
+        for part in relative_parts(str(path)[1:]) if path != Path("/") else []:
+            next_fd = os.open(part, DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid():
+            raise RuntimeInstallError(
+                f"directory is not owned by the current user: {path}"
+            )
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def open_parent(
+    root_fd: int, relative: str, *, create: bool = False, mode: int = 0o755
+) -> tuple[int, str]:
+    parts = relative_parts(relative)
+    fd = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            try:
+                next_fd = os.open(part, DIRECTORY, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, mode, dir_fd=fd)
+                os.fsync(fd)
+                next_fd = os.open(part, DIRECTORY, dir_fd=fd)
+            info = os.fstat(next_fd)
+            if info.st_uid != os.getuid():
+                os.close(next_fd)
+                raise RuntimeInstallError(
+                    f"destination parent is not current-user owned: {relative}"
+                )
+            os.close(fd)
+            fd = next_fd
+        return fd, parts[-1]
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def open_state_directory(user_fd: int, *, create: bool) -> int:
+    parent_fd, leaf = open_parent(user_fd, STATE_RELATIVE, create=create, mode=0o700)
+    try:
+        try:
+            state_fd = os.open(leaf, DIRECTORY, dir_fd=parent_fd)
+        except FileNotFoundError:
+            if not create:
+                raise
+            os.mkdir(leaf, 0o700, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            state_fd = os.open(leaf, DIRECTORY, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+    info = os.fstat(state_fd)
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        os.close(state_fd)
+        raise RuntimeInstallError(
+            "runtime transaction state root must be current-user mode 0700"
+        )
+    return state_fd
+
+
+def read_regular(parent_fd: int, leaf: str) -> tuple[bytes, int, os.stat_result]:
+    try:
+        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise RuntimeInstallError(
+                f"refusing symlink or followed source: {leaf}"
+            ) from error
+        raise
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeInstallError(f"not a regular file: {leaf}")
+        if info.st_uid != os.getuid():
+            raise RuntimeInstallError(f"file is not owned by the current user: {leaf}")
+        chunks: list[bytes] = []
+        while block := os.read(fd, 1024 * 1024):
+            chunks.append(block)
+        return b"".join(chunks), stat.S_IMODE(info.st_mode), info
+    finally:
+        os.close(fd)
+
+
+def read_relative(root_fd: int, relative: str) -> tuple[bytes, int, os.stat_result]:
+    parent_fd, leaf = open_parent(root_fd, relative)
+    try:
+        return read_regular(parent_fd, leaf)
+    finally:
+        os.close(parent_fd)
+
+
+def write_new(parent_fd: int, leaf: str, data: bytes, mode: int) -> None:
+    fd = os.open(
+        leaf,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        mode,
+        dir_fd=parent_fd,
+    )
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.fsync(parent_fd)
+
+
+def replace_owned_json(
+    parent_fd: int, leaf: str, value: dict[str, Any], mode: int
+) -> None:
+    data = canonical(value) + b"\n"
+    temporary = f".{leaf}.{secrets.token_hex(12)}.tmp"
+    write_new(parent_fd, temporary, data, mode)
+    try:
+        os.replace(temporary, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except Exception:
+        try:
+            os.unlink(temporary, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def rename_noreplace(
+    source_fd: int, source: str, destination_fd: int, destination: str
+) -> None:
+    if RENAMEAT2 is None:
+        raise RuntimeInstallError("renameat2 RENAME_NOREPLACE is unavailable")
+    result = RENAMEAT2(
+        source_fd,
+        os.fsencode(source),
+        destination_fd,
+        os.fsencode(destination),
+        RENAME_NOREPLACE,
+    )
+    if result == 0:
+        os.fsync(source_fd)
+        if source_fd != destination_fd:
+            os.fsync(destination_fd)
+        return
+    number = ctypes.get_errno()
+    if number in {errno.ENOSYS, errno.EINVAL}:
+        raise RuntimeInstallError("renameat2 RENAME_NOREPLACE is unavailable")
+    raise OSError(number, os.strerror(number), destination)
+
+
+def git_output(source: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(source), *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        raise RuntimeInstallError(
+            f"cannot inspect reviewed source repository: {source}"
+        )
+    return result.stdout.strip()
+
+
+def expected_revisions() -> tuple[str, str]:
+    wine = REVIEWED_WINEGDK_SHA
+    xodus = REVIEWED_XODUS_SHA
+    if os.environ.get("FORZA_RUNTIME_TESTING") == "1":
+        wine = os.environ.get("FORZA_RUNTIME_EXPECTED_WINEGDK_SHA", wine)
+        xodus = os.environ.get("FORZA_RUNTIME_EXPECTED_XODUS_SHA", xodus)
+    return wine, xodus
+
+
+def source_roots(wine_build: Path, xodus_build: Path) -> dict[str, Path]:
+    wine_fd = open_absolute_directory(wine_build)
+    try:
+        makefile, _, _ = read_relative(wine_fd, "Makefile")
+    finally:
+        os.close(wine_fd)
+    matches = [
+        line.removeprefix("srcdir = ")
+        for line in makefile.decode("utf-8").splitlines()
+        if line.startswith("srcdir = ")
+    ]
+    if len(matches) != 1 or not Path(matches[0]).is_absolute():
+        raise RuntimeInstallError(
+            "WineGDK build Makefile has no unique absolute srcdir"
+        )
+    if xodus_build.name != "release" or xodus_build.parent.name != "target":
+        raise RuntimeInstallError(
+            "Xodus build directory must be the reviewed target/release directory"
+        )
+    integration_root = Path(os.path.abspath(__file__)).parent.parent
+    if os.environ.get("FORZA_RUNTIME_TESTING") == "1":
+        integration_root = Path(
+            os.environ.get("FORZA_RUNTIME_INTEGRATION_ROOT", integration_root)
+        )
+    roots = {
+        "winegdk": Path(matches[0]),
+        "xodus": xodus_build.parent.parent,
+        "integration": integration_root,
+    }
+    for root in roots.values():
+        root_fd = open_absolute_directory(root)
+        os.close(root_fd)
+    return roots
+
+
+def verify_revisions(roots: dict[str, Path]) -> dict[str, str]:
+    expected_wine, expected_xodus = expected_revisions()
+    observed = {
+        "winegdk_git_sha": git_output(roots["winegdk"], "rev-parse", "HEAD"),
+        "xodus_git_sha": git_output(roots["xodus"], "rev-parse", "HEAD"),
+        "integration_git_sha": git_output(roots["integration"], "rev-parse", "HEAD"),
+    }
+    expected = {
+        "winegdk_git_sha": expected_wine,
+        "xodus_git_sha": expected_xodus,
+    }
+    if {
+        "winegdk_git_sha": observed["winegdk_git_sha"],
+        "xodus_git_sha": observed["xodus_git_sha"],
+    } != expected:
+        raise RuntimeInstallError("reviewed source revision mismatch")
+    for root in roots.values():
+        if git_output(root, "status", "--porcelain=v1", "--untracked-files=all"):
+            raise RuntimeInstallError(f"reviewed source worktree is dirty: {root}")
+    return observed
+
+
+def artifact_inputs(
+    wine_build: Path, xodus_build: Path, integration_root: Path
+) -> dict[str, dict[str, Any]]:
+    build_roots = {
+        "winegdk": wine_build,
+        "xodus": xodus_build,
+        "integration": integration_root,
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for role, contract in ROLES.items():
+        root_fd = open_absolute_directory(build_roots[contract["source_root"]])
+        try:
+            data, mode, _ = read_relative(root_fd, contract["source_relative"])
+        finally:
+            os.close(root_fd)
+        if mode & SAFE_SOURCE_MASK:
+            raise RuntimeInstallError(f"source has unsafe mode for {role}: {mode:o}")
+        if (
+            contract["target_mode"] & 0o111
+            and contract["source_root"] != "winegdk"
+            and not mode & 0o111
+        ):
+            raise RuntimeInstallError(f"source is not executable for {role}")
+        result[role] = {
+            "role": role,
+            "source_root": contract["source_root"],
+            "source_relative": contract["source_relative"],
+            "source_mode": mode,
+            "source_sha256": digest(data),
+            "target_mode": contract["target_mode"],
+            "data": data,
+        }
+    return result
+
+
+def evidence_path(user_root: Path, requested: Path) -> Path:
+    expected = user_root / STATE_RELATIVE / EVIDENCE_NAME
+    if requested != expected:
+        raise RuntimeInstallError(
+            f"artifact evidence manifest must be exactly {expected}"
+        )
+    return expected
+
+
+def lock_evidence(arguments: argparse.Namespace) -> None:
+    roots = source_roots(arguments.xgameruntime_build_dir, arguments.xodus_build_dir)
+    revisions = verify_revisions(roots)
+    artifacts = artifact_inputs(
+        arguments.xgameruntime_build_dir,
+        arguments.xodus_build_dir,
+        roots["integration"],
+    )
+    evidence = {
+        "version": EVIDENCE_VERSION,
+        "source_revisions": revisions,
+        "artifacts": [
+            {key: value for key, value in artifacts[role].items() if key != "data"}
+            for role in ROLES
+        ],
+    }
+    user_fd = open_absolute_directory(arguments.user_root)
+    try:
+        state_fd = open_state_directory(user_fd, create=True)
+    finally:
+        os.close(user_fd)
+    try:
+        try:
+            old_data, old_mode, old_info = read_regular(state_fd, EVIDENCE_NAME)
+        except FileNotFoundError:
+            old_data = None
+        if old_data is not None:
+            if old_mode != MANIFEST_MODE or old_info.st_uid != os.getuid():
+                raise RuntimeInstallError(
+                    "existing evidence manifest has unsafe ownership or mode"
+                )
+            if old_data == canonical(evidence) + b"\n":
+                print(f"EVIDENCE_SHA256={digest(old_data)}")
+                return
+        replace_owned_json(state_fd, EVIDENCE_NAME, evidence, MANIFEST_MODE)
+        data, mode, _ = read_regular(state_fd, EVIDENCE_NAME)
+        if mode != MANIFEST_MODE:
+            raise RuntimeInstallError("evidence manifest mode drift")
+        print(f"EVIDENCE_SHA256={digest(data)}")
+    finally:
+        os.close(state_fd)
+
+
+def validate_evidence(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("version") != EVIDENCE_VERSION:
+        raise RuntimeInstallError("artifact evidence manifest version mismatch")
+    revisions = value.get("source_revisions")
+    if (
+        not isinstance(revisions, dict)
+        or set(revisions) != {"winegdk_git_sha", "xodus_git_sha", "integration_git_sha"}
+        or not all(valid_digest(revision, 40) for revision in revisions.values())
+    ):
+        raise RuntimeInstallError("artifact evidence source revisions are invalid")
+    records = value.get("artifacts")
+    if not isinstance(records, list) or [
+        record.get("role") for record in records if isinstance(record, dict)
+    ] != list(ROLES):
+        raise RuntimeInstallError("artifact evidence role set mismatch")
+    for record in records:
+        role = record["role"]
+        contract = ROLES[role]
+        if (
+            set(record)
+            != {
+                "role",
+                "source_root",
+                "source_relative",
+                "source_mode",
+                "source_sha256",
+                "target_mode",
+            }
+            or record.get("source_root") != contract["source_root"]
+            or record.get("source_relative") != contract["source_relative"]
+            or not isinstance(record.get("source_mode"), int)
+            or record.get("source_mode") & SAFE_SOURCE_MASK
+            or not valid_digest(record.get("source_sha256"))
+            or record.get("target_mode") != contract["target_mode"]
+        ):
+            raise RuntimeInstallError(f"artifact evidence record is invalid: {role}")
+    return value
+
+
+def load_evidence(
+    arguments: argparse.Namespace,
+) -> tuple[dict[str, Any], str, dict[str, dict[str, Any]]]:
+    requested = evidence_path(arguments.user_root, arguments.artifact_evidence_manifest)
+    user_fd = open_absolute_directory(arguments.user_root)
+    try:
+        data, mode, _ = read_relative(
+            user_fd, str(requested.relative_to(arguments.user_root))
+        )
+    finally:
+        os.close(user_fd)
+    if mode != MANIFEST_MODE:
+        raise RuntimeInstallError("artifact evidence manifest must have mode 0600")
+    try:
+        evidence = validate_evidence(json.loads(data))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeInstallError(
+            "artifact evidence manifest is invalid JSON"
+        ) from error
+    roots = source_roots(arguments.xgameruntime_build_dir, arguments.xodus_build_dir)
+    if evidence.get("source_revisions") != verify_revisions(roots):
+        raise RuntimeInstallError("artifact evidence source revision mismatch")
+    current = artifact_inputs(
+        arguments.xgameruntime_build_dir,
+        arguments.xodus_build_dir,
+        roots["integration"],
+    )
+    expected_records = {record["role"]: record for record in evidence["artifacts"]}
+    for role, observed in current.items():
+        record = {key: value for key, value in observed.items() if key != "data"}
+        if expected_records[role] != record:
+            raise RuntimeInstallError(f"artifact changed after evidence lock: {role}")
+    return evidence, digest(data), current
+
+
+def parse_install_manifest(data: bytes) -> dict[str, tuple[int, str]]:
+    try:
+        lines = data.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise RuntimeInstallError("user install manifest is not UTF-8") from error
+    if not lines or lines[0] != INSTALL_HEADER:
+        raise RuntimeInstallError("unrecognized user install manifest")
+    records: dict[str, tuple[int, str]] = {}
+    for line in lines[1:]:
+        fields = line.split("\t")
+        if len(fields) != 3 or fields[0] not in USER_PAYLOADS or fields[0] in records:
+            raise RuntimeInstallError("invalid user install manifest entry")
+        relative, mode_text, file_hash = fields
+        try:
+            mode = int(mode_text, 8)
+        except ValueError as error:
+            raise RuntimeInstallError("invalid user install manifest mode") from error
+        if len(file_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in file_hash
+        ):
+            raise RuntimeInstallError("invalid user install manifest digest")
+        records[relative] = (mode, file_hash)
+    if set(records) != set(USER_PAYLOADS):
+        raise RuntimeInstallError(
+            "user install manifest does not own all eight payloads"
+        )
+    return records
+
+
+def install_manifest_bytes(records: dict[str, tuple[int, str]]) -> bytes:
+    lines = [INSTALL_HEADER]
+    lines.extend(
+        f"{relative}\t{records[relative][0]:o}\t{records[relative][1]}"
+        for relative in USER_PAYLOADS
+    )
+    return ("\n".join(lines) + "\n").encode()
+
+
+def validate_user_install(
+    user_fd: int,
+) -> tuple[bytes, int, dict[str, tuple[int, str]]]:
+    data, mode, _ = read_relative(user_fd, INSTALL_MANIFEST)
+    records = parse_install_manifest(data)
+    if mode != MANIFEST_MODE:
+        raise RuntimeInstallError("user install manifest mode drift")
+    for relative, (expected_mode, expected_hash) in records.items():
+        payload, actual_mode, _ = read_relative(user_fd, relative)
+        if actual_mode != expected_mode or digest(payload) != expected_hash:
+            raise RuntimeInstallError(
+                f"installed user payload no longer matches its manifest: {relative}"
+            )
+    return data, mode, records
+
+
+def inspect_destination(root_fd: int, relative: str) -> dict[str, Any]:
+    try:
+        parent_fd, leaf = open_parent(root_fd, relative)
+    except FileNotFoundError:
+        return {"present": False}
+    try:
+        try:
+            data, mode, info = read_regular(parent_fd, leaf)
+        except FileNotFoundError:
+            return {"present": False}
+    finally:
+        os.close(parent_fd)
+    return {
+        "present": True,
+        "type": "regular",
+        "mode": mode,
+        "uid": info.st_uid,
+        "gid": info.st_gid,
+        "sha256": digest(data),
+    }
+
+
+def build_plan(
+    arguments: argparse.Namespace,
+) -> tuple[dict[str, Any], str, dict[str, dict[str, Any]], bytes]:
+    evidence, evidence_hash, artifacts = load_evidence(arguments)
+    roots = {
+        "compat-tool": open_absolute_directory(arguments.compat_tool_root),
+        "user": open_absolute_directory(arguments.user_root),
+    }
+    try:
+        manifest_before = inspect_destination(roots["user"], INSTALL_MANIFEST)
+        if manifest_before["present"]:
+            _, _, user_records = validate_user_install(roots["user"])
+            managed_install = True
+        else:
+            managed_install = False
+            user_records = {}
+            unmanaged = [
+                relative
+                for relative in USER_PAYLOADS
+                if inspect_destination(roots["user"], relative)["present"]
+            ]
+            if unmanaged and not arguments.adopt_unmanaged:
+                raise RuntimeInstallError(
+                    "unmanaged user integration exists; review it and rerun plan/install with --adopt-unmanaged"
+                )
+        new_records = dict(user_records)
+        for role, contract in ROLES.items():
+            if contract["destination_root"] == "user":
+                relative = contract["destination_relative"]
+                new_records[relative] = (
+                    contract["target_mode"],
+                    artifacts[role]["source_sha256"],
+                )
+        new_manifest = install_manifest_bytes(new_records)
+        if set(new_records) != set(USER_PAYLOADS):
+            raise RuntimeInstallError(
+                "runtime role set does not cover every user payload"
+            )
+        plan_artifacts = []
+        for role, contract in ROLES.items():
+            plan_artifacts.append(
+                {
+                    "role": role,
+                    "source_sha256": artifacts[role]["source_sha256"],
+                    "target_mode": contract["target_mode"],
+                    "destination_root": contract["destination_root"],
+                    "destination_relative": contract["destination_relative"],
+                    "before": inspect_destination(
+                        roots[contract["destination_root"]],
+                        contract["destination_relative"],
+                    ),
+                }
+            )
+        plan = {
+            "version": VERSION,
+            "evidence_manifest_sha256": evidence_hash,
+            "source_revisions": evidence["source_revisions"],
+            "roots": {
+                "compat-tool": str(arguments.compat_tool_root),
+                "user": str(arguments.user_root),
+            },
+            "adopt_unmanaged": arguments.adopt_unmanaged,
+            "artifacts": plan_artifacts,
+            "user_manifest": {
+                "before": manifest_before,
+                "managed_before": managed_install,
+                "installed_mode": MANIFEST_MODE,
+                "installed_sha256": digest(new_manifest),
+            },
+        }
+        return plan, digest(canonical(plan)), artifacts, new_manifest
+    finally:
+        for fd in roots.values():
+            os.close(fd)
+
+
+def print_plan(plan: dict[str, Any], plan_hash: str) -> None:
+    print(
+        "PLAN user ownership: "
+        + (
+            "adopt reviewed unmanaged destinations"
+            if plan["adopt_unmanaged"]
+            else "require managed or empty destinations"
+        )
+    )
+    for artifact in plan["artifacts"]:
+        before = artifact["before"]
+        state = before.get("sha256", "absent") if before.get("present") else "absent"
+        print(
+            f"PLAN {artifact['role']}: {artifact['destination_root']}/"
+            f"{artifact['destination_relative']} before={state} "
+            f"source={artifact['source_sha256']} mode={artifact['target_mode']:04o}"
+        )
+    print(f"PLAN_SHA256={plan_hash}")
+
+
+def acquire_launcher_lock() -> int:
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if not runtime or not os.path.isabs(runtime):
+        raise RuntimeInstallError("XDG_RUNTIME_DIR is required for mutating operations")
+    runtime_fd = open_absolute_directory(Path(runtime))
+    try:
+        try:
+            lock_fd = os.open(
+                "forza-linux.lock",
+                os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=runtime_fd,
+            )
+        except OSError as error:
+            raise RuntimeInstallError(f"cannot open launcher lock: {error}") from error
+    finally:
+        os.close(runtime_fd)
+    info = os.fstat(lock_fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        os.close(lock_fd)
+        raise RuntimeInstallError(
+            "launcher lock must be a current-user mode-0600 regular file"
+        )
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        os.close(lock_fd)
+        raise RuntimeInstallError("launcher lock is held by another process") from error
+    return lock_fd
+
+
+def require_service_and_game_inactive() -> None:
+    systemctl = os.environ.get("FORZA_SYSTEMCTL", "systemctl")
+    result = subprocess.run(
+        [systemctl, "--user", "is-active", "--quiet", "xodus-forza.service"],
+        check=False,
+    )
+    if result.returncode == 0:
+        raise RuntimeInstallError("xodus-forza.service is active")
+    if result.returncode != 3:
+        raise RuntimeInstallError("cannot prove xodus-forza.service is inactive")
+    patterns = (
+        b"forza_steamworks_release_final.exe",
+        b"forza_gaming.desktop.x64_release_final.exe",
+    )
+    for entry in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            command = entry.read_bytes().lower()
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        if any(pattern in command for pattern in patterns):
+            raise RuntimeInstallError("Forza Motorsport process is active")
+
+
+def reload_user_manager() -> None:
+    systemctl = os.environ.get("FORZA_SYSTEMCTL", "systemctl")
+    result = subprocess.run(
+        [systemctl, "--user", "daemon-reload"],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeInstallError("cannot reload the user systemd manager")
+
+
+def validate_journal(journal: object, transaction: str) -> dict[str, Any]:
+    if not isinstance(journal, dict):
+        raise RuntimeInstallError("transaction journal must be a JSON object")
+    if (
+        journal.get("version") != VERSION
+        or journal.get("transaction_id") != transaction
+        or journal.get("state") not in TRANSACTION_STATES
+        or journal.get("recovery_operation")
+        not in {None, "rollback", "restore-runtime"}
+        or not isinstance(journal.get("adopt_unmanaged"), bool)
+        or not isinstance(journal.get("user_manager_reload_required"), bool)
+        or not valid_digest(journal.get("plan_sha256"))
+        or not valid_digest(journal.get("evidence_manifest_sha256"))
+    ):
+        raise RuntimeInstallError("transaction journal header is invalid")
+    revisions = journal.get("source_revisions")
+    if (
+        not isinstance(revisions, dict)
+        or set(revisions) != {"winegdk_git_sha", "xodus_git_sha", "integration_git_sha"}
+        or not all(valid_digest(value, 40) for value in revisions.values())
+    ):
+        raise RuntimeInstallError("transaction journal source revisions are invalid")
+    roots = journal.get("roots")
+    if (
+        not isinstance(roots, dict)
+        or set(roots) != {"compat-tool", "user"}
+        or not all(
+            isinstance(value, str) and os.path.isabs(value) for value in roots.values()
+        )
+    ):
+        raise RuntimeInstallError("transaction journal roots are invalid")
+    artifacts = journal.get("artifacts")
+    if not isinstance(artifacts, list) or [
+        record.get("role") for record in artifacts if isinstance(record, dict)
+    ] != list(INSTALL_ORDER):
+        raise RuntimeInstallError("transaction journal artifact order is invalid")
+    contracts = {
+        **ROLES,
+        "user-install-manifest": {
+            "destination_root": "user",
+            "destination_relative": INSTALL_MANIFEST,
+        },
+    }
+    for record in artifacts:
+        role = record["role"]
+        contract = contracts[role]
+        target_mode = (
+            MANIFEST_MODE
+            if role == "user-install-manifest"
+            else contract["target_mode"]
+        )
+        before = record.get("before")
+        expected_names = {
+            "stage_name": f".forza-runtime-{transaction}-{role}.stage",
+            "backup_name": f".forza-runtime-{transaction}-{role}.backup",
+            "recovery_name": f".forza-runtime-{transaction}-{role}.recovery",
+        }
+        if (
+            record.get("destination_root") != contract["destination_root"]
+            or record.get("destination_relative") != contract["destination_relative"]
+            or record.get("target_mode") != target_mode
+            or record.get("installed_mode") != target_mode
+            or record.get("source_sha256") != record.get("installed_sha256")
+            or not valid_digest(record.get("source_sha256"))
+            or record.get("phase") not in ARTIFACT_PHASES
+            or any(record.get(key) != value for key, value in expected_names.items())
+            or not isinstance(before, dict)
+            or not isinstance(before.get("present"), bool)
+        ):
+            raise RuntimeInstallError(
+                f"transaction journal artifact is invalid: {role}"
+            )
+        if before["present"] and (
+            before.get("type") != "regular"
+            or not isinstance(before.get("mode"), int)
+            or before.get("uid") != os.getuid()
+            or not isinstance(before.get("gid"), int)
+            or not valid_digest(before.get("sha256"))
+        ):
+            raise RuntimeInstallError(
+                f"transaction journal before-state is invalid: {role}"
+            )
+    return journal
+
+
+def journal_data(state_fd: int, transaction: str) -> tuple[int, dict[str, Any]]:
+    transaction_fd = os.open(transaction, DIRECTORY, dir_fd=state_fd)
+    try:
+        info = os.fstat(transaction_fd)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise RuntimeInstallError(
+                "transaction directory has unsafe ownership or mode"
+            )
+        data, mode, _ = read_regular(transaction_fd, "journal.json")
+        if mode != MANIFEST_MODE:
+            raise RuntimeInstallError("transaction journal mode drift")
+        journal = validate_journal(json.loads(data), transaction)
+        return transaction_fd, journal
+    except Exception:
+        os.close(transaction_fd)
+        raise
+
+
+def write_journal(transaction_fd: int, journal: dict[str, Any]) -> None:
+    replace_owned_json(transaction_fd, "journal.json", journal, MANIFEST_MODE)
+
+
+def transaction_journals(user_root: Path) -> list[tuple[str, dict[str, Any]]]:
+    user_fd = open_absolute_directory(user_root)
+    try:
+        try:
+            state_fd = open_state_directory(user_fd, create=False)
+        except FileNotFoundError:
+            return []
+    finally:
+        os.close(user_fd)
+    result: list[tuple[str, dict[str, Any]]] = []
+    try:
+        for name in os.listdir(state_fd):
+            if len(name) != 24 or any(
+                character not in "0123456789abcdef" for character in name
+            ):
+                continue
+            transaction_fd, journal = journal_data(state_fd, name)
+            os.close(transaction_fd)
+            result.append((name, journal))
+    finally:
+        os.close(state_fd)
+    return sorted(result)
+
+
+def select_transaction(
+    user_root: Path, predicate: Callable[[dict[str, Any]], bool]
+) -> tuple[str, dict[str, Any]]:
+    matches = [
+        entry for entry in transaction_journals(user_root) if predicate(entry[1])
+    ]
+    if len(matches) != 1:
+        raise RuntimeInstallError("expected exactly one matching runtime transaction")
+    return matches[0]
+
+
+def destination_root_fd(arguments: argparse.Namespace, name: str) -> int:
+    return open_absolute_directory(
+        arguments.compat_tool_root if name == "compat-tool" else arguments.user_root
+    )
+
+
+def entry_state(parent_fd: int, leaf: str) -> dict[str, Any]:
+    try:
+        data, mode, info = read_regular(parent_fd, leaf)
+    except FileNotFoundError:
+        return {"present": False}
+    except RuntimeInstallError:
+        try:
+            info = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return {"present": False}
+        return {
+            "present": True,
+            "type": "other",
+            "mode": stat.S_IMODE(info.st_mode),
+            "uid": info.st_uid,
+            "gid": info.st_gid,
+        }
+    return {
+        "present": True,
+        "type": "regular",
+        "mode": mode,
+        "uid": info.st_uid,
+        "gid": info.st_gid,
+        "sha256": digest(data),
+    }
+
+
+def state_matches(observed: dict[str, Any], expected: dict[str, Any]) -> bool:
+    if not expected.get("present"):
+        return not observed.get("present")
+    return all(
+        observed.get(key) == expected.get(key)
+        for key in ("present", "type", "mode", "uid", "gid", "sha256")
+    )
+
+
+def installed_matches(
+    observed: dict[str, Any], expected_hash: str, expected_mode: int
+) -> bool:
+    return (
+        observed.get("present") is True
+        and observed.get("type") == "regular"
+        and observed.get("uid") == os.getuid()
+        and observed.get("mode") == expected_mode
+        and observed.get("sha256") == expected_hash
+    )
+
+
+def test_boundary(label: str) -> None:
+    if os.environ.get("FORZA_RUNTIME_TESTING") != "1":
+        return
+    if os.environ.get("FORZA_RUNTIME_INTERRUPT_AT") != label:
+        return
+    if os.environ.get("FORZA_RUNTIME_INTERRUPT_MODE", "fail") == "crash":
+        os._exit(99)
+    raise RuntimeInstallError(f"simulated interruption at {label}")
+
+
+def test_pause(label: str) -> None:
+    if os.environ.get("FORZA_RUNTIME_TESTING") != "1":
+        return
+    if os.environ.get("FORZA_RUNTIME_PAUSE_AT") != label:
+        return
+    marker = Path(os.environ.get("FORZA_RUNTIME_PAUSE_MARKER", ""))
+    release = Path(os.environ.get("FORZA_RUNTIME_PAUSE_RELEASE", ""))
+    if not marker.is_absolute() or not release.is_absolute():
+        raise RuntimeInstallError("test pause paths must be absolute")
+    marker_fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(marker_fd)
+    deadline = time.monotonic() + 2
+    while not release.exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeInstallError(f"test pause timed out at {label}")
+        time.sleep(0.01)
+
+
+def stage_transaction(
+    arguments: argparse.Namespace,
+    plan: dict[str, Any],
+    plan_hash: str,
+    evidence_hash: str,
+    artifacts: dict[str, dict[str, Any]],
+    new_manifest: bytes,
+) -> tuple[int, int, dict[str, Any]]:
+    user_fd = open_absolute_directory(arguments.user_root)
+    try:
+        state_fd = open_state_directory(user_fd, create=True)
+    finally:
+        os.close(user_fd)
+    if any(
+        journal.get("state")
+        in {
+            "prepared",
+            "installing",
+            "rolling_back",
+            "recovery_required",
+            "installed",
+            "accepted",
+        }
+        for _, journal in transaction_journals(arguments.user_root)
+    ):
+        os.close(state_fd)
+        raise RuntimeInstallError("an unfinished runtime transaction already exists")
+    for _ in range(100):
+        transaction = secrets.token_hex(12)
+        try:
+            os.mkdir(transaction, 0o700, dir_fd=state_fd)
+            os.fsync(state_fd)
+            break
+        except FileExistsError:
+            continue
+    else:
+        os.close(state_fd)
+        raise RuntimeInstallError("cannot reserve runtime transaction directory")
+    transaction_fd = os.open(transaction, DIRECTORY, dir_fd=state_fd)
+    records = {record["role"]: record for record in plan["artifacts"]}
+    records["user-install-manifest"] = {
+        "role": "user-install-manifest",
+        "source_sha256": plan["user_manifest"]["installed_sha256"],
+        "target_mode": MANIFEST_MODE,
+        "destination_root": "user",
+        "destination_relative": INSTALL_MANIFEST,
+        "before": plan["user_manifest"]["before"],
+    }
+    journal = {
+        "version": VERSION,
+        "transaction_id": transaction,
+        "state": "prepared",
+        "recovery_operation": None,
+        "plan_sha256": plan_hash,
+        "evidence_manifest_sha256": evidence_hash,
+        "source_revisions": plan["source_revisions"],
+        "roots": plan["roots"],
+        "adopt_unmanaged": plan["adopt_unmanaged"],
+        "user_manager_reload_required": False,
+        "artifacts": [],
+    }
+    source_data = {role: value["data"] for role, value in artifacts.items()}
+    source_data["user-install-manifest"] = new_manifest
+    for role in INSTALL_ORDER:
+        record = records[role]
+        journal["artifacts"].append(
+            {
+                **record,
+                "stage_name": f".forza-runtime-{transaction}-{role}.stage",
+                "backup_name": f".forza-runtime-{transaction}-{role}.backup",
+                "recovery_name": f".forza-runtime-{transaction}-{role}.recovery",
+                "installed_mode": record["target_mode"],
+                "installed_sha256": record["source_sha256"],
+                "phase": "stage_pending",
+            }
+        )
+    try:
+        write_journal(transaction_fd, journal)
+        for record in journal["artifacts"]:
+            role = record["role"]
+            root_fd = destination_root_fd(arguments, record["destination_root"])
+            try:
+                parent_fd, _ = open_parent(
+                    root_fd, record["destination_relative"], create=True
+                )
+                try:
+                    write_new(
+                        parent_fd,
+                        record["stage_name"],
+                        source_data[role],
+                        record["target_mode"],
+                    )
+                    test_boundary(f"stage-write:{role}")
+                    staged, staged_mode, _ = read_regular(
+                        parent_fd, record["stage_name"]
+                    )
+                    if (
+                        staged_mode != record["target_mode"]
+                        or digest(staged) != record["source_sha256"]
+                    ):
+                        raise RuntimeInstallError(
+                            f"staged artifact verification failed: {role}"
+                        )
+                finally:
+                    os.close(parent_fd)
+            finally:
+                os.close(root_fd)
+            record["phase"] = "staged"
+            write_journal(transaction_fd, journal)
+        return state_fd, transaction_fd, journal
+    except Exception:
+        journal["recovery_operation"] = "rollback"
+        journal["state"] = "rolling_back"
+        write_journal(transaction_fd, journal)
+        complete = True
+        for record in reversed(journal["artifacts"]):
+            complete = (
+                restore_record(arguments, transaction_fd, journal, record) and complete
+            )
+        journal["state"] = "rolled_back" if complete else "recovery_required"
+        write_journal(transaction_fd, journal)
+        os.close(transaction_fd)
+        os.close(state_fd)
+        raise
+
+
+def install_record(
+    arguments: argparse.Namespace,
+    transaction_fd: int,
+    journal: dict[str, Any],
+    record: dict[str, Any],
+) -> None:
+    root_fd = destination_root_fd(arguments, record["destination_root"])
+    try:
+        parent_fd, leaf = open_parent(root_fd, record["destination_relative"])
+        try:
+            before = record["before"]
+            if record["role"] == "systemd-unit":
+                journal["user_manager_reload_required"] = True
+                write_journal(transaction_fd, journal)
+            if before["present"]:
+                if not state_matches(entry_state(parent_fd, leaf), before):
+                    raise RuntimeInstallError(
+                        f"destination changed after plan: {record['role']}"
+                    )
+                record["phase"] = "backup_pending"
+                write_journal(transaction_fd, journal)
+                rename_noreplace(parent_fd, leaf, parent_fd, record["backup_name"])
+                test_boundary(f"backup-rename:{record['role']}")
+                record["phase"] = "backed_up"
+                write_journal(transaction_fd, journal)
+            else:
+                if entry_state(parent_fd, leaf).get("present"):
+                    raise RuntimeInstallError(
+                        f"absent destination appeared after plan: {record['role']}"
+                    )
+                record["phase"] = "backup_skipped"
+                write_journal(transaction_fd, journal)
+            record["phase"] = "install_pending"
+            write_journal(transaction_fd, journal)
+            rename_noreplace(parent_fd, record["stage_name"], parent_fd, leaf)
+            test_boundary(f"install-rename:{record['role']}")
+            record["phase"] = "installed"
+            write_journal(transaction_fd, journal)
+            if not installed_matches(
+                entry_state(parent_fd, leaf),
+                record["installed_sha256"],
+                record["installed_mode"],
+            ):
+                raise RuntimeInstallError(
+                    f"installed artifact verification failed: {record['role']}"
+                )
+        finally:
+            os.close(parent_fd)
+    finally:
+        os.close(root_fd)
+
+
+def preserve_name(parent_fd: int, leaf: str, recovery: str) -> bool:
+    try:
+        rename_noreplace(parent_fd, leaf, parent_fd, recovery)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        if error.errno != errno.EEXIST:
+            raise
+        alternate = f"{recovery}-{secrets.token_hex(4)}"
+        rename_noreplace(parent_fd, leaf, parent_fd, alternate)
+        return True
+
+
+def restore_record(
+    arguments: argparse.Namespace,
+    transaction_fd: int,
+    journal: dict[str, Any],
+    record: dict[str, Any],
+) -> bool:
+    complete = True
+    root_fd = destination_root_fd(arguments, record["destination_root"])
+    try:
+        parent_fd, leaf = open_parent(root_fd, record["destination_relative"])
+        try:
+            before = record["before"]
+            phase = record["phase"]
+            stage = entry_state(parent_fd, record["stage_name"])
+            backup = entry_state(parent_fd, record["backup_name"])
+            destination_untouched = phase in {
+                "stage_pending",
+                "staged",
+                "backup_skipped",
+            } or (phase == "backup_pending" and not backup.get("present"))
+            if (
+                phase == "install_pending"
+                and not before["present"]
+                and stage.get("present")
+            ):
+                destination_untouched = True
+            if destination_untouched:
+                if stage.get("present"):
+                    suffix = (
+                        "-stage"
+                        if installed_matches(
+                            stage,
+                            record["installed_sha256"],
+                            record["installed_mode"],
+                        )
+                        else "-stage-unexpected"
+                    )
+                    preserve_name(
+                        parent_fd,
+                        record["stage_name"],
+                        f"{record['recovery_name']}{suffix}",
+                    )
+                    test_boundary(f"restore-stage:{record['role']}")
+                if backup.get("present"):
+                    preserve_name(
+                        parent_fd,
+                        record["backup_name"],
+                        f"{record['recovery_name']}-backup-unexpected",
+                    )
+                    complete = False
+                record["phase"] = "restored" if complete else "recovery_required"
+                write_journal(transaction_fd, journal)
+                return complete
+
+            current = entry_state(parent_fd, leaf)
+            current_is_before = state_matches(current, before)
+            if not current_is_before and current.get("present"):
+                suffix = (
+                    ""
+                    if installed_matches(
+                        current,
+                        record["installed_sha256"],
+                        record["installed_mode"],
+                    )
+                    else "-unexpected"
+                )
+                preserve_name(parent_fd, leaf, f"{record['recovery_name']}{suffix}")
+                test_boundary(f"restore-current:{record['role']}")
+                current = {"present": False}
+
+            stage = entry_state(parent_fd, record["stage_name"])
+            if stage.get("present"):
+                suffix = (
+                    "-stage"
+                    if installed_matches(
+                        stage,
+                        record["installed_sha256"],
+                        record["installed_mode"],
+                    )
+                    else "-stage-unexpected"
+                )
+                preserve_name(
+                    parent_fd,
+                    record["stage_name"],
+                    f"{record['recovery_name']}{suffix}",
+                )
+                test_boundary(f"restore-stage:{record['role']}")
+
+            if before["present"] and not current_is_before:
+                backup = entry_state(parent_fd, record["backup_name"])
+                if state_matches(backup, before):
+                    rename_noreplace(parent_fd, record["backup_name"], parent_fd, leaf)
+                    test_boundary(f"restore-backup:{record['role']}")
+                else:
+                    if backup.get("present"):
+                        preserve_name(
+                            parent_fd,
+                            record["backup_name"],
+                            f"{record['recovery_name']}-backup-unexpected",
+                        )
+                    complete = False
+
+            restored = entry_state(parent_fd, leaf)
+            if not state_matches(restored, before):
+                complete = False
+
+            backup = entry_state(parent_fd, record["backup_name"])
+            if backup.get("present"):
+                suffix = (
+                    "-backup-extra"
+                    if state_matches(backup, before)
+                    else "-backup-unexpected"
+                )
+                preserve_name(
+                    parent_fd,
+                    record["backup_name"],
+                    f"{record['recovery_name']}{suffix}",
+                )
+            record["phase"] = "restored" if complete else "recovery_required"
+            write_journal(transaction_fd, journal)
+        finally:
+            os.close(parent_fd)
+    finally:
+        os.close(root_fd)
+    return complete
+
+
+def rollback_records(
+    arguments: argparse.Namespace,
+    transaction_fd: int,
+    journal: dict[str, Any],
+    roles: set[str],
+) -> bool:
+    complete = True
+    reload_needed = "systemd-unit" in roles and journal["user_manager_reload_required"]
+    for record in reversed(journal["artifacts"]):
+        if record["role"] not in roles:
+            continue
+        if record["role"] == "systemd-unit":
+            reload_needed = True
+            if not journal["user_manager_reload_required"]:
+                journal["user_manager_reload_required"] = True
+                write_journal(transaction_fd, journal)
+        if record["role"] == "launcher-gate":
+            if not complete:
+                return False
+            if reload_needed:
+                try:
+                    reload_user_manager()
+                except RuntimeInstallError:
+                    return False
+                journal["user_manager_reload_required"] = False
+                write_journal(transaction_fd, journal)
+        complete = (
+            restore_record(arguments, transaction_fd, journal, record) and complete
+        )
+    return complete
+
+
+def revalidate_destinations_before_mutation(
+    arguments: argparse.Namespace, journal: dict[str, Any]
+) -> None:
+    for record in journal["artifacts"]:
+        root_fd = destination_root_fd(arguments, record["destination_root"])
+        try:
+            parent_fd, leaf = open_parent(root_fd, record["destination_relative"])
+            try:
+                matches = state_matches(entry_state(parent_fd, leaf), record["before"])
+            finally:
+                os.close(parent_fd)
+        finally:
+            os.close(root_fd)
+        if not matches:
+            raise RuntimeInstallError(
+                f"destination changed before first mutation: {record['role']}"
+            )
+
+
+def install_components(arguments: argparse.Namespace) -> None:
+    lock_fd = acquire_launcher_lock()
+    try:
+        require_service_and_game_inactive()
+        plan, plan_hash, artifacts, new_manifest = build_plan(arguments)
+        if arguments.plan_sha256 != plan_hash:
+            raise RuntimeInstallError("plan digest does not match the current inputs")
+        evidence_hash = plan["evidence_manifest_sha256"]
+        state_fd, transaction_fd, journal = stage_transaction(
+            arguments, plan, plan_hash, evidence_hash, artifacts, new_manifest
+        )
+        try:
+            test_pause("before-preflight")
+            require_service_and_game_inactive()
+            revalidate_destinations_before_mutation(arguments, journal)
+            journal["state"] = "installing"
+            write_journal(transaction_fd, journal)
+            for role in INSTALL_ORDER:
+                record = next(
+                    item for item in journal["artifacts"] if item["role"] == role
+                )
+                install_record(arguments, transaction_fd, journal, record)
+            reload_user_manager()
+            journal["user_manager_reload_required"] = False
+            journal["state"] = "installed"
+            write_journal(transaction_fd, journal)
+            print(f"TRANSACTION_ID={journal['transaction_id']}")
+        except Exception:
+            journal["recovery_operation"] = "rollback"
+            journal["state"] = "rolling_back"
+            write_journal(transaction_fd, journal)
+            complete = rollback_records(
+                arguments,
+                transaction_fd,
+                journal,
+                {record["role"] for record in journal["artifacts"]},
+            )
+            journal["state"] = "rolled_back" if complete else "recovery_required"
+            write_journal(transaction_fd, journal)
+            raise
+        finally:
+            os.close(transaction_fd)
+            os.close(state_fd)
+    finally:
+        os.close(lock_fd)
+
+
+def verify_transaction_installed(
+    arguments: argparse.Namespace, journal: dict[str, Any]
+) -> None:
+    for record in journal["artifacts"]:
+        if record.get("phase") != "installed":
+            raise RuntimeInstallError(
+                f"transaction role is not installed: {record.get('role')}"
+            )
+        root_fd = destination_root_fd(arguments, record["destination_root"])
+        try:
+            parent_fd, leaf = open_parent(root_fd, record["destination_relative"])
+            try:
+                matches = installed_matches(
+                    entry_state(parent_fd, leaf),
+                    record["installed_sha256"],
+                    record["installed_mode"],
+                )
+            finally:
+                os.close(parent_fd)
+        finally:
+            os.close(root_fd)
+        if not matches:
+            raise RuntimeInstallError(
+                f"installed transaction artifact drift: {record['role']}"
+            )
+
+
+def mutate_existing(arguments: argparse.Namespace, operation: str) -> None:
+    lock_fd = acquire_launcher_lock()
+    try:
+        require_service_and_game_inactive()
+        if operation == "rollback":
+            transaction, _ = select_transaction(
+                arguments.user_root,
+                lambda journal: (
+                    journal["state"] in {"prepared", "installed", "installing"}
+                    or (
+                        journal["state"] in {"rolling_back", "recovery_required"}
+                        and journal["recovery_operation"] == "rollback"
+                    )
+                ),
+            )
+        elif operation == "accept":
+            transaction, _ = select_transaction(
+                arguments.user_root,
+                lambda journal: (
+                    journal["state"] == "installed"
+                    and journal["recovery_operation"] is None
+                ),
+            )
+        else:
+            transaction, _ = select_transaction(
+                arguments.user_root,
+                lambda journal: (
+                    (
+                        journal["state"] == "accepted"
+                        and journal["recovery_operation"] is None
+                    )
+                    or (
+                        journal["state"] in {"rolling_back", "recovery_required"}
+                        and journal["recovery_operation"] == "restore-runtime"
+                    )
+                ),
+            )
+        user_fd = open_absolute_directory(arguments.user_root)
+        try:
+            state_fd = open_state_directory(user_fd, create=False)
+        finally:
+            os.close(user_fd)
+        transaction_fd, journal = journal_data(state_fd, transaction)
+        try:
+            expected_roots = {
+                "compat-tool": str(arguments.compat_tool_root),
+                "user": str(arguments.user_root),
+            }
+            if journal["roots"] != expected_roots:
+                raise RuntimeInstallError(
+                    "transaction root arguments do not match its plan"
+                )
+            if operation == "accept":
+                verify_transaction_installed(arguments, journal)
+                journal["state"] = "accepted"
+                write_journal(transaction_fd, journal)
+                return
+            journal["recovery_operation"] = operation
+            journal["state"] = "rolling_back"
+            write_journal(transaction_fd, journal)
+            roles = (
+                set(WINE_ROLES)
+                if operation == "restore-runtime"
+                else {record["role"] for record in journal["artifacts"]}
+            )
+            complete = rollback_records(arguments, transaction_fd, journal, roles)
+            if complete:
+                journal["state"] = (
+                    "runtime_restored"
+                    if operation == "restore-runtime"
+                    else "rolled_back"
+                )
+            else:
+                journal["state"] = "recovery_required"
+            write_journal(transaction_fd, journal)
+            if not complete:
+                raise RuntimeInstallError("runtime recovery requires manual inspection")
+        finally:
+            os.close(transaction_fd)
+            os.close(state_fd)
+    finally:
+        os.close(lock_fd)
+
+
+def status(arguments: argparse.Namespace) -> int:
+    journals = transaction_journals(arguments.user_root)
+    if not journals:
+        print("state=none")
+        return 3
+    for transaction, journal in journals:
+        print(f"transaction={transaction} state={journal.get('state', 'invalid')}")
+    return (
+        1
+        if any(journal.get("state") == "recovery_required" for _, journal in journals)
+        else 0
+    )
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "operation",
+        choices=(
+            "lock-evidence",
+            "plan",
+            "install",
+            "status",
+            "rollback",
+            "accept",
+            "restore-runtime",
+        ),
+    )
+    parser.add_argument(
+        "--compat-tool-root",
+        required=True,
+        type=absolute_argument("compat-tool root"),
+    )
+    parser.add_argument(
+        "--user-root",
+        required=True,
+        type=absolute_argument("user root"),
+    )
+    parser.add_argument(
+        "--xgameruntime-build-dir",
+        required=True,
+        type=absolute_argument("WineGDK build directory"),
+    )
+    parser.add_argument(
+        "--xodus-build-dir",
+        required=True,
+        type=absolute_argument("Xodus build directory"),
+    )
+    parser.add_argument(
+        "--artifact-evidence-manifest",
+        required=True,
+        type=absolute_argument("artifact evidence manifest"),
+    )
+    parser.add_argument("--plan-sha256")
+    parser.add_argument("--adopt-unmanaged", action="store_true")
+    arguments = parser.parse_args()
+    if arguments.operation == "install":
+        value = arguments.plan_sha256 or ""
+        if len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            parser.error(
+                "install requires --plan-sha256 with a lowercase SHA-256 digest"
+            )
+    elif arguments.plan_sha256 is not None:
+        parser.error("--plan-sha256 is valid only for install")
+    if arguments.adopt_unmanaged and arguments.operation not in {"plan", "install"}:
+        parser.error("--adopt-unmanaged is valid only for plan and install")
+    try:
+        evidence_path(arguments.user_root, arguments.artifact_evidence_manifest)
+    except RuntimeInstallError as error:
+        parser.error(str(error))
+    return arguments
+
+
+def main() -> int:
+    arguments = parse_arguments()
+    try:
+        if arguments.operation == "lock-evidence":
+            lock_evidence(arguments)
+        elif arguments.operation == "plan":
+            plan, plan_hash, _, _ = build_plan(arguments)
+            print_plan(plan, plan_hash)
+        elif arguments.operation == "install":
+            install_components(arguments)
+        elif arguments.operation == "status":
+            return status(arguments)
+        else:
+            mutate_existing(arguments, arguments.operation)
+    except (OSError, RuntimeInstallError, json.JSONDecodeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

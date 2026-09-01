@@ -57,6 +57,9 @@ cleanup() {
             token_file_matches "$active_token_path" "$started_owner_token"; then
             "$systemctl_bin" --user stop "$service_name" || true
             if service_is_inactive && token_file_matches "$active_token_path" "$started_owner_token"; then
+                if [[ -S $socket_path && ! -L $socket_path ]] && ! socket_is_listening; then
+                    rm -f -- "$socket_path"
+                fi
                 rm -f -- "$active_token_path"
             fi
         fi
@@ -142,6 +145,82 @@ os.execve(launcher, [launcher, *sys.argv[3:]], environment)
 fi
 coordinator_fd=$FORZA_LOCK_FD
 unset FORZA_LOCK_BOOTSTRAP_PID FORZA_LOCK_FD
+
+transaction_user_root=${HOME:?HOME is required}
+if [[ ${FORZA_RUNTIME_TESTING:-} == 1 && -n ${FORZA_RUNTIME_TEST_USER_ROOT:-} ]]; then
+    transaction_user_root=$FORZA_RUNTIME_TEST_USER_ROOT
+fi
+python3 - "$transaction_user_root/.local/state/forza-motorsport-linux/runtime-transactions" <<'PY' || exit $?
+import json
+import os
+import stat
+import sys
+
+state_path = sys.argv[1]
+directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+blocking_states = {"prepared", "installing", "rolling_back", "recovery_required"}
+known_states = blocking_states | {"installed", "accepted", "rolled_back", "runtime_restored"}
+
+if not os.path.isabs(state_path):
+    print("error: runtime transaction path is not absolute", file=sys.stderr)
+    raise SystemExit(1)
+
+descriptor = os.open("/", directory_flags)
+try:
+    for part in [item for item in state_path.split("/") if item]:
+        try:
+            next_descriptor = os.open(part, directory_flags, dir_fd=descriptor)
+        except FileNotFoundError:
+            raise SystemExit(0)
+        os.close(descriptor)
+        descriptor = next_descriptor
+    state_info = os.fstat(descriptor)
+    if state_info.st_uid != os.getuid() or stat.S_IMODE(state_info.st_mode) != 0o700:
+        raise RuntimeError("runtime transaction state root must be current-user mode 0700")
+    for transaction in os.listdir(descriptor):
+        if len(transaction) != 24 or any(character not in "0123456789abcdef" for character in transaction):
+            continue
+        transaction_fd = os.open(transaction, directory_flags, dir_fd=descriptor)
+        try:
+            transaction_info = os.fstat(transaction_fd)
+            if transaction_info.st_uid != os.getuid() or stat.S_IMODE(transaction_info.st_mode) != 0o700:
+                raise RuntimeError("runtime transaction directory has unsafe ownership or mode")
+            journal_fd = os.open(
+                "journal.json",
+                os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=transaction_fd,
+            )
+            try:
+                journal_info = os.fstat(journal_fd)
+                if (
+                    not stat.S_ISREG(journal_info.st_mode)
+                    or journal_info.st_uid != os.getuid()
+                    or stat.S_IMODE(journal_info.st_mode) != 0o600
+                ):
+                    raise RuntimeError("runtime transaction journal has unsafe ownership or mode")
+                with os.fdopen(os.dup(journal_fd), encoding="utf-8") as stream:
+                    journal = json.load(stream)
+            finally:
+                os.close(journal_fd)
+            if journal.get("version") != 1 or journal.get("transaction_id") != transaction:
+                raise RuntimeError("runtime transaction journal identity mismatch")
+            state = journal.get("state")
+            if state not in known_states:
+                raise RuntimeError("runtime transaction journal has an unknown state")
+            if state in blocking_states:
+                print(
+                    f"error: runtime transaction {transaction} requires recovery ({state})",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+        finally:
+            os.close(transaction_fd)
+except (OSError, UnicodeDecodeError, json.JSONDecodeError, RuntimeError) as error:
+    print(f"error: cannot validate runtime transaction state: {error}", file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    os.close(descriptor)
+PY
 
 if [[ -n ${PAM_KWALLET5_LOGIN:-} && -S ${PAM_KWALLET5_LOGIN} ]]; then
     "$systemctl_bin" --user start plasma-kwallet-pam.service || true

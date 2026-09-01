@@ -9,7 +9,7 @@
 | Launcher | Starts Xodus on demand for one game command and preserves its exit status. |
 | Diagnostics | Reports readiness without changing Steam, credentials, or systemd state. |
 | Patches | Only reviewed controller/mountmgr hashes, with backups and restoration. |
-| Install | User-local, manifest-backed, reversible, and never enables the service. |
+| Install | User-local and runtime-component transactions are manifest-backed, recoverable, and never enable the service. |
 | Social | Outgoing Microsoft/Xbox invite and join are experimental through Xodus. |
 
 ## What this project does
@@ -65,6 +65,49 @@ scripts/print-steam-options
 ```
 
 Paste its output into Forza Motorsport's Steam launch options. It emits the approved ordered baseline: `WINEDLLOVERRIDES=xgameruntime=b`, `PROTON_VKD3D_HEAP=1`, `VKD3D_CONFIG=skip_application_workarounds,descriptor_heap,avoid_image_buffer_aliasing`, the current user's Xodus socket path, and the shell-quoted installed launcher before literal `%command%`. It does not edit Steam files. Do not add `PROTON_DISABLE_HIDRAW`, `PROTON_ENABLE_WAYLAND`, `-SkipTargetHardwareProfiler`, or unrelated Proton flags.
+
+## Reviewed runtime-component transaction
+
+The source-reviewed Xodus/WineGDK integration has a separate fail-closed installer. It accepts only the exact clean integration, WineGDK, and Xodus revisions, binds ten source artifacts into a private mode-0600 evidence manifest, and prints a digest-bound plan before installation. It stages every source before the first destination changes, holds the same exclusive lock as the game launcher, and refuses to mutate while Forza or `xodus-forza.service` is active. It never starts or stops either one.
+
+Set the four absolute roots for the reviewed local builds and compatibility tool:
+
+```bash
+user_root="$HOME"
+compat_tool="${XDG_DATA_HOME:-$HOME/.local/share}/Steam/compatibilitytools.d/GE-Proton11-3-FM"
+winegdk_build=/absolute/path/to/reviewed-winegdk-build
+xodus_build=/absolute/path/to/reviewed-xodus/target/release
+evidence="$user_root/.local/state/forza-motorsport-linux/runtime-transactions/artifact-evidence.json"
+runtime_args=(
+    --compat-tool-root "$compat_tool"
+    --user-root "$user_root"
+    --xgameruntime-build-dir "$winegdk_build"
+    --xodus-build-dir "$xodus_build"
+    --artifact-evidence-manifest "$evidence"
+)
+scripts/install-runtime-components lock-evidence "${runtime_args[@]}"
+scripts/install-runtime-components plan "${runtime_args[@]}"
+```
+
+Review all ten printed source roles, revisions, before hashes, fixed modes, ownership decision, and `PLAN_SHA256`. Installation requires that exact digest and recomputes every input:
+
+```bash
+scripts/install-runtime-components install "${runtime_args[@]}" --plan-sha256 EXACT_PRINTED_DIGEST
+scripts/install-runtime-components status "${runtime_args[@]}"
+```
+
+If the ownership manifest is absent but one or more of the eight user destinations already exist, the plan refuses them by default. Inspect those files first, then pass `--adopt-unmanaged` to both `plan` and `install`; the adoption decision is included in the plan digest. This is intended for an explicitly reviewed legacy installation, not as a conflict override.
+
+Before manual validation, `rollback` restores the prior launcher, doctor, patcher, build manifest, Xodus executables, systemd unit, ownership manifest, and both WineGDK files. The launcher is published first: before that rename no functional component has changed, and after it every unfinished state is launch-blocking. Publishing or restoring the unit requires a successful user-manager `daemon-reload`; rollback keeps the recovery-aware launcher in place if that reload fails. After successful validation, `accept` retains the backups; a later `restore-runtime` restores only the WineGDK pair and leaves all accepted user files owned by the normal user-install manifest:
+
+```bash
+scripts/install-runtime-components rollback "${runtime_args[@]}"
+# Or, only after the full manual matrix passes:
+scripts/install-runtime-components accept "${runtime_args[@]}"
+scripts/install-runtime-components restore-runtime "${runtime_args[@]}"
+```
+
+Do not delete transaction directories or adjacent backup/recovery files. The launcher allows the `installed` state for manual game validation but blocks `prepared`, `installing`, `rolling_back`, and `recovery_required`. This transaction changes only the eight allowlisted user payloads, their ownership manifest, and the WineGDK pair inside the selected compatibility tool. It does not touch Steam launch options, the game prefix, credentials, or the separately supplied `xgameruntime.dll.threading` file.
 
 ## Known-build patch fallback
 
