@@ -199,10 +199,11 @@ request exists.
 
 ## Local WineGDK XGameRuntime source gate
 
-WineGDK commit `6e0c6d1f951a7a457444ba8abd81374c0d093dba` is the reviewed
+WineGDK commit `ef069c85c8b3ee049971a9e22a317309b30bb09f` is the reviewed
 local source tip for the bounded Xodus transport, XGameUi invite-only flow,
 XGameInvite activation delivery, reference-counted runtime lifecycle, and
-runtime-owned WinRT initialization outside loader lock.
+runtime-owned WinRT initialization outside loader lock. It also serializes the
+MSA token-request field as the canonical `ClientId` expected by Xodus.
 Integration commit `d9d00144a8d845dff4871be32d14b40f1c507124` owns the
 20-stage exact-artifact gate. A clean rebuild plus three complete runs were
 green; the final run covered seven native transport contracts and 19 PE

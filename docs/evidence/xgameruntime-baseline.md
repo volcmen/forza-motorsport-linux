@@ -217,9 +217,11 @@ or Forza itself.
 ## XGameUi and XGameInvite source checkpoint
 
 The reviewed WineGDK branch now ends at
-`6e0c6d1f951a7a457444ba8abd81374c0d093dba`
-(`xgameruntime: initialize WinRT outside loader lock`). Its preceding social
-checkpoint is `ad16c240c175be84d70052eddadceed7666178fe`
+`ef069c85c8b3ee049971a9e22a317309b30bb09f`
+(`xgameruntime: serialize canonical MSA client id`). Its preceding WinRT
+checkpoint is `6e0c6d1f951a7a457444ba8abd81374c0d093dba`
+(`xgameruntime: initialize WinRT outside loader lock`), its social checkpoint is
+`ad16c240c175be84d70052eddadceed7666178fe`
 (`xgameinvite: deliver Xodus invite activations`), and its public-API
 checkpoint is `de9a32707f8213808181b7452c2e1f8d6e5b5550`
 (`xgameui: bridge multiplayer activity invites to Xodus`). The exact source
@@ -311,3 +313,29 @@ cc834a2e3d427464d926b79a40f96ade60fcf33d5e4110bb4f3bd26d4308aa0a  xgameruntime_t
 
 This corrective checkpoint is still hermetic evidence; live Forza behavior is
 a separate manual gate.
+
+## Canonical Xodus token-request checkpoint
+
+The first live launch after the WinRT correction passed runtime initialization
+and reached the Xodus protocol boundary. Xodus then rejected the first MSA
+token request because the bridge emitted `clientId`, while the protocol model
+requires the case-sensitive `ClientId` element. The integration fixture had
+encoded the same lowercase spelling, so its previous success did not cover the
+real service contract.
+
+The fixture expectation was changed first and reproduced the rejection in the
+synthetic main-stream lifecycle. WineGDK commit
+`ef069c85c8b3ee049971a9e22a317309b30bb09f` then changed only the XML element
+name. All 20 bridge stages passed afterward, including seven native transport
+cases, 81 main-lifecycle assertions, and the complete XGameUi/XGameInvite
+matrix with zero failures. The rebuilt artifacts were:
+
+```text
+6a38415cc1a2aa5490721609c41d7363d33dfcc92e58c5cfa72068d42fc801a6  xgameruntime.dll
+24d6fbb2934cdeccf8d25b0e0f27bfb106fc2ec2ba1f63d017cbed514e8d35de  xgameruntime.so
+cc834a2e3d427464d926b79a40f96ade60fcf33d5e4110bb4f3bd26d4308aa0a  xgameruntime_test.exe
+```
+
+This checkpoint proves the corrected source and hermetic protocol contract.
+The next gate is a fresh recoverable installation followed by a real Forza
+launch against the local Xodus service.

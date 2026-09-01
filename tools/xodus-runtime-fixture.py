@@ -73,7 +73,7 @@ def serve_main(
                 except (UnicodeDecodeError, ET.ParseError) as error:
                     raise RuntimeError("MSA request body was not valid UTF-8 XML") from error
                 expected = {
-                    "clientId": "0000000040000000",
+                    "ClientId": "0000000040000000",
                     "AllowUi": "false",
                     "MsaFullTrust": "false",
                 }
