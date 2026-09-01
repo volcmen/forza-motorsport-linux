@@ -62,10 +62,12 @@ files, commands, exit states, and semantic limitations.
 
 The scoped Xodus social branch was developed from official `xodus/main` at
 `a92abacb0743f16c769279b9057c8c28435e5ef9`. The implementation source range is
-`a92abacb0743f16c769279b9057c8c28435e5ef9..40e76edc822c5880ad9f32b2daae69f15659751e`;
-the final source commit is `40e76edc822c5880ad9f32b2daae69f15659751e`
-(`feat: launch the Xodus social overlay`). The separate maintainer-documentation
-commit is `966cb58586db725a1d1201a34457eb2e4a62f33f`.
+`a92abacb0743f16c769279b9057c8c28435e5ef9..fb38a3f7ad6c9112e8779f7908ffdcc2b2468f30`;
+the final source commit is `fb38a3f7ad6c9112e8779f7908ffdcc2b2468f30`
+(`refactor: isolate the social overlay protocol`). The separate Xodus
+maintainer-documentation commits are
+`966cb58586db725a1d1201a34457eb2e4a62f33f` and
+`e8bcd8fcfc473e7ad019c3ee8d32841ee6f98fd3`.
 
 The local source commits in that range are:
 
@@ -79,6 +81,7 @@ The local source commits in that range are:
 | `eaaec55ea49b7c0b650429164c7c15260487eb10` | Keyboard/controller social overlay |
 | `c202927a56215321064e98ccbd995533e3d7b2e8` | Overlay lifecycle and reentrancy hardening |
 | `40e76edc822c5880ad9f32b2daae69f15659751e` | Service-owned XDUI launcher |
+| `fb38a3f7ad6c9112e8779f7908ffdcc2b2468f30` | Keyring-free shared social protocol crate |
 
 ### Automated source gates
 
@@ -89,9 +92,15 @@ overlay, keychain, game, or a network request:
 cargo fmt --check
 cargo clippy --workspace --all-targets --offline -- -D warnings
 git diff --exit-code a92abacb0743f16c769279b9057c8c28435e5ef9..HEAD -- crates/xodus-cli/src/commands/streaming.rs
-cargo clippy -p xodus -p xodus-service -p xodus-overlay --all-targets --offline -- -D warnings
+! cargo tree -p xodus-overlay --offline | rg 'keyring|secret-service'
+! rg -n 'use xodus::|xodus::' crates/xodus-overlay
+cargo clippy -p xodus-social-protocol -p xodus -p xodus-service -p xodus-overlay --all-targets --offline -- -D warnings
+cargo test -p xodus-social-protocol --offline
+cargo test -p xodus --offline -- --skip test_get_xbox_live_dev_token
+cargo test -p xodus-service --offline
+cargo test -p xodus-overlay --offline
 cargo test --workspace --offline -- --skip test_get_xbox_live_dev_token
-cargo build --release --workspace --offline
+cargo build --release -p xodus-service -p xodus-overlay --offline
 rg -n 'Authorization:|XBL3\.0|ms-xbl-multiplayer://inviteAccept\?.+' docs crates || true
 git diff --check
 ```
@@ -104,13 +113,20 @@ Results on 2026-09-01:
   arguments) violate `clippy::too_many_arguments`' default limit of 7. The
   base-to-tip diff for `crates/xodus-cli/src/commands/streaming.rs` is empty;
   no suppression or source edit was made.
-- Strict all-target offline Clippy for every changed package (`xodus`,
-  `xodus-service`, and `xodus-overlay`): **GREEN**, no issues.
-- Filtered offline workspace tests: **GREEN**, 85 passed, 1 ignored, and 1
-  filtered out across 14 suites. `test_get_xbox_live_dev_token` was explicitly
+- The required dependency-tree RED found `dbus-secret-service-keyring-store`,
+  `dbus-secret-service`, and `keyring-core` below `xodus-overlay`. After the
+  extraction, neither the dependency scan nor the overlay `xodus::` source scan
+  returns a match: **GREEN**. The new `xodus-social-protocol` crate directly
+  depends only on `serde`, `serde_json`, `thiserror`, `tokio`, and `uuid`.
+- Strict all-target offline Clippy for every changed package
+  (`xodus-social-protocol`, `xodus`, `xodus-service`, and `xodus-overlay`):
+  **GREEN**, no issues.
+- Protocol compatibility tests: **GREEN**, 6 passed, including a literal XDSO
+  version-1 frame assertion.
+- Filtered offline workspace tests: **GREEN**, 86 passed, 1 ignored, and 1
+  filtered out across 16 suites. `test_get_xbox_live_dev_token` was explicitly
   skipped because it is an upstream anonymous live Microsoft test.
-- Offline release workspace build: **GREEN**. The initial gate compiled 505
-  crates; the final cached rerun compiled 0 and completed successfully.
+- Offline release build for `xodus-service` and `xodus-overlay`: **GREEN**.
 - Privacy scan: 13 matches, all classified below; no live value was recorded.
 
 Privacy matches were reviewed individually and fall into four safe classes:
