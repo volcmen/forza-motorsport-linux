@@ -213,3 +213,68 @@ b4e219ba78bf31a2d7f638b396e06598882f4be8287fd1857f89110db0b127ff  xgameruntime_t
 This remains a hermetic transport result. It does not prove the public XGameUi
 or XGameInvite APIs, an installed compatibility tool, a live Microsoft account,
 or Forza itself.
+
+## XGameUi and XGameInvite source checkpoint
+
+The reviewed WineGDK branch now ends at
+`ad16c240c175be84d70052eddadceed7666178fe`
+(`xgameinvite: deliver Xodus invite activations`). Its preceding public-API
+checkpoint is `de9a32707f8213808181b7452c2e1f8d6e5b5550`
+(`xgameui: bridge multiplayer activity invites to Xodus`). The exact source
+range remains local and unpublished.
+
+`XGameUiShowMultiplayerActivityGameInviteAsync` now retains the requesting
+XUser, resolves the same IXThreading backend used by the caller, negotiates the
+versioned invite-only XDUI mode, and preserves XAsync provider identity and
+single-consumption semantics. Cancellation, refusal, timeout, missing service,
+invalid/closed users, and retryable result validation are covered by the
+hermetic fixture.
+
+The deprecated Forza compatibility surface `XGameInviteRegisterForEvent`
+subscribes to XDSI and delivers only validated activation URIs through a
+duplicated caller task queue. Registrations use dynamic nonzero tokens; the
+single worker is cancelable and joinable, reconnects only after an isolated
+subscriber disconnect while the main generation remains healthy, and stops
+when the final registration is removed. Callbacks are snapshotted outside the
+registry lock. Tests cover supplied/default/missing queues, fragmented frames,
+multiple registrations, self-unregister, unregister-before-delivery, repeated
+`wait=FALSE`, two concurrent `wait=TRUE` callers, reconnect, main failure, and
+unavailable subscriber. URI values are never logged.
+
+The same commit adds the locked STOPPED/STARTING/RUNNING/STOPPING runtime state
+machine. Compatible initialization calls own independent references;
+incompatible options return `E_GAMERUNTIME_OPTIONS_MISMATCH`; final teardown is
+refused with `E_GAMERUNTIME_UNINITIALIZE_ACTIVEOBJECTS` while a user, async
+provider, registration, callback, or worker remains. Querying a stopped or
+failed-generation runtime is rejected. Reinitialization advances the epoch,
+stale XUser handles remain invalid, the first successful initialization pins
+the PE module for process lifetime, and `DllMain` performs no dependency load,
+unload, wait, or join under loader lock.
+
+After a clean focused rebuild, integration repository commit
+`d9d00144a8d845dff4871be32d14b40f1c507124` ran the exact-artifact overlay
+through all 20 numbered stages (`0..19`) three times. The final run contained:
+
+| Stage | Result |
+| --- | --- |
+| Native XDSI/XDUI transport contracts | **GREEN: 7 cases** |
+| Fixture disabled | **GREEN: 9 tests, 0 failures, 1 intentional skip** |
+| Socket refusal | **GREEN: 17 tests, 0 failures** |
+| Two main-stream lifecycles | **GREEN: 82 tests, 0 failures** |
+| XGameUi success/cancel/failure/timeout matrix | **GREEN: 30, 27, 27, 29, 27, and 28 tests; 0 failures** |
+| XGameInvite delivery/lifecycle matrix | **GREEN: 25, 25, 23, 25, 32, 27, 27, 36, 26, and 20 tests; 0 failures** |
+
+The clean-build artifacts used by that gate are:
+
+```text
+3fae0e751697759a2b43be1a4a1fe140eb614323906e2a010c712799b3bfbce1  xgameruntime.dll
+24d6fbb2934cdeccf8d25b0e0f27bfb106fc2ec2ba1f63d017cbed514e8d35de  xgameruntime.so
+1e34a16257ffadb7c96127bab72acbc6fee44247fc40c70ed5782c072d86579f  xgameruntime_test.exe
+```
+
+This is source and hermetic execution evidence only. No artifact was installed,
+the licensed `xgameruntime.dll.threading` input and live prefix were untouched,
+and no Xodus service, keychain, Microsoft endpoint, Steam setting, or game was
+started. The implemented XDSI path delivers an activation URI that a trusted
+Xodus UI already accepted and published through XDAP. It is not an Xbox RTA
+receiver: unsolicited incoming invite notifications remain **NOT SUPPORTED**.

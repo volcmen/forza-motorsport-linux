@@ -197,15 +197,21 @@ compatibility prefix, Steam configuration, and game were not mutated or
 started. The branch remains local: it has not been pushed and no public pull
 request exists.
 
-## Local WineGDK XGameRuntime checkpoint
+## Local WineGDK XGameRuntime source gate
 
-WineGDK commit `27028929130a168a5ed355c3740b2c8e00bb9c62` is the reviewed
-Task 0.5 source checkpoint for owned XUser handles and main-Xodus IPC lifetime.
-The repository's exact-artifact overlay gate produced three green matrices:
-21 tests with the fixture disabled (1 intentional skip), 29 tests for two
-bounded socket-refusal lifecycles, and 27 tests for two synthetic Ping
-lifecycles, all with zero failures. See
-[`xgameruntime-baseline.md`](evidence/xgameruntime-baseline.md) for the source
-revision, artifact hashes, false-positive loader discovery, and isolation
-boundary. Social Unix calls `5..10`, XGameUi, XGameInvite, installation, and
-manual Forza validation are still outstanding at this checkpoint.
+WineGDK commit `ad16c240c175be84d70052eddadceed7666178fe` is the reviewed
+local source tip for the bounded Xodus transport, XGameUi invite-only flow,
+XGameInvite activation delivery, and reference-counted runtime lifecycle.
+Integration commit `d9d00144a8d845dff4871be32d14b40f1c507124` owns the
+20-stage exact-artifact gate. A clean rebuild plus three complete runs were
+green; the final run covered seven native transport contracts and 19 PE
+matrices with zero failures (the fixture-disabled matrix has one intentional
+skip).
+
+See [`xgameruntime-baseline.md`](evidence/xgameruntime-baseline.md) for exact
+source revisions, per-matrix counts, artifact hashes, unload/state semantics,
+and isolation boundaries. This proves the source pair inside the hermetic
+GE-Proton overlay only. Installation, the licensed external threading backend,
+live Xodus/Microsoft behavior, and the manual Forza matrix remain outstanding.
+Unsolicited Xbox invite notification remains **NOT SUPPORTED**; XDSI carries
+only an activation URI already accepted and published by trusted Xodus UI.

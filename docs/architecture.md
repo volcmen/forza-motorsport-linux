@@ -10,6 +10,24 @@ The repository is a local control surface for one experimental Steam layout: App
 
 `forza-doctor` does not start, stop, enable, install, patch, or log in. It checks Steam/AppID paths, installed artifacts, disk space, unit disabled state, patch state, and D-Bus `org.freedesktop.secrets`. KDE Wallet is accepted through its Secret Service provider, not by adding GNOME Keyring.
 
+## Game social bridge
+
+The game-facing WineGDK pair owns ABI and task-queue semantics; Xodus owns Xbox
+authentication, HTTP operations, and UI. The main Xodus stream remains
+independent from two bounded social channels:
+
+- XDUI requests the full or invite-only overlay and returns explicit
+  acknowledgement plus one terminal result;
+- XDSI is the game's single activation subscription. A trusted Xodus UI
+  publishes one validated, already accepted join URI through XDAP, and WineGDK
+  dispatches it through `XGameInviteRegisterForEvent` on the caller's queue.
+
+The channels use the launcher's private same-UID mode-0600 socket. They never
+move authorization material, proof keys, or account identity into WineGDK and
+never log activation URIs. XDSI is local push rather than application polling,
+but it is not an Xbox RTA receiver; unsolicited incoming notifications are
+outside the supported design.
+
 ## Exact-build patches
 
 `supported-builds.toml` declares the only accepted SHA-256 originals, patched SHA-256 values, and byte edits. The patcher preflights all four controller/mountmgr targets. It rejects unknown or mixed states, requires backups to resolve outside `compatibilitytools.d`, and uses held no-follow directory descriptors plus atomic exchange to bind publication to the validated inode and digest. After the first exchange, any durability or validation failure enters the same recovery path: it exchanges the displaced object back regardless of file type, or atomically preserves the displaced object under a deterministic recovery name if the restorative exchange fails. Post-exchange names are never unlinked or overwritten. Every successful recovery rename is reported as an exact `.forza-recovery-*` path before control returns; if its directory sync fails, that exact final path is carried by the error. If the filesystem rejects the recovery rename itself, the error instead names the exact still-private source. Restore consumes the backup manifest and rechecks every target and backup before changing any target. External backups remain authoritative; the same-directory recovery objects are retained race evidence and intentionally consume additional disk space.
