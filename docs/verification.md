@@ -61,13 +61,14 @@ files, commands, exit states, and semantic limitations.
 ## Local Xodus social source evidence
 
 The scoped Xodus social branch was developed from official `xodus/main` at
-`a92abacb0743f16c769279b9057c8c28435e5ef9`. The implementation source range is
-`a92abacb0743f16c769279b9057c8c28435e5ef9..fb38a3f7ad6c9112e8779f7908ffdcc2b2468f30`;
-the final source commit is `fb38a3f7ad6c9112e8779f7908ffdcc2b2468f30`
-(`refactor: isolate the social overlay protocol`). The separate Xodus
+`a92abacb0743f16c769279b9057c8c28435e5ef9`. The final reviewed source range is
+`a92abacb0743f16c769279b9057c8c28435e5ef9..08c995b389f2bbc5d0dbc9d51bcadf1453368266`;
+the final source commit is `08c995b389f2bbc5d0dbc9d51bcadf1453368266`
+(`fix: serialize social overlay actions`). The separate Xodus
 maintainer-documentation commits are
 `966cb58586db725a1d1201a34457eb2e4a62f33f` and
-`e8bcd8fcfc473e7ad019c3ee8d32841ee6f98fd3`.
+`e8bcd8fcfc473e7ad019c3ee8d32841ee6f98fd3`, followed by final lifecycle
+documentation commit `207a721e6a1cc95be04ffaeedc67a4d673d45ca2`.
 
 The local source commits in that range are:
 
@@ -82,6 +83,25 @@ The local source commits in that range are:
 | `c202927a56215321064e98ccbd995533e3d7b2e8` | Overlay lifecycle and reentrancy hardening |
 | `40e76edc822c5880ad9f32b2daae69f15659751e` | Service-owned XDUI launcher |
 | `fb38a3f7ad6c9112e8779f7908ffdcc2b2468f30` | Keyring-free shared social protocol crate |
+| `57091ce69c467d95fd27b4e9aecaca34c7eaf7ac` | PeopleHub fallback, authorization lifetime, and bounded social operations |
+| `2b7982a523d6135e6ad4d8f9ca6cf1c877d26047` | Cancellation-safe session-cache invalidation |
+| `903fc4843d25cbfa84db262e41d29a7ca4f8e319` | Bounded activation delivery and fail-closed socket permissions |
+| `08c995b389f2bbc5d0dbc9d51bcadf1453368266` | Shared overlay in-flight gate and capacity-one request queue |
+
+The final lifecycle fixes prefer nonempty PeopleHub `displayName` and fall back
+to nonempty `gamertag`. They preserve authorization expiry, remint an expired
+session or one within 60 seconds of expiry, and invalidate the cached session
+after PeopleHub or Multiplayer Activity failure, cancellation, or timeout. A
+failed or cancelled operation is not automatically retried. Each XDSO social
+operation has one 30-second bound across the shared mutex wait and backend I/O.
+
+Activation URIs are validated as nonempty and at most 4096 bytes before
+enqueue. The relay uses nonblocking capacity-one backpressure, and XDSO Join
+cannot report success unless the URI was accepted. Socket permission handling
+fails closed unless the socket is restricted to exactly `0600`. Refresh,
+Invite, Join, and row activation share one overlay busy gate across button,
+keyboard, controller, and row paths; the nonblocking request queue has capacity
+one and the busy state disables network-action controls until resolution.
 
 ### Automated source gates
 
@@ -123,11 +143,14 @@ Results on 2026-09-01:
   **GREEN**, no issues.
 - Protocol compatibility tests: **GREEN**, 6 passed, including a literal XDSO
   version-1 frame assertion.
-- Filtered offline workspace tests: **GREEN**, 86 passed, 1 ignored, and 1
+- Filtered offline workspace tests: **GREEN**, 109 passed, 1 ignored, and 1
   filtered out across 16 suites. `test_get_xbox_live_dev_token` was explicitly
   skipped because it is an upstream anonymous live Microsoft test.
-- Offline release build for `xodus-service` and `xodus-overlay`: **GREEN**.
-- Privacy scan: 13 matches, all classified below; no live value was recorded.
+- Targeted offline release build for `xodus-service` and `xodus-overlay`:
+  **GREEN**.
+- Privacy scan: 15 matches, all existing authorization format strings, static
+  documentation templates, synthetic test/protocol data, or the literal scan
+  expression itself.
 
 Privacy matches were reviewed individually and fall into four safe classes:
 
@@ -138,8 +161,8 @@ Privacy matches were reviewed individually and fall into four safe classes:
 3. visibly synthetic test sentinels and activation protocol-shape assertions;
 4. the literal privacy-search expression in `docs/forza-social.md`.
 
-No raw live XUID, authorization token, connection string, activation URI, or
-user/friend nickname is present in this evidence.
+No nickname or live identifier, including a raw XUID, authorization token,
+connection string, or activation URI, is present in this evidence.
 
 ### Manual and installation boundary
 
