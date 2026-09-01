@@ -23,11 +23,12 @@ The tests use only synthetic patch bytes and temporary roots. A passing gate pro
 ## Integration branch readiness
 
 A green repository gate does not make `feature/integration-repository`
-merge-ready or publication-ready. `scripts/patch-known-build` still has an
-unresolved publication race when a validated target is concurrently replaced
-by a symlink or directory: the current publication/rollback path does not
-correctly restore that replacement. The checks above do not cover that
-outstanding case, and this document does not claim a fix.
+merge-ready or publication-ready. The previously recorded
+`scripts/patch-known-build` publication race was resolved and independently
+approved at integration commit
+`5d7b4fe460813d23b08b7c59731048e446ef3ddd`. Later cross-plan installed-artifact
+and manual game/service gates remain outstanding, so this source result does
+not claim merge, publication, installation, or gameplay readiness.
 
 ## Local Wine source evidence
 
@@ -56,3 +57,89 @@ unconditional `TrimEnabled = TRUE` compatibility policy; that policy requires
 maintainer agreement and a canonical device-detection design before canonical
 Wine inclusion. See each linked provenance document for the exact changed
 files, commands, exit states, and semantic limitations.
+
+## Local Xodus social source evidence
+
+The scoped Xodus social branch was developed from official `xodus/main` at
+`a92abacb0743f16c769279b9057c8c28435e5ef9`. The implementation source range is
+`a92abacb0743f16c769279b9057c8c28435e5ef9..40e76edc822c5880ad9f32b2daae69f15659751e`;
+the final source commit is `40e76edc822c5880ad9f32b2daae69f15659751e`
+(`feat: launch the Xodus social overlay`). The separate maintainer-documentation
+commit is `966cb58586db725a1d1201a34457eb2e4a62f33f`.
+
+The local source commits in that range are:
+
+| Commit | Scope |
+| --- | --- |
+| `baa811b1d6d08b0cdd7e73a6a202d9b9e6616aec` | Title-scoped Xbox authorization |
+| `c4491c0ce8107b79de284062163191008772346c` | Authorization privacy hardening |
+| `4e297f65144a5d958e905e19adb9ba7927165a3c` | PeopleHub and Multiplayer Activity operations |
+| `b42de8d81e5b9b0f44a2fbe12b74e143d01ab00c` | Activity and PeopleHub contract hardening |
+| `778c25ae90278b600e804f32b7aee4839b3fec8d` | Bounded social and activation IPC |
+| `eaaec55ea49b7c0b650429164c7c15260487eb10` | Keyboard/controller social overlay |
+| `c202927a56215321064e98ccbd995533e3d7b2e8` | Overlay lifecycle and reentrancy hardening |
+| `40e76edc822c5880ad9f32b2daae69f15659751e` | Service-owned XDUI launcher |
+
+### Automated source gates
+
+The following commands used cached dependencies and did not start the service,
+overlay, keychain, game, or a network request:
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets --offline -- -D warnings
+git diff --exit-code a92abacb0743f16c769279b9057c8c28435e5ef9..HEAD -- crates/xodus-cli/src/commands/streaming.rs
+cargo clippy -p xodus -p xodus-service -p xodus-overlay --all-targets --offline -- -D warnings
+cargo test --workspace --offline -- --skip test_get_xbox_live_dev_token
+cargo build --release --workspace --offline
+rg -n 'Authorization:|XBL3\.0|ms-xbl-multiplayer://inviteAccept\?.+' docs crates || true
+git diff --check
+```
+
+Results on 2026-09-01:
+
+- `cargo fmt --check`: **GREEN**.
+- Full-workspace Clippy: **BLOCKED BY UNCHANGED UPSTREAM BASELINE**. Only
+  `xodus-cli`'s unchanged `run_cli_reader` (11 arguments) and `run_reader` (10
+  arguments) violate `clippy::too_many_arguments`' default limit of 7. The
+  base-to-tip diff for `crates/xodus-cli/src/commands/streaming.rs` is empty;
+  no suppression or source edit was made.
+- Strict all-target offline Clippy for every changed package (`xodus`,
+  `xodus-service`, and `xodus-overlay`): **GREEN**, no issues.
+- Filtered offline workspace tests: **GREEN**, 85 passed, 1 ignored, and 1
+  filtered out across 14 suites. `test_get_xbox_live_dev_token` was explicitly
+  skipped because it is an upstream anonymous live Microsoft test.
+- Offline release workspace build: **GREEN**. The initial gate compiled 505
+  crates; the final cached rerun compiled 0 and completed successfully.
+- Privacy scan: 13 matches, all classified below; no live value was recorded.
+
+Privacy matches were reviewed individually and fall into four safe classes:
+
+1. static documentation templates with visible placeholders in the existing
+   Xbox documentation;
+2. production authorization header format strings that contain no runtime
+   token/hash value;
+3. visibly synthetic test sentinels and activation protocol-shape assertions;
+4. the literal privacy-search expression in `docs/forza-social.md`.
+
+No raw live XUID, authorization token, connection string, activation URI, or
+user/friend nickname is present in this evidence.
+
+### Manual and installation boundary
+
+| Check | Status |
+| --- | --- |
+| Keyboard navigation/action parity | **NOT RUN** |
+| Physical Xbox controller navigation/hotplug | **NOT RUN** |
+| Invite from a published Private Multiplayer lobby | **NOT RUN** |
+| Join a compatible remote activity | **NOT RUN** |
+| Deliberate cancellation | **NOT RUN** |
+| Peer disconnect/service shutdown cleanup | **NOT RUN** |
+| Automatic incoming invite notification | **NOT SUPPORTED** |
+
+The game-facing path still depends on the separately reviewed `xgameruntime`
+bridge and a future installed-artifact hash/parity gate. No compiled Xodus
+artifact was installed. The live Xodus checkout, installed service, keychain,
+compatibility prefix, Steam configuration, and game were not mutated or
+started. The branch remains local: it has not been pushed and no public pull
+request exists.
