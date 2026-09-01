@@ -14,12 +14,14 @@ ge_files=$2
 wine_prefix=$3
 fixture=$4
 transport_test=$(dirname "$fixture")/xgameruntime-transport-test.py
+runtime_fixture=$(dirname "$fixture")/xodus-runtime-fixture.py
 
 for path in "$build_dir" "$ge_files" "$wine_prefix"; do
     [[ $path = /* && -d $path ]] || usage
 done
 [[ $fixture = /* && -f $fixture ]] || usage
 [[ -f $transport_test ]] || usage
+[[ -f $runtime_fixture ]] || usage
 
 runtime_dir=$(mktemp -d /tmp/forza-xgameruntime-test.XXXXXX)
 overlay_dir=$(mktemp -d "$build_dir/.ge-overlay.XXXXXX")
@@ -53,10 +55,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-make -C "$build_dir/dlls/xgameruntime" -j2
-make -C "$build_dir/dlls/xgameruntime/tests" -j2
+make --no-print-directory -s -C "$build_dir/dlls/xgameruntime" -j2
+make --no-print-directory -s -C "$build_dir/dlls/xgameruntime/tests" -j2
 
-printf 'gate 0/3: native private-socket and social transport contracts\n'
+printf 'gate 0/9: native private-socket and social transport contracts\n'
 env \
     LD_LIBRARY_PATH="$build_dir/dlls/ntdll${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     uv run "$transport_test" "$build_dir/dlls/xgameruntime/xgameruntime.so"
@@ -80,10 +82,14 @@ cmp -s \
 
 run_test() {
     local mode=$1
+    local ready_marker=${2:-}
     local -a mode_env=()
 
     if [[ -n $mode ]]; then
         mode_env=(XGAMERUNTIME_TEST_XODUS="$mode")
+    fi
+    if [[ -n $ready_marker ]]; then
+        mode_env+=(XGAMERUNTIME_TEST_SOCIAL_READY="$ready_marker")
     fi
 
     env \
@@ -92,8 +98,8 @@ run_test() {
         WINEDLLOVERRIDES=xgameruntime=b \
         XDG_RUNTIME_DIR="$runtime_dir" \
         WINETEST_PLATFORM=wine \
-        WINETEST_DEBUG=2 \
-        WINETEST_REPORT_SUCCESS=1 \
+        WINETEST_DEBUG=1 \
+        WINETEST_REPORT_SUCCESS=0 \
         "${mode_env[@]}" \
         timeout --foreground 25s \
         "$overlay_dir/bin/wine" \
@@ -101,13 +107,13 @@ run_test() {
         xgameruntime
 }
 
-printf 'gate 1/3: baseline with social fixture disabled\n'
+printf 'gate 1/9: baseline with social fixture disabled\n'
 run_test ""
 
-printf 'gate 2/3: bounded refusal and repeatable teardown\n'
+printf 'gate 2/9: bounded refusal and repeatable teardown\n'
 run_test failure
 
-printf 'gate 3/3: two synthetic Ping lifecycles\n'
+printf 'gate 3/9: two synthetic Ping lifecycles\n'
 uv run "$fixture" "$runtime_dir/xodus.sock" --connections 2 \
     >"$runtime_dir/fixture.log" 2>&1 &
 fixture_pid=$!
@@ -125,5 +131,43 @@ rg -q '^READY$' "$runtime_dir/fixture.log"
 run_test success
 wait "$fixture_pid"
 fixture_pid=
+
+run_social_scenario() {
+    local gate=$1
+    local scenario=$2
+    local ready_marker=
+    local log_path="$runtime_dir/social-$scenario.log"
+    local -a fixture_args=("$runtime_dir/xodus.sock" --scenario "$scenario")
+
+    if [[ $scenario == wait-cancel ]]; then
+        ready_marker="$runtime_dir/social-ready"
+        fixture_args+=(--ready-marker "$ready_marker")
+    fi
+
+    printf 'gate %s/9: hermetic multiplayer activity %s\n' "$gate" "$scenario"
+    uv run "$runtime_fixture" "${fixture_args[@]}" >"$log_path" 2>&1 &
+    fixture_pid=$!
+    for _ in {1..100}; do
+        if rg -q '^READY$' "$log_path"; then
+            break
+        fi
+        kill -0 "$fixture_pid" 2>/dev/null || {
+            cat "$log_path" >&2
+            exit 1
+        }
+        sleep 0.05
+    done
+    rg -q '^READY$' "$log_path"
+    run_test "social-$scenario" "$ready_marker"
+    wait "$fixture_pid"
+    fixture_pid=
+}
+
+run_social_scenario 4 success
+run_social_scenario 5 user-cancel
+run_social_scenario 6 immediate-fail
+run_social_scenario 7 wait-cancel
+run_social_scenario 8 unavailable
+run_social_scenario 9 preack-timeout
 
 printf 'all XGameRuntime bridge gates passed\n'
