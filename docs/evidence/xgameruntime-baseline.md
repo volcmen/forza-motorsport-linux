@@ -217,8 +217,10 @@ or Forza itself.
 ## XGameUi and XGameInvite source checkpoint
 
 The reviewed WineGDK branch now ends at
-`ad16c240c175be84d70052eddadceed7666178fe`
-(`xgameinvite: deliver Xodus invite activations`). Its preceding public-API
+`6e0c6d1f951a7a457444ba8abd81374c0d093dba`
+(`xgameruntime: initialize WinRT outside loader lock`). Its preceding social
+checkpoint is `ad16c240c175be84d70052eddadceed7666178fe`
+(`xgameinvite: deliver Xodus invite activations`), and its public-API
 checkpoint is `de9a32707f8213808181b7452c2e1f8d6e5b5550`
 (`xgameui: bridge multiplayer activity invites to Xodus`). The exact source
 range remains local and unpublished.
@@ -278,3 +280,34 @@ and no Xodus service, keychain, Microsoft endpoint, Steam setting, or game was
 started. The implemented XDSI path delivers an activation URI that a trusted
 Xodus UI already accepted and published through XDAP. It is not an Xbox RTA
 receiver: unsolicited incoming invite notifications remain **NOT SUPPORTED**.
+
+## Runtime-owned WinRT initialization checkpoint
+
+The first live installation exposed a test-harness mismatch: Forza called the
+runtime from a thread with no prior Windows Runtime apartment, while the
+hermetic test called `RoInitialize` before loading the bridge. The game surfaced
+the resulting `CO_E_NOTINITIALIZED` value as Gaming Services error
+`0x800401f0`, before the first valid Xodus protocol frame.
+
+WineGDK commit `6e0c6d1f951a7a457444ba8abd81374c0d093dba` moves the required
+`RoInitialize(RO_INIT_MULTITHREADED)` call into `InitializeApiImplEx2`, outside
+`DllMain` and loader lock. The initialized apartment reference is intentionally
+process-lifetime because the runtime module is pinned and teardown may occur on
+a different thread. The bridge gate now suppresses its caller-side
+initialization so removing this runtime ownership reproduces the exact
+`0x800401f0` failure.
+
+Before the fix, the synthetic main-stream lifecycle stopped at its first
+initialization with one failure and HRESULT `0x800401f0`. After the fix, all 20
+gate stages passed: seven native transport cases, 81 main-lifecycle assertions,
+and the complete XGameUi/XGameInvite matrix with zero failures. The rebuilt
+artifacts were:
+
+```text
+eb58dd2f6f6985bcf74ec4e0c04db78950e7f5cc3ecd8dbd435710c0e6aff4bf  xgameruntime.dll
+24d6fbb2934cdeccf8d25b0e0f27bfb106fc2ec2ba1f63d017cbed514e8d35de  xgameruntime.so
+cc834a2e3d427464d926b79a40f96ade60fcf33d5e4110bb4f3bd26d4308aa0a  xgameruntime_test.exe
+```
+
+This corrective checkpoint is still hermetic evidence; live Forza behavior is
+a separate manual gate.

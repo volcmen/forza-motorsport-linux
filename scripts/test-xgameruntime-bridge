@@ -100,6 +100,7 @@ run_test() {
         WINETEST_PLATFORM=wine \
         WINETEST_DEBUG=1 \
         WINETEST_REPORT_SUCCESS=0 \
+        XGAMERUNTIME_TEST_CALLER_UNINITIALIZED=1 \
         "${mode_env[@]}" \
         timeout --foreground 25s \
         "$overlay_dir/bin/wine" \

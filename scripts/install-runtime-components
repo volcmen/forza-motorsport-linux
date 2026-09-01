@@ -42,7 +42,7 @@ USER_PAYLOADS = (
     ".local/libexec/xodus-forza/xodus-overlay",
     ".config/systemd/user/xodus-forza.service",
 )
-REVIEWED_WINEGDK_SHA = "ad16c240c175be84d70052eddadceed7666178fe"
+REVIEWED_WINEGDK_SHA = "6e0c6d1f951a7a457444ba8abd81374c0d093dba"
 REVIEWED_XODUS_SHA = "b76690da6ff59ace8981bf0428cd729fcd15673d"
 ROLES = {
     "launcher-gate": {
