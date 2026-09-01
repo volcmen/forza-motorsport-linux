@@ -4,7 +4,7 @@
 
 **Goal:** Publish the verified integration repository and component branches, request upstream review in the correct projects, and post an accurate compatibility update to Proton issue 7151.
 
-**Architecture:** The public integration repository is the stable documentation hub. Component forks carry source changes under their original licenses; draft PRs remain small and dependency-ordered; Proton receives only a compatibility report linking to stable evidence.
+**Architecture:** The public integration repository is the stable documentation hub. Component forks carry source changes under their original licenses; maintainer-facing contributions remain small and dependency-ordered; the AI-assisted XGameRuntime bridge is published only as an experimental WineGDK branch; Proton receives only a compatibility report linking to stable evidence.
 
 **Tech Stack:** Git, GitHub CLI, GitHub Actions, GitHub issues/pull requests/releases, Astro blog.
 
@@ -17,7 +17,8 @@
 - Do not force-push a public reviewed branch.
 - Do not claim automatic incoming Xbox invite notifications.
 - Do not claim ordinary Proton support; name the exact custom stack and tested revisions.
-- Open draft PRs before requesting merge and link overlapping Xodus issue 94/PR 105 and xgameruntime PR 19.
+- Open draft PRs only where the publication boundary permits them and link overlapping Xodus issue 94/PR 105 and xgameruntime PR 19.
+- Do not open an upstream `xodus-gaming/xgameruntime` code PR for the AI-assisted bridge. The maintainer's PR 10 rejection of generated code makes this a public experimental WineGDK branch only.
 - Post to Proton issue 7151 only after all linked repositories and branches are public and immutable.
 
 ---
@@ -30,7 +31,7 @@
 - Test: `tests/test_repository_policy.py`
 
 **Interfaces:**
-- Consumes: final integration, Wine, Xodus, and xgameruntime branch SHAs.
+- Consumes: final integration, Wine, Xodus, and experimental WineGDK bridge branch SHAs.
 - Produces: one machine-readable manifest of every public claim and its evidence state.
 
 - [ ] **Step 1: Write the failing manifest completeness test**
@@ -174,7 +175,7 @@ Expected: the verification workflow concludes successfully. If it fails, inspect
 ### Task 3: Publish component forks and branches
 
 **Files:**
-- Remote forks under `volcmen`: `xodus`, `xgameruntime`, and a Wine fork/reused existing fork
+- Remote forks under `volcmen`: `xodus`, `WineGDK`, and a Wine fork/reused existing fork
 - Local Git remotes for each isolated worktree
 
 **Interfaces:**
@@ -187,7 +188,7 @@ Run:
 
 ```bash
 gh repo view volcmen/xodus --json isFork,parent,url,defaultBranchRef
-gh repo view volcmen/xgameruntime --json isFork,parent,url,defaultBranchRef
+gh repo view volcmen/WineGDK --json isFork,parent,url,defaultBranchRef
 gh repo view volcmen/wine --json isFork,parent,url,defaultBranchRef
 ```
 
@@ -199,7 +200,7 @@ Run only for missing repositories:
 
 ```bash
 gh repo fork xodus-gaming/xodus --clone=false --remote=false
-gh repo fork xodus-gaming/xgameruntime --clone=false --remote=false
+gh repo fork Weather-OS/WineGDK --clone=false --remote=false
 gh repo fork xodus-gaming/wine --clone=false --remote=false
 ```
 
@@ -211,7 +212,7 @@ Push only these reviewed branches:
 
 ```text
 xodus: forza-social-invite-join
-xgameruntime: xodus-social-invite-bridge
+WineGDK: xodus-social-invite-bridge
 wine: wgi-physical-nonroamable-id
 wine: storage-trim-property
 ```
@@ -230,16 +231,16 @@ Replace local-only provenance references with public commit URLs, run `just veri
 
 ---
 
-### Task 4: Open maintainer-coordinated issues and draft PRs
+### Task 4: Open permitted maintainer-coordinated issues and draft PRs
 
 **Files:**
 - GitHub issue 94 comment in `xodus-gaming/xodus`
-- Draft PRs in Xodus/xgameruntime/Wine as appropriate
+- Draft PRs in Xodus/Wine as appropriate; no upstream xgameruntime code PR
 - Create: `docs/upstream.md` in the integration repository
 
 **Interfaces:**
 - Consumes: public branches and verified command summaries.
-- Produces: review requests with one responsibility each and no unsupported claims.
+- Produces: permitted review requests with one responsibility each, an explicit WineGDK experimental boundary, and no unsupported claims.
 
 - [ ] **Step 1: Coordinate Xodus overlap before requesting merge**
 
@@ -268,15 +269,19 @@ PR 2: feat: add keyboard and controller social overlay
 
 Each body includes base SHA, commit list, tests, protocol/security boundary, manual evidence, excluded RTA behavior, and links to issue 94/PR 105.
 
-- [ ] **Step 3: Open the xgameruntime draft PR**
+- [ ] **Step 3: Publish and document the WineGDK experimental boundary**
 
-Title:
+Do not open an upstream `xodus-gaming/xgameruntime` code PR and do not offer the
+AI-assisted branch for merge. Verify that the public `volcmen/WineGDK` branch is
+forked from `Weather-OS/WineGDK`, names exact base and branch SHAs, preserves
+license/attribution, and links XAsync, activation, fragmented-I/O, installed
+artifact, and rollback evidence.
 
-```text
-xgameui: bridge social invites through Xodus
-```
-
-Target the maintainer branch used by PR 19. The body links its dependency on the Xodus protocol branch and lists XAsync, activation, fragmented-I/O, and installed-artifact tests.
+If upstream architecture coordination is useful, post behavior and protocol
+evidence only, link the existing PR 19 context, state that this experimental
+branch is not a merge proposal, and ask maintainers where a human-authored
+implementation should eventually live. Record the URL or an explicit `not
+posted` decision in `docs/upstream.md`.
 
 - [ ] **Step 4: Open separate Wine review items**
 

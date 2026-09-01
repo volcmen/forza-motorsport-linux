@@ -92,13 +92,14 @@ def test_readme_documents_source_provenance_and_required_runtime_placement():
     required = [
         "xodus-gaming/wine` `bleeding-edge",
         "xodus-gaming/xodus` `main",
-        "xgameruntime` `oot-cpp` / PR 19",
+        "Weather-OS/WineGDK` `b03ba49c4f326c36aa6930fbe6cf72841ef3738c",
+        "not an upstream `xodus-gaming/xgameruntime` code PR",
         "https://github.com/xodus-gaming/wine.git",
         "git -C wine switch bleeding-edge",
         "https://github.com/xodus-gaming/xodus.git",
         "git -C xodus switch main",
-        "https://github.com/xodus-gaming/xgameruntime.git",
-        "git -C xgameruntime switch oot-cpp",
+        "https://github.com/Weather-OS/WineGDK.git",
+        "git -C winegdk switch --detach b03ba49c4f326c36aa6930fbe6cf72841ef3738c",
         "forza-social-invite-join",
         "xodus-social-invite-bridge",
         "wgi-physical-nonroamable-id",
@@ -111,3 +112,30 @@ def test_readme_documents_source_provenance_and_required_runtime_placement():
         "already-missing paths are left absent",
     ]
     assert all(item in readme for item in required)
+    assert "git -C xgameruntime switch oot-cpp" not in readme
+
+
+def test_xgameruntime_plan_supersession_and_publication_boundary_are_consistent():
+    plans = ROOT / "docs" / "superpowers" / "plans"
+    old_plan = (plans / "2026-08-31-xgameruntime-invite-bridge.md").read_text()
+    amendment = (plans / "2026-09-01-xgameruntime-winegdk-amendment.md").read_text()
+    roadmap = (plans / "2026-08-31-forza-motorsport-linux-roadmap.md").read_text()
+    publication = (plans / "2026-08-31-github-publication.md").read_text()
+    spec = (
+        ROOT
+        / "docs"
+        / "superpowers"
+        / "specs"
+        / "2026-08-31-forza-motorsport-linux-publication-design.md"
+    ).read_text()
+
+    assert "Superseded — do not execute" in old_plan
+    assert "Every task, command, checkbox, and expected result below is non-normative" in old_plan
+    assert "REQUIRED SUB-SKILL" not in old_plan
+    assert "must not be executed" in amendment
+    assert "2026-09-01-xgameruntime-winegdk-amendment.md" in roadmap
+    assert "first versions the reviewed Plan-3 XDUI contract" in roadmap
+    assert "built artifact's SHA-256" in roadmap
+    assert "AppID prefix and user-supplied Microsoft threading DLL remain untouched" in roadmap
+    assert "Do not open an upstream `xodus-gaming/xgameruntime` code PR" in publication
+    assert "do not submit it as an upstream `xodus-gaming/xgameruntime` code PR" in spec

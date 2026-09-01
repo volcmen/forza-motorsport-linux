@@ -1,6 +1,12 @@
-# XGameRuntime Xodus Invite Bridge Implementation Plan
+# Historical XGameRuntime Xodus Invite Bridge Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Superseded — do not execute.** Fresh source inspection invalidated this
+> plan's source-base, protocol, build, and publication assumptions. Execute
+> `2026-09-01-xgameruntime-winegdk-amendment.md` instead. This file is retained
+> only as historical design evidence.
+
+> Every task, command, checkbox, and expected result below is non-normative
+> archival text. It must not be used as implementation guidance.
 
 **Goal:** Implement GDK social UI and accepted-invite delivery in the canonical Xodus xgameruntime component using a tested Unix-socket bridge.
 

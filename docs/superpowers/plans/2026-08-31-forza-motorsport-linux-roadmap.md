@@ -4,7 +4,7 @@
 
 **Goal:** Coordinate five independently testable implementation plans into one accurate public Forza Motorsport Linux release and upstream contribution set.
 
-**Architecture:** The integration repository is the user-facing control plane; Wine, Xodus, and xgameruntime changes remain in their canonical component repositories. Public GitHub communication happens only after stable branches, test evidence, and privacy scans exist.
+**Architecture:** The integration repository is the user-facing control plane; Wine and Xodus changes remain in their canonical component repositories, while the XGameRuntime bridge remains an explicitly experimental WineGDK branch. Public GitHub communication happens only after stable branches, test evidence, and privacy scans exist.
 
 **Tech Stack:** Bash, Python 3 standard library, pytest via uv, systemd user units, Rust/Cargo, Wine C tests, GitHub CLI.
 
@@ -29,12 +29,12 @@
    - Produces source-level controller identity and storage TRIM branches with tests.
 3. `2026-08-31-xodus-social.md`
    - Ports the verified friends/invite/join and keyboard/controller overlay work onto current Xodus main without failed RTA push.
-4. `2026-08-31-xgameruntime-invite-bridge.md`
-   - Ports the GDK async UI and invite-activation bridge onto the canonical xgameruntime tree.
+4. `2026-09-01-xgameruntime-winegdk-amendment.md`
+   - Supersedes the original xgameruntime source/build/publication assumptions and re-derives the Linux bridge on an isolated WineGDK base; the original `2026-08-31-xgameruntime-invite-bridge.md` is historical only.
 5. `2026-08-31-github-publication.md`
-   - Publishes the integration repository and forks, opens draft PRs/issues, posts the Proton compatibility update, and links the blog.
+   - Publishes the integration repository and permitted component forks, opens only publication-boundary-compliant draft PRs/issues, posts the Proton compatibility update, and links the blog.
 
-Plans 2 and 3 may execute after Plan 1's test harness and privacy policy are committed. Plan 4 consumes the stable Xodus socket protocol produced by Plan 3. Plan 5 is last because every external claim must link to immutable public evidence.
+Plans 2 and 3 may execute after Plan 1's test harness and privacy policy are committed. Plan 4 first versions the reviewed Plan-3 XDUI contract on the same isolated Xodus feature line, records a new immutable Xodus SHA, and then consumes that exact SHA for the WineGDK bridge. Plan 5 is last because every external claim must link to immutable public evidence.
 
 ## Cross-plan Gates
 
@@ -56,9 +56,9 @@ Expected: Wine controller/storage tests, Xodus workspace tests, and xgameruntime
 
 - [ ] **Gate 3: Installed artifact parity**
 
-Compare source build outputs to the dedicated compatibility tool and AppID prefix after installation.
+Record component Git revisions separately. Compare each reviewed built artifact's SHA-256 only with its dedicated compatibility-tool or user-local installed counterpart.
 
-Expected: source and installed SHA-256 values match for every open-source artifact; the user-supplied Microsoft runtime is recorded only as present, never copied or hashed into public logs.
+Expected: build and installed SHA-256 values match for every open-source artifact; the AppID prefix and user-supplied Microsoft threading DLL remain untouched, and the latter is recorded only as present, never copied or hashed into public logs.
 
 - [ ] **Gate 4: Manual game matrix**
 

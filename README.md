@@ -121,7 +121,7 @@ This repository contains only scripts, manifests, documentation, and synthetic t
 
 ### Component source status
 
-The canonical planned bases are `xodus-gaming/wine` `bleeding-edge` for Wine, `xodus-gaming/xodus` `main` for Xodus, and `xodus-gaming/xgameruntime` `oot-cpp` / PR 19 for the XGameRuntime transport base. The component roadmap is sequential: these companion branches and immutable SHAs are not public yet, and stale local branch history is not canonical provenance. The planned public names are `forza-social-invite-join`, `xodus-social-invite-bridge`, `wgi-physical-nonroamable-id`, and `storage-trim-property`; they are names for future reviewed publication, not current download locations.
+The selected implementation bases are `xodus-gaming/wine` `bleeding-edge` for the standalone Wine fixes, `xodus-gaming/xodus` `main` for Xodus, and `Weather-OS/WineGDK` `b03ba49c4f326c36aa6930fbe6cf72841ef3738c` for the planned installable experimental XGameRuntime bridge. Fresh inspection found that xgameruntime PR 19 is an IDL template rather than a Unixlib transport, while `oot-cpp` cannot replace the Wine submodule layout. The component roadmap is sequential: these companion branches and immutable SHAs are not public yet, and stale local branch history is reference-only. The planned public names are `forza-social-invite-join`, `xodus-social-invite-bridge`, `wgi-physical-nonroamable-id`, and `storage-trim-property`; they are names for future reviewed publication, not current download locations. The XGameRuntime deliverable is an explicitly AI-assisted experimental WineGDK branch, not an upstream `xodus-gaming/xgameruntime` code PR.
 
 The canonical bases can be checked out for inspection with no claim that they build the complete integration:
 
@@ -130,10 +130,10 @@ git clone https://github.com/xodus-gaming/wine.git wine
 git -C wine switch bleeding-edge
 git clone https://github.com/xodus-gaming/xodus.git xodus
 git -C xodus switch main
-git clone https://github.com/xodus-gaming/xgameruntime.git xgameruntime
-git -C xgameruntime switch oot-cpp
+git clone https://github.com/Weather-OS/WineGDK.git winegdk
+git -C winegdk switch --detach b03ba49c4f326c36aa6930fbe6cf72841ef3738c
 ```
 
-When the reviewed Xodus branch is published, its documented workspace build command is `cargo build --release --workspace`. The installer requires `--xodus-build-dir` to be an absolute directory containing exactly these direct artifacts: `xodus-service`, `xodus-cli`, and `xodus-overlay` (for a conventional Cargo release build, evaluate the verified `target/release` output directory rather than the checkout root). The planned component build checks are `make -C dlls/mountmgr.sys` for Wine storage and `make -C dlls/xgameruntime` for XGameRuntime. A complete build-from-source path cannot be claimed until the companion branches, immutable SHAs, and artifact-parity evidence are published; until then, use only the legal prerequisites and exact-build fallback described above.
+When the reviewed Xodus branch is published, its documented workspace build command is `cargo build --release --workspace`. The installer requires `--xodus-build-dir` to be an absolute directory containing exactly these direct artifacts: `xodus-service`, `xodus-cli`, and `xodus-overlay` (for a conventional Cargo release build, evaluate the verified `target/release` output directory rather than the checkout root). The planned component build checks are `make -C dlls/mountmgr.sys` for Wine storage and an isolated out-of-tree `make -C <build>/dlls/xgameruntime` for the WineGDK bridge. A complete build-from-source path cannot be claimed until the companion branches, immutable SHAs, and artifact-parity evidence are published; until then, use only the legal prerequisites and exact-build fallback described above.
 
 See [architecture](docs/architecture.md), [troubleshooting](docs/troubleshooting.md), and [verification](docs/verification.md).

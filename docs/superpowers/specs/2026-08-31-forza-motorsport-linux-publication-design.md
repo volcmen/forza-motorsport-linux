@@ -121,15 +121,15 @@ Target: `xodus-gaming/xodus`
 
 #### XGameRuntime bridge
 
-Target: `xodus-gaming/xgameruntime`
+Target: an explicitly AI-assisted experimental branch from `Weather-OS/WineGDK` `b03ba49c4f326c36aa6930fbe6cf72841ef3738c`; do not submit it as an upstream `xodus-gaming/xgameruntime` code PR.
 
-- Implement the relevant `XGameUiShowSendGameInviteAsync` and `XGameUiShowMultiplayerActivityGameInviteAsync` calls.
+- Implement only the Forza-relevant `XGameUiShowMultiplayerActivityGameInviteAsync` call; keep the semantically different session-specific legacy invite API unimplemented.
 - Relay UI requests to Xodus over a documented Unix-socket protocol.
 - Relay validated invite-accept activation URIs to registered game callbacks.
 - Follow the existing XAsync provider contract: schedule, complete, query status, and return results correctly.
 - Keep framing and concurrent writes deterministic and tested.
 
-The canonical standalone xgameruntime repository already contains the API surfaces as stubs, so this is a better long-term target than leaving the implementation embedded only in a game-specific Wine fork.
+The standalone `oot-cpp` line is the better long-term architectural target, but current PR 19 contains no Unixlib transport and the branch cannot replace the Wine submodule layout. The reviewed amendment in `docs/superpowers/plans/2026-09-01-xgameruntime-winegdk-amendment.md` controls the installable Linux implementation and publication boundary.
 
 #### Windows.Gaming.Input controller identity
 
@@ -261,7 +261,7 @@ The final guide will explicitly remove unsuccessful diagnostic flags, including 
 - Invite registration/unregistration and validated activation delivery tests.
 - Windows.Gaming.Input identity tests.
 - Storage property buffer-size and descriptor-content tests.
-- Build and test both source and installed artifacts; compare hashes after installation.
+- Record source Git revisions separately, then compare each built artifact's SHA-256 only with its installed counterpart.
 
 ### Manual evidence matrix
 
@@ -296,7 +296,7 @@ Release notes must state:
 
 1. Build the integration repository locally with tests and privacy scans.
 2. Create the public GitHub repository only after the initial commit is internally coherent.
-3. Create or reuse forks of the current canonical Xodus, xgameruntime, and Wine repositories.
+3. Create or reuse forks of the current canonical Xodus and Wine repositories plus the selected Weather-OS/WineGDK experimental base.
 4. Reconstruct small branches from current upstream heads; do not publish stale local history as the review base.
 5. Open issue-linked draft PRs with exact verification commands and known limitations.
 6. Ask Xodus maintainers whether the social UI should extend PR 105 or land as a separate backend PR.
