@@ -141,9 +141,9 @@ The prerequisite lifetime implementation is local WineGDK commit
 Xodus async action and worker-owned descriptor alive through explicit bounded
 stop/join, reserves the append-only Unix call IDs `0..10`, rejects stale XUser
 handles by initialization epoch and main generation, and balances async outer,
-worker, result, handler, and invoker ownership. The social operation IDs
-`5..10` remain deliberate `STATUS_NOT_IMPLEMENTED` reservations at this
-checkpoint.
+worker, result, handler, and invoker ownership. At that checkpoint the social
+operation IDs `5..10` remained deliberate `STATUS_NOT_IMPLEMENTED`
+reservations. They are implemented by the later transport checkpoint below.
 
 The first GE-Proton-hosted experiment exposed an important harness error:
 GE-Proton's own `lib/wine` directory precedes `WINEDLLPATH`, so its installed
@@ -175,3 +175,41 @@ These hashes bind only the Task 0.5 checkpoint and will change during social
 transport/API work. No Xodus service, overlay, Microsoft endpoint, account,
 keychain, Steam setting, installed compatibility tool, or game process was
 used by this gate.
+
+## Xodus social transport checkpoint
+
+WineGDK commit `d387ceda67abd663e5243ce11e1ea4e7b63b7aff`
+(`xgameruntime: add bounded Xodus social transport`) implements the reserved
+Unix calls without changing the append-only IDs:
+
+- `5..7` own the single XDSI invite-activation subscription, validate the
+  little-endian frame length, cap the URI at 4096 bytes, and admit only the
+  expected `ms-xbl-multiplayer://inviteAccept` shape;
+- `8..10` own independent XDUI operations for the full and invite-only social
+  overlay, including immediate terminal replies, blocking completion, and
+  shutdown-driven cancellation;
+- all descriptors are close-on-exec, writes suppress `SIGPIPE`, transfer
+  deadlines cover the complete read or write rather than each partial byte,
+  and stop requests wake blocked readers before teardown;
+- the socket must be an absolute Unix socket owned by the current uid with
+  exact mode `0600`. Xodus creates the production socket with that mode.
+
+The exact-artifact gate now runs a native call-table contract suite before the
+existing GE-Proton-hosted PE suite. The native fixture covers private socket
+permissions, accepted and rejected invite URIs, slow-drip deadline enforcement,
+XDUI terminal states, an immediate service-side refusal, and cancellation. The
+full 2026-09-01 gate result remained green: seven native transport cases, then
+21 PE baseline assertions with one intentional skip, 29 bounded-refusal
+assertions, and 27 synthetic Ping lifecycle assertions, all with zero failures.
+
+The transport checkpoint artifact hashes are:
+
+```text
+c75c839a1566a0843c4bb109b1f16a9ae0cee508b59b3df1c158c990a35ac8d9  xgameruntime.dll
+24d6fbb2934cdeccf8d25b0e0f27bfb106fc2ec2ba1f63d017cbed514e8d35de  xgameruntime.so
+b4e219ba78bf31a2d7f638b396e06598882f4be8287fd1857f89110db0b127ff  xgameruntime_test.exe
+```
+
+This remains a hermetic transport result. It does not prove the public XGameUi
+or XGameInvite APIs, an installed compatibility tool, a live Microsoft account,
+or Forza itself.

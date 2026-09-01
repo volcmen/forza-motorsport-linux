@@ -13,11 +13,13 @@ build_dir=$1
 ge_files=$2
 wine_prefix=$3
 fixture=$4
+transport_test=$(dirname "$fixture")/xgameruntime-transport-test.py
 
 for path in "$build_dir" "$ge_files" "$wine_prefix"; do
     [[ $path = /* && -d $path ]] || usage
 done
 [[ $fixture = /* && -f $fixture ]] || usage
+[[ -f $transport_test ]] || usage
 
 runtime_dir=$(mktemp -d /tmp/forza-xgameruntime-test.XXXXXX)
 overlay_dir=$(mktemp -d "$build_dir/.ge-overlay.XXXXXX")
@@ -53,6 +55,11 @@ trap 'exit 143' TERM
 
 make -C "$build_dir/dlls/xgameruntime" -j2
 make -C "$build_dir/dlls/xgameruntime/tests" -j2
+
+printf 'gate 0/3: native private-socket and social transport contracts\n'
+env \
+    LD_LIBRARY_PATH="$build_dir/dlls/ntdll${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    uv run "$transport_test" "$build_dir/dlls/xgameruntime/xgameruntime.so"
 
 cp -al "$ge_files/." "$overlay_dir/"
 unlink "$overlay_dir/lib/wine/x86_64-windows/xgameruntime.dll"

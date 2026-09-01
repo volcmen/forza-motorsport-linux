@@ -15,6 +15,8 @@ def test_bridge_gate_uses_an_isolated_exact_artifact_overlay():
         'XGAMERUNTIME_TEST_XODUS="$mode"',
         "run_test failure",
         "run_test success",
+        "xgameruntime-transport-test.py",
+        'LD_LIBRARY_PATH="$build_dir/dlls/ntdll',
     ]
     assert all(marker in gate for marker in required)
 
@@ -27,3 +29,19 @@ def test_fixture_is_local_and_never_handles_credentials():
     assert "http" not in fixture
     assert "token" not in fixture
     assert "xuid" not in fixture
+
+
+def test_transport_fixture_covers_private_socket_and_social_protocols():
+    fixture = (ROOT / "tools/xgameruntime-transport-test.py").read_text().lower()
+
+    required = [
+        "0o600",
+        "0o666",
+        "xdsi",
+        "xdui",
+        "inviteaccept?",
+        "status_access_denied",
+        "status_cancelled",
+        "invalid_network_response",
+    ]
+    assert all(marker in fixture for marker in required)
