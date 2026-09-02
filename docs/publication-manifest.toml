@@ -5,14 +5,14 @@ integration_binding = "immutable-tag"
 
 [components.xodus_legacy]
 state = "verified"
-revision = "4bc5db01571065c74eaecca095e78281ea11fdd3"
+revision = "3a26a6cba6623ff135a8acab0a2def347899d72b"
 evidence = "docs/evidence/v0.1-xodus.md"
 
 [components.xgameruntime_legacy]
 state = "experimental"
 base_revision = "a6e6199f81aeb8a96e8ff281e781f5eba2146fe7"
-parity_revision = "9ca4f07d828cc36566a980bf33d35d3f6739c4f0"
-revision = "77c976b34d1710376a14f856c781832e484ea3b2"
+parity_revision = "04a4551646273c68e35f8d1712eb547eaf162692"
+revision = "a1548b1cf57371715d10b608bc81a77a188e40d4"
 evidence = "docs/evidence/v0.1-xgameruntime.md"
 
 [components.wine_controller]
@@ -25,11 +25,11 @@ revision = "a7719bd8d0719e5ea6061387db020fa6a6b39d27"
 
 [components.winegdk_next]
 state = "rejected"
-revision = "ef069c85c8b3ee049971a9e22a317309b30bb09f"
+revision = "d96a768e25f632b04a457e4cb9f585e89ef5d095"
 
 [components.xodus_next]
 state = "rejected"
-revision = "b76690da6ff59ace8981bf0428cd729fcd15673d"
+revision = "ee9db0f68122a9731b9b66cc24767693d1737f5c"
 
 [[artifacts]]
 name = "xodus-service"

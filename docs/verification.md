@@ -39,8 +39,8 @@ The table below is the current live-claim boundary for the restored
 | Second launch without a system reboot | **RETEST REQUIRED** |
 | Automatic incoming invite notifications | **NOT SUPPORTED** |
 
-The newer WineGDK `ef069c85c8b3ee049971a9e22a317309b30bb09f` and Xodus
-`b76690da6ff59ace8981bf0428cd729fcd15673d` pair is **REJECTED LIVE**. Its
+The newer WineGDK `d96a768e25f632b04a457e4cb9f585e89ef5d095` and Xodus
+`ee9db0f68122a9731b9b66cc24767693d1737f5c` pair is **REJECTED LIVE**. Its
 hermetic source gates are not game-compatibility evidence and it is not the
 `legacy-v0.1` installable profile.
 
@@ -93,37 +93,42 @@ files, commands, exit states, and semantic limitations.
 ## Local Xodus social source evidence
 
 The scoped Xodus social branch was developed from official `xodus/main` at
-`a92abacb0743f16c769279b9057c8c28435e5ef9`. The final reviewed source range is
-`a92abacb0743f16c769279b9057c8c28435e5ef9..315c343b9412f6cae9bae7f0c49c4b597b5a0502`;
-the final source commit is `315c343b9412f6cae9bae7f0c49c4b597b5a0502`
+`a92abacb0743f16c769279b9057c8c28435e5ef9`. The final reviewed public source range is
+`a92abacb0743f16c769279b9057c8c28435e5ef9..1aad2cbd6059801546d9519ceab183097e84f0a0`;
+the final source commit is `1aad2cbd6059801546d9519ceab183097e84f0a0`
 (`feat: version the invite-only social overlay request`). Every later
-XGameRuntime build/install/evidence step must consume that exact SHA. The
+experimental XGameRuntime build/install/evidence step must consume that source
+tree or the byte-identical final documentation tip. The
 separate Xodus
 maintainer-documentation commits are
-`966cb58586db725a1d1201a34457eb2e4a62f33f` and
-`e8bcd8fcfc473e7ad019c3ee8d32841ee6f98fd3`, followed by final lifecycle
-documentation commit `207a721e6a1cc95be04ffaeedc67a4d673d45ca2`
+`c82ca585ad4c6bf91888db36a279a19ee2d96444` and
+`655e1277cad388b996c4aacb7b4bf7b997bb65fa`, followed by final lifecycle
+documentation commit `e8a466178716f6a6a0a343e761883703ffaa1a40`
 and versioned-XDUI documentation commit
-`b76690da6ff59ace8981bf0428cd729fcd15673d`.
+`ee9db0f68122a9731b9b66cc24767693d1737f5c`.
+
+The public-history rewrite preserved every source tree and commit message while
+replacing only author/committer metadata with the project's GitHub noreply
+identity.
 
 The local source commits in that range are:
 
 | Commit | Scope |
 | --- | --- |
-| `baa811b1d6d08b0cdd7e73a6a202d9b9e6616aec` | Title-scoped Xbox authorization |
-| `c4491c0ce8107b79de284062163191008772346c` | Authorization privacy hardening |
-| `4e297f65144a5d958e905e19adb9ba7927165a3c` | PeopleHub and Multiplayer Activity operations |
-| `b42de8d81e5b9b0f44a2fbe12b74e143d01ab00c` | Activity and PeopleHub contract hardening |
-| `778c25ae90278b600e804f32b7aee4839b3fec8d` | Bounded social and activation IPC |
-| `eaaec55ea49b7c0b650429164c7c15260487eb10` | Keyboard/controller social overlay |
-| `c202927a56215321064e98ccbd995533e3d7b2e8` | Overlay lifecycle and reentrancy hardening |
-| `40e76edc822c5880ad9f32b2daae69f15659751e` | Service-owned XDUI launcher |
-| `fb38a3f7ad6c9112e8779f7908ffdcc2b2468f30` | Keyring-free shared social protocol crate |
-| `57091ce69c467d95fd27b4e9aecaca34c7eaf7ac` | PeopleHub fallback, authorization lifetime, and bounded social operations |
-| `2b7982a523d6135e6ad4d8f9ca6cf1c877d26047` | Cancellation-safe session-cache invalidation |
-| `903fc4843d25cbfa84db262e41d29a7ca4f8e319` | Bounded activation delivery and fail-closed socket permissions |
-| `08c995b389f2bbc5d0dbc9d51bcadf1453368266` | Shared overlay in-flight gate and capacity-one request queue |
-| `315c343b9412f6cae9bae7f0c49c4b597b5a0502` | Versioned full/invite-only XDUI request and acknowledgement |
+| `e9b43ab695f3ff618bb8d2319bd75cedee7fbbe8` | Title-scoped Xbox authorization |
+| `0593b875b886caaae1a558f1f3542f25e17625e7` | Authorization privacy hardening |
+| `a64500a32cae7667a66f9184a67a24c293cd9c95` | PeopleHub and Multiplayer Activity operations |
+| `c93bbc2c780bcede68a67d6f2d8cac5f72e11842` | Activity and PeopleHub contract hardening |
+| `8c126a4900390231995129c72afbf038d7c1d414` | Bounded social and activation IPC |
+| `12ed1eb0fbee891b54eb843a67734e96224cc547` | Keyboard/controller social overlay |
+| `e7edf2369de0296d1250a772b4bf3ee501720802` | Overlay lifecycle and reentrancy hardening |
+| `f7f773d63f306facd45e621c7362bce522b85aa8` | Service-owned XDUI launcher |
+| `26688ee7edeab1133ce4df00c8761830ac1cd2b3` | Keyring-free shared social protocol crate |
+| `9daccab512c3920b7275ec19f6deac2163c977fc` | PeopleHub fallback, authorization lifetime, and bounded social operations |
+| `3778c93ba1bd7ec2e0479cfbccd3bd3fb8c55d4d` | Cancellation-safe session-cache invalidation |
+| `9f168749f91602e6273f593113cdaccd642c31b5` | Bounded activation delivery and fail-closed socket permissions |
+| `96114baea41678d112e23ba6e8152032a0e467f9` | Shared overlay in-flight gate and capacity-one request queue |
+| `1aad2cbd6059801546d9519ceab183097e84f0a0` | Versioned full/invite-only XDUI request and acknowledgement |
 
 The final lifecycle fixes prefer nonempty PeopleHub `displayName` and fall back
 to nonempty `gamertag`. They preserve authorization expiry, remint an expired
@@ -230,8 +235,8 @@ request exists.
 
 ## Rejected live WineGDK/Xodus source experiment
 
-WineGDK commit `ef069c85c8b3ee049971a9e22a317309b30bb09f` and Xodus commit
-`b76690da6ff59ace8981bf0428cd729fcd15673d` form the rejected newer pair. The
+WineGDK commit `d96a768e25f632b04a457e4cb9f585e89ef5d095` and Xodus commit
+`ee9db0f68122a9731b9b66cc24767693d1737f5c` form the rejected newer pair. The
 WineGDK source tip covers bounded Xodus transport, XGameUi invite-only flow,
 XGameInvite activation delivery, reference-counted runtime lifecycle, and
 runtime-owned WinRT initialization outside loader lock. It also serializes the

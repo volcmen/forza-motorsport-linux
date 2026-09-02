@@ -43,11 +43,11 @@ copied here.
 ## Implemented mapping
 
 The local source commit is
-`baa811b1d6d08b0cdd7e73a6a202d9b9e6616aec` (`feat: expose title-scoped Xbox
+`e9b43ab695f3ff618bb8d2319bd75cedee7fbbe8` (`feat: expose title-scoped Xbox
 authorization`). Review then found that its call to pinned XAL
 `get_xsts_token()` inherited request/response debug middleware that could emit
 the device, title, user, XSTS, UHS, and XUID values. Local source commit
-`c4491c0ce8107b79de284062163191008772346c` (`fix: keep Xbox authorization
+`0593b875b886caaae1a558f1f3542f25e17625e7` (`fix: keep Xbox authorization
 secrets out of logs`) replaces that exchange and hardens the preceding error
 paths. Both commits are local and unpublished.
 

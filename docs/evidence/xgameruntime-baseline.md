@@ -216,16 +216,18 @@ or Forza itself.
 
 ## XGameUi and XGameInvite source checkpoint
 
-The reviewed WineGDK branch now ends at
-`ef069c85c8b3ee049971a9e22a317309b30bb09f`
+The reviewed WineGDK public-history branch now ends at
+`d96a768e25f632b04a457e4cb9f585e89ef5d095`
 (`xgameruntime: serialize canonical MSA client id`). Its preceding WinRT
-checkpoint is `6e0c6d1f951a7a457444ba8abd81374c0d093dba`
+checkpoint is `99737c8864bf0d79253104d690adc6020c940bbf`
 (`xgameruntime: initialize WinRT outside loader lock`), its social checkpoint is
-`ad16c240c175be84d70052eddadceed7666178fe`
+`c7f59e31b678c6d80cd0d731e43624a6a14b3b25`
 (`xgameinvite: deliver Xodus invite activations`), and its public-API
-checkpoint is `de9a32707f8213808181b7452c2e1f8d6e5b5550`
+checkpoint is `8b1c22f57881a6051160d55046effda76dcae779`
 (`xgameui: bridge multiplayer activity invites to Xodus`). The exact source
-range remains local and unpublished.
+range remains local and unpublished. The public-history rewrite changed only
+author/committer metadata to the project's GitHub noreply identity; its final
+tree is byte-identical to private evidence tip `ef069c85c8b3`.
 
 `XGameUiShowMultiplayerActivityGameInviteAsync` now retains the requesting
 XUser, resolves the same IXThreading backend used by the caller, negotiates the
@@ -291,7 +293,7 @@ hermetic test called `RoInitialize` before loading the bridge. The game surfaced
 the resulting `CO_E_NOTINITIALIZED` value as Gaming Services error
 `0x800401f0`, before the first valid Xodus protocol frame.
 
-WineGDK commit `6e0c6d1f951a7a457444ba8abd81374c0d093dba` moves the required
+WineGDK public-history commit `99737c8864bf0d79253104d690adc6020c940bbf` moves the required
 `RoInitialize(RO_INIT_MULTITHREADED)` call into `InitializeApiImplEx2`, outside
 `DllMain` and loader lock. The initialized apartment reference is intentionally
 process-lifetime because the runtime module is pinned and teardown may occur on
@@ -324,8 +326,8 @@ encoded the same lowercase spelling, so its previous success did not cover the
 real service contract.
 
 The fixture expectation was changed first and reproduced the rejection in the
-synthetic main-stream lifecycle. WineGDK commit
-`ef069c85c8b3ee049971a9e22a317309b30bb09f` then changed only the XML element
+synthetic main-stream lifecycle. WineGDK public-history commit
+`d96a768e25f632b04a457e4cb9f585e89ef5d095` then changed only the XML element
 name. All 20 bridge stages passed afterward, including seven native transport
 cases, 81 main-lifecycle assertions, and the complete XGameUi/XGameInvite
 matrix with zero failures. The rebuilt artifacts were:

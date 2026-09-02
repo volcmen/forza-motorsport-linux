@@ -7,7 +7,7 @@ Motorsport, **AppID 2440510**, with the reviewed `GE-Proton11-3-FM` layout. It
 is environment-specific integration work, not ordinary upstream Proton support.
 
 The v0.1 installable profile is `legacy-v0.1`. It binds Xodus commit
-`4bc5db01571065c74eaecca095e78281ea11fdd3` to the matching legacy
+`3a26a6cba6623ff135a8acab0a2def347899d72b` to the matching legacy
 XGameRuntime generation and the repository's recoverable launcher and installer.
 The current evidence boundary is narrow:
 
@@ -20,8 +20,8 @@ The current evidence boundary is narrow:
   invite/join flow is a different capability and still requires retesting.
 
 **Rejected live experiment:** WineGDK
-`ef069c85c8b3ee049971a9e22a317309b30bb09f` with Xodus
-`b76690da6ff59ace8981bf0428cd729fcd15673d` is **REJECTED LIVE**. Its hermetic
+`d96a768e25f632b04a457e4cb9f585e89ef5d095` with Xodus
+`ee9db0f68122a9731b9b66cc24767693d1737f5c` is **REJECTED LIVE**. Its hermetic
 source tests remain useful, but the pair produced protocol rejection, flicker,
 or exit after the logo and is neither a v0.1 dependency nor an installable
 profile.
@@ -194,18 +194,18 @@ This repository contains only scripts, manifests, documentation, and synthetic t
 ### Component source status
 
 The v0.1 runtime is the legacy protocol generation: Xodus commit
-`4bc5db01571065c74eaecca095e78281ea11fdd3` and the legacy XGameRuntime source
+`3a26a6cba6623ff135a8acab0a2def347899d72b` and the legacy XGameRuntime source
 recorded in `docs/publication-manifest.toml`. The current installed-artifact
 hashes and reconstruction evidence are recorded there and in `docs/evidence`;
 the separately supplied licensed Microsoft runtime remains outside public
 evidence and repository transactions.
 
-The newer WineGDK commit `ef069c85c8b3ee049971a9e22a317309b30bb09f`
-and Xodus commit `b76690da6ff59ace8981bf0428cd729fcd15673d` are a
+The newer WineGDK commit `d96a768e25f632b04a457e4cb9f585e89ef5d095`
+and Xodus commit `ee9db0f68122a9731b9b66cc24767693d1737f5c` are a
 **REJECTED LIVE** source experiment. They are not the v0.1 runtime and must not
 be installed by the `legacy-v0.1` profile.
 
-The selected implementation bases are `xodus-gaming/wine` `bleeding-edge` for the standalone Wine fixes, `xodus-gaming/xodus` `main` for Xodus, and `Weather-OS/WineGDK` `b03ba49c4f326c36aa6930fbe6cf72841ef3738c` for the local experimental XGameRuntime bridge now reviewed at `ef069c85c8b3ee049971a9e22a317309b30bb09f`. Fresh inspection found that xgameruntime PR 19 is an IDL template rather than a Unixlib transport, while `oot-cpp` cannot replace the Wine submodule layout. The component roadmap is sequential: these companion branches and immutable SHAs are not public yet, and stale local branch history is reference-only. The planned public names are `forza-social-invite-join`, `xodus-social-invite-bridge`, `wgi-physical-nonroamable-id`, and `storage-trim-property`; they are names for future reviewed publication, not current download locations. The XGameRuntime deliverable is an explicitly AI-assisted experimental WineGDK branch, not an upstream `xodus-gaming/xgameruntime` code PR.
+The selected implementation bases are `xodus-gaming/wine` `bleeding-edge` for the standalone Wine fixes, `xodus-gaming/xodus` `main` for Xodus, and `Weather-OS/WineGDK` `b03ba49c4f326c36aa6930fbe6cf72841ef3738c` for the local experimental XGameRuntime bridge now reviewed at `d96a768e25f632b04a457e4cb9f585e89ef5d095`. Fresh inspection found that xgameruntime PR 19 is an IDL template rather than a Unixlib transport, while `oot-cpp` cannot replace the Wine submodule layout. The component roadmap is sequential: these companion branches and immutable SHAs are not public yet, and stale local branch history is reference-only. The planned public names are `forza-social-invite-join`, `xodus-social-invite-bridge`, `wgi-physical-nonroamable-id`, and `storage-trim-property`; they are names for future reviewed publication, not current download locations. The XGameRuntime deliverable is an explicitly AI-assisted experimental WineGDK branch, not an upstream `xodus-gaming/xgameruntime` code PR.
 
 The canonical bases can be checked out for inspection with no claim that they build the complete integration:
 

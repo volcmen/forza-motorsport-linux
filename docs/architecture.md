@@ -6,12 +6,12 @@ The repository is a local control surface for one experimental Steam layout: App
 
 The v0.1 runtime profile is `legacy-v0.1`. It uses the reconstructed legacy
 XGameRuntime protocol generation with Xodus
-`4bc5db01571065c74eaecca095e78281ea11fdd3`. This is the only installable
+`3a26a6cba6623ff135a8acab0a2def347899d72b`. This is the only installable
 runtime-component profile, and game launch is its only current live-verified
 claim.
 
-The newer WineGDK `ef069c85c8b3ee049971a9e22a317309b30bb09f` and Xodus
-`b76690da6ff59ace8981bf0428cd729fcd15673d` pair is a source-only experiment.
+The newer WineGDK `d96a768e25f632b04a457e4cb9f585e89ef5d095` and Xodus
+`ee9db0f68122a9731b9b66cc24767693d1737f5c` pair is a source-only experiment.
 Its synthetic protocol and API tests are useful, but its live combinations
 failed. It is **REJECTED LIVE**, is not a v0.1 dependency, and cannot be selected
 by the runtime installer.

@@ -30,7 +30,7 @@ def test_publication_manifest_pins_working_legacy_xodus():
     component = load_publication_manifest()["components"]["xodus_legacy"]
     assert component == {
         "state": "verified",
-        "revision": "4bc5db01571065c74eaecca095e78281ea11fdd3",
+        "revision": "3a26a6cba6623ff135a8acab0a2def347899d72b",
         "evidence": "docs/evidence/v0.1-xodus.md",
     }
 
@@ -97,7 +97,7 @@ def test_readme_names_supported_and_unsupported_boundaries():
         "Experimental",
         "AppID 2440510",
         "legacy-v0.1",
-        "4bc5db01571065c74eaecca095e78281ea11fdd3",
+        "3a26a6cba6623ff135a8acab0a2def347899d72b",
         "Verified current: game launch",
         "Retest required",
         "Rejected live experiment",
@@ -128,8 +128,8 @@ def test_readme_top_status_marks_outgoing_social_as_retest_required():
 def test_readme_rejects_the_newer_pair_as_an_installable_runtime():
     readme = (ROOT / "README.md").read_text()
     newer_pair = (
-        "ef069c85c8b3ee049971a9e22a317309b30bb09f",
-        "b76690da6ff59ace8981bf0428cd729fcd15673d",
+        "d96a768e25f632b04a457e4cb9f585e89ef5d095",
+        "ee9db0f68122a9731b9b66cc24767693d1737f5c",
     )
     pair_boundaries = [
         paragraph
