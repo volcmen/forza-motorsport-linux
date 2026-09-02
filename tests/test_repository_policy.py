@@ -1,3 +1,4 @@
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -323,3 +324,79 @@ def test_release_document_describes_the_verified_source_only_boundary():
         "not ordinary upstream Proton support",
     }
     assert all(item in release for item in required)
+
+
+def test_upstream_publication_drafts_are_complete_and_path_safe():
+    draft_paths = [
+        ROOT / "docs/upstream.md",
+        ROOT / "docs/upstream/xodus-94-comment.md",
+        ROOT / "docs/upstream/proton-7151-comment.md",
+        ROOT / "docs/upstream/wine-controller-pr.md",
+        ROOT / "docs/upstream/wine-storage-issue.md",
+    ]
+    assert all(path.is_file() for path in draft_paths)
+
+    for path in draft_paths:
+        text = path.read_text()
+        assert "/home/" not in text
+        assert "file://" not in text
+        link_targets = re.findall(r"\[[^]]+\]\(([^)]+)\)", text)
+        assert not [target for target in link_targets if target.startswith("/")]
+
+
+def test_proton_draft_reports_only_manifest_verified_live_claims():
+    data = load_publication_manifest()
+    verified = {
+        claim["id"]
+        for claim in data["claims"]
+        if claim["state"] == "verified"
+    }
+    claims = {
+        "game-launch": "two successful launches without a reboot",
+        "online-profile-content": "online profile and content download",
+        "controller-navigation-driving": "controller navigation and driving",
+        "controller-hotplug": "controller disconnect and reconnect",
+        "ap702-absent": "AP702 warning was absent",
+        "linux-to-windows-invite": "Invite from Linux to Windows",
+        "linux-join-windows-activity": "Join from Linux to a compatible Windows activity",
+        "social-ui-keyboard-controller": "keyboard and controller input in the social picker",
+        "xodus-clean-shutdown": "clean Xodus shutdown after each game exit",
+        "repeat-launch-no-reboot": "second launch without a system reboot",
+    }
+    proton = (ROOT / "docs/upstream/proton-7151-comment.md").read_text()
+
+    assert set(claims) <= verified
+    assert all(phrase in proton for phrase in claims.values())
+    assert "Automatic incoming Xbox invite notifications are not supported" in proton
+    assert "not ordinary upstream Proton support" in proton
+
+
+def test_upstream_ledger_and_wine_drafts_name_exact_prepared_actions():
+    ledger = (ROOT / "docs/upstream.md").read_text()
+    actions = [
+        "Integration repository creation",
+        "Xodus fork and legacy/current branches",
+        "wine-forza-motorsport fork and reconstructed branch",
+        "Wine fork and controller/storage branches",
+        "WineGDK fork and experimental branch",
+        "Xodus issue 94 comment",
+        "Wine controller draft PR",
+        "Wine storage issue",
+        "Proton issue 7151 comment",
+        "v0.1.0 tag and source-only release",
+    ]
+    assert all(f"| {action} | `prepared` |" in ledger for action in actions)
+    assert "https://github.com/volcmen/" not in ledger
+
+    controller = (ROOT / "docs/upstream/wine-controller-pr.md").read_text()
+    storage = (ROOT / "docs/upstream/wine-storage-issue.md").read_text()
+    assert controller.startswith(
+        "# windows.gaming.input: identify physical XInput controllers\n"
+    )
+    assert "wgi-physical-nonroamable-id" in controller
+    assert "b1dd32734a34472a28eb5be9922df06e07ac0834" in controller
+    assert "ddd302d97c6008d79ea4f3e3ad56014cb548e514" in controller
+    assert storage.startswith(
+        "# mountmgr: define device-backed StorageDeviceTrimProperty semantics\n"
+    )
+    assert "storage-trim-property" in storage

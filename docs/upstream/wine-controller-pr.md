@@ -1,0 +1,42 @@
+# windows.gaming.input: identify physical XInput controllers
+
+This draft targets `xodus-gaming/wine:bleeding-edge` from branch
+`wgi-physical-nonroamable-id`.
+
+Base: `b1dd32734a34472a28eb5be9922df06e07ac0834`
+
+Tip: `ddd302d97c6008d79ea4f3e3ad56014cb548e514`
+
+## Problem
+
+The existing physical XInput provider does not expose the stable
+`NonRoamableId` shape expected by Windows.Gaming.Input consumers. Forza
+Motorsport can enumerate the controller through XInput while presenting only
+keyboard bindings in the game UI.
+
+## Change
+
+The branch derives a physical-provider identity from VID, PID, and the full
+device-instance discriminator. Parsing is case-insensitive and accepts only a
+boundary-anchored `&XI_nn#` segment with exactly two decimal slot digits. The
+existing Steam virtual-controller reservation for VID:PID `28de:11ff` is
+preserved. The helper is linked as a private archive into both the production
+DLL and its tests and is not exported or installed.
+
+## Verification
+
+- The source worktree is clean at the stated tip and has the stated merge base.
+- `windows.gaming.input.dll`, its PE test executable, and the neighboring
+  DirectInput test executable compile and link with Clang/LLD 22.1.8.
+- A production-source harness covers valid, malformed, bounds,
+  distinct-instance, case, and Steam-reservation inputs.
+- The standard Windows.Gaming.Input and DirectInput PE suites remain
+  **BLOCKED before dispatch** because this old build tree cannot initialize its
+  Wine test prefix (`secur32.dll`, then `kernel32.dll` status `c0000135`). No
+  dispatched assertion failed.
+- The controller navigation, driving, and hotplug matrix passed in Forza through
+  the reviewed exact-build fallback. This standalone source branch itself was
+  not installed for that observation.
+
+No compiled artifact is attached. The immutable branch and integration evidence
+links will be inserted after publication, before this draft PR is opened.
