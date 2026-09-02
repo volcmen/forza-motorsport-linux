@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import stat
 import subprocess
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -54,8 +57,220 @@ TRANSACTION_ROLES = (
 )
 
 
+def test_runtime_profile_manifest_selects_legacy_v0_1():
+    data = tomllib.loads((ROOT / "manifests/runtime-profiles.toml").read_text())
+    profile = data["profiles"][data["active"]]
+
+    assert data["version"] == 1
+    assert data["active"] == "legacy-v0.1"
+    assert profile["xodus_revision"] == "23da0ab8323a1631ba2aacb069a06af22b8a20ac"
+    assert len(profile["xgameruntime_revision"]) == 40
+    assert profile["status"] == "candidate"
+
+
+def test_locked_evidence_names_the_runtime_profile(tmp_path: Path):
+    fixture = setup_fixture(tmp_path)
+
+    run_tool(fixture, "lock-evidence")
+
+    evidence = json.loads(fixture["evidence"].read_text())  # type: ignore[union-attr]
+    assert evidence["version"] == 2
+    assert evidence["runtime_profile"] == "fixture"
+    assert set(evidence["source_revisions"]) == {
+        "xgameruntime_git_sha",
+        "xodus_git_sha",
+        "integration_git_sha",
+    }
+
+
+@pytest.mark.parametrize(
+    ("manifest", "message"),
+    (
+        ("version = 1\nactive = \"missing\"\n", "manifest is invalid"),
+        (
+            (
+                "version = 1\n"
+                'active = "legacy-v0.1"\n'
+                "\n"
+                '[profiles."legacy-v0.1"]\n'
+                'status = "experimental"\n'
+                'xgameruntime_revision = "0"\n'
+                'xodus_revision = "0"\n'
+            ),
+            "profile is not installable",
+        ),
+        (
+            (
+                "version = 1\n"
+                'active = "legacy-v0.1"\n'
+                "\n"
+                '[profiles."legacy-v0.1"]\n'
+                'status = "candidate"\n'
+                'xgameruntime_revision = "not-a-revision"\n'
+                'xodus_revision = "also-not-a-revision"\n'
+            ),
+            "profile revisions are invalid",
+        ),
+    ),
+)
+def test_reviewed_runtime_profile_rejects_invalid_manifest(
+    tmp_path: Path, manifest: str, message: str
+):
+    integration = tmp_path / "integration"
+    profile = integration / "manifests/runtime-profiles.toml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(manifest, encoding="ascii")
+
+    with pytest.raises(RuntimeError, match=message):
+        installer_module().reviewed_runtime_profile(integration)
+
+
+def test_missing_runtime_profile_fails_before_destinations_change(tmp_path: Path):
+    fixture = setup_fixture(tmp_path)
+    before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
+    before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="manifest is invalid"):
+        installer_module().reviewed_runtime_profile(fixture["integration_source"])
+
+    assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
+
+
+def test_changed_profile_after_evidence_lock_fails_before_destinations_change(
+    tmp_path: Path,
+):
+    fixture = setup_fixture(tmp_path)
+    profile = commit_fixture_profile(fixture)
+    run_tool(fixture, "lock-evidence")
+    before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
+    before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
+    profile.write_text(profile.read_text().replace('status = "candidate"', 'status = "experimental"'))
+
+    failed = run_tool(fixture, "plan", check=False)
+
+    assert failed.returncode != 0
+    assert "worktree is dirty" in failed.stderr.lower()
+    assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
+    assert not any(
+        path.is_dir() and len(path.name) == 24
+        for path in fixture["evidence"].parent.iterdir()  # type: ignore[union-attr]
+    )
+
+
+def test_mismatched_fixture_profile_revision_fails_before_destinations_change(
+    tmp_path: Path,
+):
+    fixture = setup_fixture(tmp_path)
+    before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
+    before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
+    fixture["env"]["FORZA_RUNTIME_EXPECTED_XGAMERUNTIME_SHA"] = "0" * 40  # type: ignore[index]
+
+    failed = run_tool(fixture, "lock-evidence", check=False)
+
+    assert failed.returncode != 0
+    assert "revision mismatch" in failed.stderr.lower()
+    assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
+
+
+def test_v1_evidence_cannot_create_a_new_plan_or_install(tmp_path: Path):
+    fixture = setup_fixture(tmp_path)
+    run_tool(fixture, "lock-evidence")
+    evidence: Path = fixture["evidence"]  # type: ignore[assignment]
+    value = json.loads(evidence.read_text())
+    value["version"] = 1
+    value.pop("runtime_profile")
+    value["source_revisions"] = {
+        "winegdk_git_sha": value["source_revisions"]["xgameruntime_git_sha"],
+        "xodus_git_sha": value["source_revisions"]["xodus_git_sha"],
+        "integration_git_sha": value["source_revisions"]["integration_git_sha"],
+    }
+    evidence.write_text(json.dumps(value), encoding="ascii")
+    evidence.chmod(0o600)
+    before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
+    before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
+
+    planned = run_tool(fixture, "plan", check=False)
+    installed = run_tool(fixture, "install", "--plan-sha256", "0" * 64, check=False)
+
+    assert planned.returncode != 0
+    assert installed.returncode != 0
+    assert "version mismatch" in planned.stderr.lower()
+    assert "version mismatch" in installed.stderr.lower()
+    assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
+
+
+def test_v1_journal_status_and_interrupted_rollback_remain_supported(
+    tmp_path: Path,
+):
+    fixture = setup_fixture(tmp_path)
+    plan_digest = lock_and_plan(fixture)
+    run_tool(fixture, "install", "--plan-sha256", plan_digest)
+    journal_path = next(
+        path / "journal.json"
+        for path in fixture["evidence"].parent.iterdir()  # type: ignore[union-attr]
+        if path.is_dir() and len(path.name) == 24
+    )
+    journal = json.loads(journal_path.read_text())
+    journal["version"] = 1
+    journal.pop("runtime_profile")
+    journal["source_revisions"] = {
+        "winegdk_git_sha": journal["source_revisions"]["xgameruntime_git_sha"],
+        "xodus_git_sha": journal["source_revisions"]["xodus_git_sha"],
+        "integration_git_sha": journal["source_revisions"]["integration_git_sha"],
+    }
+    journal["state"] = "rolling_back"
+    journal["recovery_operation"] = "rollback"
+    journal_path.write_text(json.dumps(journal), encoding="ascii")
+    journal_path.chmod(0o600)
+
+    assert "state=rolling_back" in run_tool(fixture, "status").stdout
+    run_tool(fixture, "rollback")
+
+    restored = json.loads(journal_path.read_text())
+    assert restored["version"] == 1
+    assert "runtime_profile" not in restored
+    assert restored["state"] == "rolled_back"
+    assert_original_install_restored(fixture)
+
+
+def test_accept_rejects_a_v1_journal(tmp_path: Path):
+    fixture = setup_fixture(tmp_path)
+    plan_digest = lock_and_plan(fixture)
+    run_tool(fixture, "install", "--plan-sha256", plan_digest)
+    journal_path = next(
+        path / "journal.json"
+        for path in fixture["evidence"].parent.iterdir()  # type: ignore[union-attr]
+        if path.is_dir() and len(path.name) == 24
+    )
+    journal = json.loads(journal_path.read_text())
+    journal["version"] = 1
+    journal.pop("runtime_profile")
+    journal["source_revisions"] = {
+        "winegdk_git_sha": journal["source_revisions"]["xgameruntime_git_sha"],
+        "xodus_git_sha": journal["source_revisions"]["xodus_git_sha"],
+        "integration_git_sha": journal["source_revisions"]["integration_git_sha"],
+    }
+    journal_path.write_text(json.dumps(journal), encoding="ascii")
+    journal_path.chmod(0o600)
+
+    failed = run_tool(fixture, "accept", check=False)
+
+    assert failed.returncode != 0
+    assert "exactly one matching" in failed.stderr.lower()
+    assert json.loads(journal_path.read_text())["version"] == 1
+
+
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def installer_module():
+    loader = importlib.machinery.SourceFileLoader("runtime_installer", str(TOOL))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def git(repo: Path, *arguments: str) -> str:
@@ -229,7 +444,7 @@ def setup_fixture(tmp_path: Path) -> dict[str, object]:
             "XDG_RUNTIME_DIR": str(runtime_dir),
             "FORZA_SYSTEMCTL": str(fake_systemctl),
             "FORZA_RUNTIME_TESTING": "1",
-            "FORZA_RUNTIME_EXPECTED_WINEGDK_SHA": wine_sha,
+            "FORZA_RUNTIME_EXPECTED_XGAMERUNTIME_SHA": wine_sha,
             "FORZA_RUNTIME_EXPECTED_XODUS_SHA": xodus_sha,
             "FORZA_RUNTIME_INTEGRATION_ROOT": str(integration_source),
         }
@@ -314,6 +529,37 @@ def run_secure_user_files(
     return subprocess.run(command, check=False, capture_output=True, text=True)
 
 
+def assert_runtime_destinations_unchanged(
+    fixture: dict[str, object], before_user: list[tuple[str, str, int]], before_compat: list[tuple[str, str, int]]
+) -> None:
+    assert tree_snapshot(fixture["user_root"]) == before_user  # type: ignore[arg-type]
+    assert tree_snapshot(fixture["compat_root"]) == before_compat  # type: ignore[arg-type]
+
+
+def commit_fixture_profile(fixture: dict[str, object]) -> Path:
+    integration: Path = fixture["integration_source"]  # type: ignore[assignment]
+    profile = integration / "manifests/runtime-profiles.toml"
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    profile.write_text(
+        "\n".join(
+            (
+                "version = 1",
+                'active = "legacy-v0.1"',
+                "",
+                '[profiles."legacy-v0.1"]',
+                'status = "candidate"',
+                f'xgameruntime_revision = "{git(fixture["wine_source"], "rev-parse", "HEAD")}"',  # type: ignore[arg-type]
+                f'xodus_revision = "{git(fixture["xodus_source"], "rev-parse", "HEAD")}"',  # type: ignore[arg-type]
+                "",
+            )
+        ),
+        encoding="ascii",
+    )
+    git(integration, "add", "manifests/runtime-profiles.toml")
+    git(integration, "commit", "-q", "-m", "fixture runtime profile")
+    return profile
+
+
 def test_lock_evidence_binds_clean_revisions_and_ten_artifacts(tmp_path: Path):
     fixture = setup_fixture(tmp_path)
     run_tool(fixture, "lock-evidence")
@@ -322,7 +568,7 @@ def test_lock_evidence_binds_clean_revisions_and_ten_artifacts(tmp_path: Path):
 
     assert stat.S_IMODE(evidence_path.stat().st_mode) == 0o600
     assert evidence["source_revisions"] == {
-        "winegdk_git_sha": fixture["env"]["FORZA_RUNTIME_EXPECTED_WINEGDK_SHA"],  # type: ignore[index]
+        "xgameruntime_git_sha": fixture["env"]["FORZA_RUNTIME_EXPECTED_XGAMERUNTIME_SHA"],  # type: ignore[index]
         "xodus_git_sha": fixture["env"]["FORZA_RUNTIME_EXPECTED_XODUS_SHA"],  # type: ignore[index]
         "integration_git_sha": fixture["integration_sha"],
     }
@@ -460,6 +706,13 @@ def test_install_and_rollback_preserve_hash_mode_and_old_manifest(tmp_path: Path
         if path.is_dir() and len(path.name) == 24
     )
     journal = json.loads(journal_path.read_text())
+    assert journal["version"] == 2
+    assert journal["runtime_profile"] == "fixture"
+    assert set(journal["source_revisions"]) == {
+        "xgameruntime_git_sha",
+        "xodus_git_sha",
+        "integration_git_sha",
+    }
     assert [record["role"] for record in journal["artifacts"]] == list(
         TRANSACTION_ROLES
     )

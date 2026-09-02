@@ -1,0 +1,7 @@
+version = 1
+active = "legacy-v0.1"
+
+[profiles."legacy-v0.1"]
+status = "candidate"
+xodus_revision = "23da0ab8323a1631ba2aacb069a06af22b8a20ac"
+xgameruntime_revision = "77c976b34d1710376a14f856c781832e484ea3b2"

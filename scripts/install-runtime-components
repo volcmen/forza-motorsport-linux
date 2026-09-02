@@ -17,13 +17,14 @@ import stat
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 APP_ID = "2440510"
-VERSION = 1
-EVIDENCE_VERSION = 1
+VERSION = 2
+EVIDENCE_VERSION = 2
 MANIFEST_MODE = 0o600
 SAFE_SOURCE_MASK = 0o7022
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -42,8 +43,7 @@ USER_PAYLOADS = (
     ".local/libexec/xodus-forza/xodus-overlay",
     ".config/systemd/user/xodus-forza.service",
 )
-REVIEWED_WINEGDK_SHA = "ef069c85c8b3ee049971a9e22a317309b30bb09f"
-REVIEWED_XODUS_SHA = "b76690da6ff59ace8981bf0428cd729fcd15673d"
+PROFILE_MANIFEST = "manifests/runtime-profiles.toml"
 ROLES = {
     "launcher-gate": {
         "source_root": "integration",
@@ -74,14 +74,14 @@ ROLES = {
         "target_mode": 0o644,
     },
     "xgameruntime-pe64": {
-        "source_root": "winegdk",
+        "source_root": "xgameruntime",
         "source_relative": "dlls/xgameruntime/x86_64-windows/xgameruntime.dll",
         "destination_root": "compat-tool",
         "destination_relative": "files/lib/wine/x86_64-windows/xgameruntime.dll",
         "target_mode": 0o755,
     },
     "xgameruntime-unix64": {
-        "source_root": "winegdk",
+        "source_root": "xgameruntime",
         "source_relative": "dlls/xgameruntime/xgameruntime.so",
         "destination_root": "compat-tool",
         "destination_relative": "files/lib/wine/x86_64-unix/xgameruntime.so",
@@ -385,13 +385,38 @@ def git_output(source: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
-def expected_revisions() -> tuple[str, str]:
-    wine = REVIEWED_WINEGDK_SHA
-    xodus = REVIEWED_XODUS_SHA
+def reviewed_runtime_profile(integration_root: Path) -> tuple[str, str, str]:
+    try:
+        with (integration_root / PROFILE_MANIFEST).open("rb") as stream:
+            data = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise RuntimeInstallError("runtime profile manifest is invalid") from error
+    profiles = data.get("profiles")
+    if (
+        data.get("version") != 1
+        or not isinstance(profiles, dict)
+        or data.get("active") not in profiles
+    ):
+        raise RuntimeInstallError("runtime profile manifest is invalid")
+    name = data["active"]
+    profile = profiles[name]
+    if not isinstance(profile, dict):
+        raise RuntimeInstallError("runtime profile manifest is invalid")
+    if profile.get("status") != "candidate":
+        raise RuntimeInstallError("runtime profile is not installable")
+    wine = profile.get("xgameruntime_revision")
+    xodus = profile.get("xodus_revision")
+    if not valid_digest(wine, 40) or not valid_digest(xodus, 40):
+        raise RuntimeInstallError("runtime profile revisions are invalid")
+    return name, wine, xodus
+
+
+def expected_runtime_profile(integration_root: Path) -> tuple[str, str, str]:
     if os.environ.get("FORZA_RUNTIME_TESTING") == "1":
-        wine = os.environ.get("FORZA_RUNTIME_EXPECTED_WINEGDK_SHA", wine)
-        xodus = os.environ.get("FORZA_RUNTIME_EXPECTED_XODUS_SHA", xodus)
-    return wine, xodus
+        wine = os.environ.get("FORZA_RUNTIME_EXPECTED_XGAMERUNTIME_SHA", "")
+        xodus = os.environ.get("FORZA_RUNTIME_EXPECTED_XODUS_SHA", "")
+        return "fixture", wine, xodus
+    return reviewed_runtime_profile(integration_root)
 
 
 def source_roots(wine_build: Path, xodus_build: Path) -> dict[str, Path]:
@@ -407,19 +432,25 @@ def source_roots(wine_build: Path, xodus_build: Path) -> dict[str, Path]:
     ]
     if len(matches) != 1 or not Path(matches[0]).is_absolute():
         raise RuntimeInstallError(
-            "WineGDK build Makefile has no unique absolute srcdir"
+            "XGameRuntime build Makefile has no unique absolute srcdir"
         )
     if xodus_build.name != "release" or xodus_build.parent.name != "target":
         raise RuntimeInstallError(
             "Xodus build directory must be the reviewed target/release directory"
         )
-    integration_root = Path(os.path.abspath(__file__)).parent.parent
+    integration_root = Path(
+        git_output(
+            Path(os.path.abspath(__file__)).parent.parent,
+            "rev-parse",
+            "--show-toplevel",
+        )
+    )
     if os.environ.get("FORZA_RUNTIME_TESTING") == "1":
         integration_root = Path(
             os.environ.get("FORZA_RUNTIME_INTEGRATION_ROOT", integration_root)
         )
     roots = {
-        "winegdk": Path(matches[0]),
+        "xgameruntime": Path(matches[0]),
         "xodus": xodus_build.parent.parent,
         "integration": integration_root,
     }
@@ -429,33 +460,37 @@ def source_roots(wine_build: Path, xodus_build: Path) -> dict[str, Path]:
     return roots
 
 
-def verify_revisions(roots: dict[str, Path]) -> dict[str, str]:
-    expected_wine, expected_xodus = expected_revisions()
+def verify_revisions(roots: dict[str, Path]) -> tuple[str, dict[str, str]]:
+    profile, expected_wine, expected_xodus = expected_runtime_profile(
+        roots["integration"]
+    )
     observed = {
-        "winegdk_git_sha": git_output(roots["winegdk"], "rev-parse", "HEAD"),
+        "xgameruntime_git_sha": git_output(
+            roots["xgameruntime"], "rev-parse", "HEAD"
+        ),
         "xodus_git_sha": git_output(roots["xodus"], "rev-parse", "HEAD"),
         "integration_git_sha": git_output(roots["integration"], "rev-parse", "HEAD"),
     }
     expected = {
-        "winegdk_git_sha": expected_wine,
+        "xgameruntime_git_sha": expected_wine,
         "xodus_git_sha": expected_xodus,
     }
     if {
-        "winegdk_git_sha": observed["winegdk_git_sha"],
+        "xgameruntime_git_sha": observed["xgameruntime_git_sha"],
         "xodus_git_sha": observed["xodus_git_sha"],
     } != expected:
         raise RuntimeInstallError("reviewed source revision mismatch")
     for root in roots.values():
         if git_output(root, "status", "--porcelain=v1", "--untracked-files=all"):
             raise RuntimeInstallError(f"reviewed source worktree is dirty: {root}")
-    return observed
+    return profile, observed
 
 
 def artifact_inputs(
     wine_build: Path, xodus_build: Path, integration_root: Path
 ) -> dict[str, dict[str, Any]]:
     build_roots = {
-        "winegdk": wine_build,
+        "xgameruntime": wine_build,
         "xodus": xodus_build,
         "integration": integration_root,
     }
@@ -470,7 +505,7 @@ def artifact_inputs(
             raise RuntimeInstallError(f"source has unsafe mode for {role}: {mode:o}")
         if (
             contract["target_mode"] & 0o111
-            and contract["source_root"] != "winegdk"
+            and contract["source_root"] != "xgameruntime"
             and not mode & 0o111
         ):
             raise RuntimeInstallError(f"source is not executable for {role}")
@@ -497,7 +532,7 @@ def evidence_path(user_root: Path, requested: Path) -> Path:
 
 def lock_evidence(arguments: argparse.Namespace) -> None:
     roots = source_roots(arguments.xgameruntime_build_dir, arguments.xodus_build_dir)
-    revisions = verify_revisions(roots)
+    profile, revisions = verify_revisions(roots)
     artifacts = artifact_inputs(
         arguments.xgameruntime_build_dir,
         arguments.xodus_build_dir,
@@ -505,6 +540,7 @@ def lock_evidence(arguments: argparse.Namespace) -> None:
     )
     evidence = {
         "version": EVIDENCE_VERSION,
+        "runtime_profile": profile,
         "source_revisions": revisions,
         "artifacts": [
             {key: value for key, value in artifacts[role].items() if key != "data"}
@@ -543,8 +579,11 @@ def validate_evidence(value: object) -> dict[str, Any]:
         raise RuntimeInstallError("artifact evidence manifest version mismatch")
     revisions = value.get("source_revisions")
     if (
-        not isinstance(revisions, dict)
-        or set(revisions) != {"winegdk_git_sha", "xodus_git_sha", "integration_git_sha"}
+        not isinstance(value.get("runtime_profile"), str)
+        or not value["runtime_profile"].strip()
+        or not isinstance(revisions, dict)
+        or set(revisions)
+        != {"xgameruntime_git_sha", "xodus_git_sha", "integration_git_sha"}
         or not all(valid_digest(revision, 40) for revision in revisions.values())
     ):
         raise RuntimeInstallError("artifact evidence source revisions are invalid")
@@ -597,7 +636,11 @@ def load_evidence(
             "artifact evidence manifest is invalid JSON"
         ) from error
     roots = source_roots(arguments.xgameruntime_build_dir, arguments.xodus_build_dir)
-    if evidence.get("source_revisions") != verify_revisions(roots):
+    profile, revisions = verify_revisions(roots)
+    if (
+        evidence.get("runtime_profile") != profile
+        or evidence.get("source_revisions") != revisions
+    ):
         raise RuntimeInstallError("artifact evidence source revision mismatch")
     current = artifact_inputs(
         arguments.xgameruntime_build_dir,
@@ -743,6 +786,7 @@ def build_plan(
             )
         plan = {
             "version": VERSION,
+            "runtime_profile": evidence["runtime_profile"],
             "evidence_manifest_sha256": evidence_hash,
             "source_revisions": evidence["source_revisions"],
             "roots": {
@@ -852,11 +896,39 @@ def reload_user_manager() -> None:
         raise RuntimeInstallError("cannot reload the user systemd manager")
 
 
+def validate_v1_journal_schema(journal: dict[str, Any], revisions: object) -> None:
+    if "runtime_profile" in journal:
+        raise RuntimeInstallError("transaction journal v1 must not name a profile")
+    if (
+        not isinstance(revisions, dict)
+        or set(revisions)
+        != {"winegdk_git_sha", "xodus_git_sha", "integration_git_sha"}
+        or not all(valid_digest(value, 40) for value in revisions.values())
+    ):
+        raise RuntimeInstallError("transaction journal source revisions are invalid")
+
+
+def validate_v2_journal_schema(journal: dict[str, Any], revisions: object) -> None:
+    if (
+        not isinstance(journal.get("runtime_profile"), str)
+        or not journal["runtime_profile"].strip()
+    ):
+        raise RuntimeInstallError("transaction journal runtime profile is invalid")
+    if (
+        not isinstance(revisions, dict)
+        or set(revisions)
+        != {"xgameruntime_git_sha", "xodus_git_sha", "integration_git_sha"}
+        or not all(valid_digest(value, 40) for value in revisions.values())
+    ):
+        raise RuntimeInstallError("transaction journal source revisions are invalid")
+
+
 def validate_journal(journal: object, transaction: str) -> dict[str, Any]:
     if not isinstance(journal, dict):
         raise RuntimeInstallError("transaction journal must be a JSON object")
+    version = journal.get("version")
     if (
-        journal.get("version") != VERSION
+        version not in {1, VERSION}
         or journal.get("transaction_id") != transaction
         or journal.get("state") not in TRANSACTION_STATES
         or journal.get("recovery_operation")
@@ -868,12 +940,10 @@ def validate_journal(journal: object, transaction: str) -> dict[str, Any]:
     ):
         raise RuntimeInstallError("transaction journal header is invalid")
     revisions = journal.get("source_revisions")
-    if (
-        not isinstance(revisions, dict)
-        or set(revisions) != {"winegdk_git_sha", "xodus_git_sha", "integration_git_sha"}
-        or not all(valid_digest(value, 40) for value in revisions.values())
-    ):
-        raise RuntimeInstallError("transaction journal source revisions are invalid")
+    if version == 1:
+        validate_v1_journal_schema(journal, revisions)
+    else:
+        validate_v2_journal_schema(journal, revisions)
     roots = journal.get("roots")
     if (
         not isinstance(roots, dict)
@@ -1131,6 +1201,7 @@ def stage_transaction(
         "recovery_operation": None,
         "plan_sha256": plan_hash,
         "evidence_manifest_sha256": evidence_hash,
+        "runtime_profile": plan["runtime_profile"],
         "source_revisions": plan["source_revisions"],
         "roots": plan["roots"],
         "adopt_unmanaged": plan["adopt_unmanaged"],
@@ -1545,6 +1616,7 @@ def mutate_existing(arguments: argparse.Namespace, operation: str) -> None:
                 lambda journal: (
                     journal["state"] == "installed"
                     and journal["recovery_operation"] is None
+                    and journal["version"] == VERSION
                 ),
             )
         else:
@@ -1649,7 +1721,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--xgameruntime-build-dir",
         required=True,
-        type=absolute_argument("WineGDK build directory"),
+        type=absolute_argument("XGameRuntime build directory"),
     )
     parser.add_argument(
         "--xodus-build-dir",
