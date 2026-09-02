@@ -98,8 +98,7 @@ def test_readme_names_supported_and_unsupported_boundaries():
         "AppID 2440510",
         "legacy-v0.1",
         "3a26a6cba6623ff135a8acab0a2def347899d72b",
-        "Verified current: game launch",
-        "Retest required",
+        "Verified live matrix",
         "Rejected live experiment",
         "KDE Wallet",
         "Do not install GNOME Keyring",
@@ -112,17 +111,17 @@ def test_readme_names_supported_and_unsupported_boundaries():
     assert not missing
 
 
-def test_readme_top_status_marks_outgoing_social_as_retest_required():
+def test_readme_top_status_marks_outgoing_social_as_verified():
     readme = (ROOT / "README.md").read_text()
     status = readme.split("## Status and tested matrix", 1)[1].split(
         "## What this project does", 1
     )[0]
 
     assert (
-        "| Social | Outgoing Microsoft/Xbox invite and join are **RETEST REQUIRED** "
-        "through Xodus. |"
+        "| Social | Outgoing Microsoft/Xbox invite and join are **VERIFIED** "
+        "through Xodus on the tested system. |"
     ) in status
-    assert "invite and join are experimental" not in status
+    assert "RETEST REQUIRED" not in status
 
 
 def test_readme_rejects_the_newer_pair_as_an_installable_runtime():
@@ -276,6 +275,19 @@ def test_publication_manifest_classifies_every_required_claim():
     assert claims["game-launch"]["state"] == "verified"
     assert claims["incoming-invite-notifications"]["state"] == "rejected"
     assert all(claim["evidence"] for claim in claims.values())
+
+
+def test_live_validation_evidence_backs_every_required_claim():
+    data = load_publication_manifest()
+    required = [claim for claim in data["claims"] if claim["required"]]
+    evidence_path = "docs/evidence/v0.1-live-validation.md"
+
+    assert required
+    assert all(claim["state"] == "verified" for claim in required)
+    assert {claim["evidence"] for claim in required} == {evidence_path}
+    assert data["components"]["xgameruntime_legacy"]["state"] == "verified"
+    assert data["components"]["xgameruntime_legacy"]["evidence"] == evidence_path
+    assert (ROOT / evidence_path).is_file()
 
 
 def test_release_document_cannot_exist_with_required_unresolved_claims():

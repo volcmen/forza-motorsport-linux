@@ -11,13 +11,12 @@ The v0.1 installable profile is `legacy-v0.1`. It binds Xodus commit
 XGameRuntime generation and the repository's recoverable launcher and installer.
 The current evidence boundary is narrow:
 
-- **Verified current: game launch.** On 2026-09-02, the restored legacy pair
-  passed the logo and launched the game.
-- **Retest required.** Online content, controller behavior, AP702 absence,
-  invite/join flows, social-picker input, clean shutdown, and repeat launch all
-  require a fresh run against that same restored pair.
+- **Verified live matrix.** On 2026-09-02, the exact `legacy-v0.1` pair passed
+  two launches without a reboot, online profile/content, controller navigation,
+  driving and hotplug, AP702 absence, explicit Invite and Join actions,
+  keyboard/controller social-picker input, and clean per-session shutdown.
 - **Incoming invite notifications are not supported.** An explicitly opened
-  invite/join flow is a different capability and still requires retesting.
+  invite/join flow is a different capability.
 
 **Rejected live experiment:** WineGDK
 `d96a768e25f632b04a457e4cb9f585e89ef5d095` with Xodus
@@ -32,7 +31,7 @@ profile.
 | Diagnostics | Reports readiness without changing Steam, credentials, or systemd state. |
 | Patches | Only reviewed controller/mountmgr hashes, with backups and restoration. |
 | Install | User-local and runtime-component transactions are manifest-backed, recoverable, and never enable the service. |
-| Social | Outgoing Microsoft/Xbox invite and join are **RETEST REQUIRED** through Xodus. |
+| Social | Outgoing Microsoft/Xbox invite and join are **VERIFIED** through Xodus on the tested system. |
 
 ## What this project does
 
@@ -161,10 +160,11 @@ Steam invokes the generated line, which runs `forza-linux` around Steam's game c
 
 ## Invite/join workflow
 
-Outgoing Microsoft/Xbox invite and join are **RETEST REQUIRED** through the
-legacy v0.1 pair. They require a successful game session and are not a promised
-feature. **Incoming invite notifications are not supported.** Steam invites are
-not a replacement for Microsoft/Xbox invites.
+Outgoing Microsoft/Xbox invite and join are **VERIFIED** through the exact
+legacy v0.1 pair on the tested system. They require a successful game session
+and an explicitly opened social picker; this is not a general compatibility
+promise. **Incoming invite notifications are not supported.** Steam invites
+are not a replacement for Microsoft/Xbox invites.
 
 The newer WineGDK/Xodus social bridge is source-only experimental evidence. Its
 local activation-delivery design does not make it part of v0.1, and its green

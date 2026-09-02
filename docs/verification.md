@@ -22,21 +22,23 @@ The tests use only synthetic patch bytes and temporary roots. A passing gate pro
 
 ## Current manual evidence
 
-The table below is the current live-claim boundary for the restored
-`legacy-v0.1` pair. Automated and hermetic green results do not upgrade a row.
+The table below records the human-observed live matrix for the exact
+`legacy-v0.1` revisions and artifact hashes in
+[`v0.1-live-validation.md`](evidence/v0.1-live-validation.md). Automated and
+hermetic green results alone do not upgrade a row.
 
 | Claim | Current status |
 | --- | --- |
 | Game launch past the logo | **VERIFIED CURRENT** |
-| Online profile and content download | **RETEST REQUIRED** |
-| Controller navigation and driving | **RETEST REQUIRED** |
-| Controller disconnect and reconnect | **RETEST REQUIRED** |
-| AP702 absent | **RETEST REQUIRED** |
-| Linux-to-Windows Xbox invite | **RETEST REQUIRED** |
-| Linux join to a Windows player's published activity | **RETEST REQUIRED** |
-| Keyboard and controller operation in the social picker | **RETEST REQUIRED** |
-| Clean Xodus and socket shutdown after game exit | **RETEST REQUIRED** |
-| Second launch without a system reboot | **RETEST REQUIRED** |
+| Online profile and content download | **VERIFIED CURRENT** |
+| Controller navigation and driving | **VERIFIED CURRENT** |
+| Controller disconnect and reconnect | **VERIFIED CURRENT** |
+| AP702 absent | **VERIFIED CURRENT** |
+| Linux-to-Windows Xbox invite | **VERIFIED CURRENT** |
+| Linux join to a Windows player's published activity | **VERIFIED CURRENT** |
+| Keyboard and controller operation in the social picker | **VERIFIED CURRENT** |
+| Clean Xodus and socket shutdown after game exit | **VERIFIED CURRENT** |
+| Second launch without a system reboot | **VERIFIED CURRENT** |
 | Automatic incoming invite notifications | **NOT SUPPORTED** |
 
 The newer WineGDK `d96a768e25f632b04a457e4cb9f585e89ef5d095` and Xodus
@@ -73,8 +75,8 @@ compiled Wine artifacts.
 
 | Source branch | Final local commit | Compile/link | Wine PE runtime | Live/manual |
 | --- | --- | --- | --- | --- |
-| [`fix/wgi-physical-nonroamable-id`](../patches/wine-controller/README.md) | `ddd302d97c6008d79ea4f3e3ad56014cb548e514` | **GREEN** | **BLOCKED before test dispatch** | Controller/Forza matrix **RETEST REQUIRED** |
-| [`fix/storage-trim-property`](../patches/wine-storage-trim/README.md) | `a7719bd8d0719e5ea6061387db020fa6a6b39d27` | **GREEN** | **BLOCKED before test dispatch** | Installation and Forza/AP702 A/B **RETEST REQUIRED** |
+| [`fix/wgi-physical-nonroamable-id`](../patches/wine-controller/README.md) | `ddd302d97c6008d79ea4f3e3ad56014cb548e514` | **GREEN** | **BLOCKED before test dispatch** | Controller behavior **VERIFIED** through the reviewed exact-build fallback; this source branch was not installed. |
+| [`fix/storage-trim-property`](../patches/wine-storage-trim/README.md) | `a7719bd8d0719e5ea6061387db020fa6a6b39d27` | **GREEN** | **BLOCKED before test dispatch** | AP702 absence **VERIFIED** through the reviewed exact-build fallback; this source branch was not installed. |
 
 Both focused PE test commands stopped during canonical Wine bootstrap with
 `secur32.dll` initialization failure and `kernel32.dll` status `c0000135`,
@@ -258,6 +260,20 @@ only an activation URI already accepted and published by trusted Xodus UI.
 
 ## Recoverable runtime-component source gate
 
-`scripts/install-runtime-components` is source-ready but has not yet been run against the live compatibility tool. Its targeted temporary-filesystem suite has 97 passing cases. The parameterized matrix force-exits the process after every stage, backup, publication, full-rollback, and Wine-only restoration rename, then proves that the correct operation resumes. Additional cases cover the recovery-aware launcher as the first ordered role, all ten artifacts and eleven journal records, exact clean integration, legacy XGameRuntime, and legacy Xodus revisions and evidence binding for `legacy-v0.1`, read-only planning, plan digest and root binding, explicit adoption and exact restoration of a legacy unmanaged installation, refusal to adopt a damaged managed installation, no-follow source rejection, source and installed drift, all-before-any destination revalidation, absent-original restoration, unexpected-file preservation, launcher-lock exclusion, active-service refusal, systemd reload failure and recovery, accepted ownership-manifest compatibility, and ordinary uninstall.
+`scripts/install-runtime-components` completed a digest-bound live transaction
+for the exact `legacy-v0.1` revisions, and the transaction was accepted only
+after the two-launch manual matrix and lifecycle cleanup passed. Its targeted
+temporary-filesystem suite has 97 passing cases. The parameterized matrix
+force-exits the process after every stage, backup, publication, full-rollback,
+and Wine-only restoration rename, then proves that the correct operation
+resumes. Additional cases cover the recovery-aware launcher as the first
+ordered role, all ten artifacts and eleven journal records, exact clean integration, legacy XGameRuntime, and legacy Xodus revisions and evidence
+binding for `legacy-v0.1`, read-only planning, plan digest and root binding,
+explicit adoption and exact restoration of a legacy unmanaged installation,
+refusal to adopt a damaged managed installation, no-follow source rejection,
+source and installed drift, all-before-any destination revalidation,
+absent-original restoration, unexpected-file preservation, launcher-lock
+exclusion, active-service refusal, systemd reload failure and recovery,
+accepted ownership-manifest compatibility, and ordinary uninstall.
 
 The launcher has 34 passing behavior cases, including refusal before service start for every unfinished runtime state, malformed private journals, and removal of an orphaned non-listening socket only after exact owned-service cleanup. `installed` remains intentionally launchable so the manual game matrix can run before `accept`. These are synthetic source gates only: no compatibility-tool file, prefix file, service, keychain, Steam option, account, or game process is changed by the tests.

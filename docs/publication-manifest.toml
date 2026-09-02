@@ -9,11 +9,11 @@ revision = "3a26a6cba6623ff135a8acab0a2def347899d72b"
 evidence = "docs/evidence/v0.1-xodus.md"
 
 [components.xgameruntime_legacy]
-state = "experimental"
+state = "verified"
 base_revision = "a6e6199f81aeb8a96e8ff281e781f5eba2146fe7"
 parity_revision = "04a4551646273c68e35f8d1712eb547eaf162692"
 revision = "a1548b1cf57371715d10b608bc81a77a188e40d4"
-evidence = "docs/evidence/v0.1-xgameruntime.md"
+evidence = "docs/evidence/v0.1-live-validation.md"
 
 [components.wine_controller]
 state = "experimental"
@@ -85,61 +85,61 @@ distributed = false
 id = "game-launch"
 state = "verified"
 required = true
-evidence = "manual-user-confirmation-2026-09-02"
+evidence = "docs/evidence/v0.1-live-validation.md"
 
 [[claims]]
 id = "online-profile-content"
-state = "unresolved"
+state = "verified"
 required = true
-evidence = "current-restored-pair-retest-required"
+evidence = "docs/evidence/v0.1-live-validation.md"
 
 [[claims]]
 id = "controller-navigation-driving"
-state = "unresolved"
+state = "verified"
 required = true
-evidence = "current-restored-pair-retest-required"
+evidence = "docs/evidence/v0.1-live-validation.md"
 
 [[claims]]
 id = "controller-hotplug"
-state = "unresolved"
+state = "verified"
 required = true
-evidence = "current-restored-pair-retest-required"
+evidence = "docs/evidence/v0.1-live-validation.md"
 
 [[claims]]
 id = "ap702-absent"
-state = "unresolved"
+state = "verified"
 required = true
-evidence = "current-restored-pair-retest-required"
+evidence = "docs/evidence/v0.1-live-validation.md"
 
 [[claims]]
 id = "linux-to-windows-invite"
-state = "unresolved"
+state = "verified"
 required = true
-evidence = "current-restored-pair-retest-required"
+evidence = "docs/evidence/v0.1-live-validation.md"
 
 [[claims]]
 id = "linux-join-windows-activity"
-state = "unresolved"
+state = "verified"
 required = true
-evidence = "current-restored-pair-retest-required"
+evidence = "docs/evidence/v0.1-live-validation.md"
 
 [[claims]]
 id = "social-ui-keyboard-controller"
-state = "unresolved"
+state = "verified"
 required = true
-evidence = "current-restored-pair-retest-required"
+evidence = "docs/evidence/v0.1-live-validation.md"
 
 [[claims]]
 id = "xodus-clean-shutdown"
-state = "unresolved"
+state = "verified"
 required = true
-evidence = "current-restored-pair-retest-required"
+evidence = "docs/evidence/v0.1-live-validation.md"
 
 [[claims]]
 id = "repeat-launch-no-reboot"
-state = "unresolved"
+state = "verified"
 required = true
-evidence = "current-restored-pair-retest-required"
+evidence = "docs/evidence/v0.1-live-validation.md"
 
 [[claims]]
 id = "incoming-invite-notifications"
