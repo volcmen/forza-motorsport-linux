@@ -11,7 +11,8 @@ evidence = "docs/evidence/v0.1-xodus.md"
 [components.xgameruntime_legacy]
 state = "experimental"
 base_revision = "a6e6199f81aeb8a96e8ff281e781f5eba2146fe7"
-revision = "9ca4f07d828cc36566a980bf33d35d3f6739c4f0"
+parity_revision = "9ca4f07d828cc36566a980bf33d35d3f6739c4f0"
+revision = "36913a67441546a4cf7ba458a73674dbafc090c0"
 evidence = "docs/evidence/v0.1-xgameruntime.md"
 
 [components.wine_controller]
@@ -68,6 +69,16 @@ distributed = false
 [[artifacts]]
 name = "xgameruntime.so"
 sha256 = "89b071b69b16c880816ff2287203cf3d4b27bec8c6fe4f85ab7f4415ccba82d5"
+distributed = false
+
+[[artifacts]]
+name = "xgameruntime.dll-clean-build"
+sha256 = "7f8db913fc17c29b458f2d5c434e22058f797bfd16c8d2cadc1d332ecc577a2a"
+distributed = false
+
+[[artifacts]]
+name = "xgameruntime.so-clean-build"
+sha256 = "a76562d1da66f75b77ebbd2805a307d198c4a77e432f9b6948f637290a8da671"
 distributed = false
 
 [[claims]]

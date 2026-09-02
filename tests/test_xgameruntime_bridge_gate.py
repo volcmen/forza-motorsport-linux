@@ -69,3 +69,22 @@ def test_legacy_transport_fixture_is_synthetic_and_uses_fixed_call_indexes():
 
     assert all(marker in fixture for marker in required)
     assert all(marker not in fixture for marker in forbidden)
+
+
+def test_legacy_source_policy_covers_invite_privacy_queue_and_interface_contracts():
+    policy = (ROOT / "tools/check-xgameruntime-legacy-source.py").read_text()
+
+    required = [
+        "activation URI appears in a log call",
+        "invite/session data appears in a log call",
+        "interface IXGameUiImpl2 : IXGameUiImpl",
+        "interface methods must not be standalone exports",
+        "XTaskQueueDispatchMode_Manual",
+        "XTaskQueueDuplicateHandle",
+        "invite_received_delayed",
+        "invite_received_self_unregister",
+        "wait=TRUE returned while a callback was in flight",
+        "slot reuse returned an invalid or repeated token",
+    ]
+
+    assert all(marker in policy for marker in required)
