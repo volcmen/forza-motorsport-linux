@@ -1,8 +1,12 @@
 # Forza Motorsport on Linux: Publication and Upstream Design
 
 Date: 2026-08-31
-Status: Approved in chat; awaiting written-spec review
+Status: Superseded by `2026-09-02-forza-v0.1-publication-design.md`
 Owner: volcmen
+
+This document is retained as design history. The 2026-09-02 design controls
+release status, provenance, verification, and publication sequencing wherever
+the two documents differ.
 
 ## Purpose
 
