@@ -26,6 +26,15 @@ def load_publication_manifest():
     return tomllib.loads(PUBLICATION_MANIFEST.read_text(encoding="utf-8"))
 
 
+def test_publication_manifest_pins_working_legacy_xodus():
+    component = load_publication_manifest()["components"]["xodus_legacy"]
+    assert component == {
+        "state": "verified",
+        "revision": "23da0ab8323a1631ba2aacb069a06af22b8a20ac",
+        "evidence": "docs/evidence/v0.1-xodus.md",
+    }
+
+
 def _is_prohibited_binary(path):
     if path.suffix.lower() in FORBIDDEN_SUFFIXES:
         return True

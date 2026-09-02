@@ -6,6 +6,7 @@ integration_binding = "immutable-tag"
 [components.xodus_legacy]
 state = "verified"
 revision = "23da0ab8323a1631ba2aacb069a06af22b8a20ac"
+evidence = "docs/evidence/v0.1-xodus.md"
 
 [components.xgameruntime_legacy]
 state = "unresolved"
@@ -41,6 +42,21 @@ distributed = false
 [[artifacts]]
 name = "xodus-overlay"
 sha256 = "bcbbd6fcdb204b656332fe50678e12e8a886c741136c90a6c02fe9fc8aeb7ac7"
+distributed = false
+
+[[artifacts]]
+name = "xodus-service-clean-build"
+sha256 = "d8f6c15ec55c81ec6b48ec3572939b7774f23ff53baa862ce60969d06b02c643"
+distributed = false
+
+[[artifacts]]
+name = "xodus-cli-clean-build"
+sha256 = "6868c58cab507ec05c766a25dc94f982690ea82bac8529c8e0a6df4cb35316b1"
+distributed = false
+
+[[artifacts]]
+name = "xodus-overlay-clean-build"
+sha256 = "85c1c2d9a744b05102507f541ed27dab6bb45ea1957e5f3f51ae243f9dd431cd"
 distributed = false
 
 [[artifacts]]
