@@ -202,8 +202,33 @@ try:
                     journal = json.load(stream)
             finally:
                 os.close(journal_fd)
-            if journal.get("version") != 1 or journal.get("transaction_id") != transaction:
+            version = journal.get("version")
+            if (
+                type(version) is not int
+                or version not in {1, 2}
+                or journal.get("transaction_id") != transaction
+            ):
                 raise RuntimeError("runtime transaction journal identity mismatch")
+            if version == 2:
+                revisions = journal.get("source_revisions")
+                if (
+                    not isinstance(journal.get("runtime_profile"), str)
+                    or not journal["runtime_profile"].strip()
+                    or not isinstance(revisions, dict)
+                    or set(revisions)
+                    != {
+                        "xgameruntime_git_sha",
+                        "xodus_git_sha",
+                        "integration_git_sha",
+                    }
+                    or not all(
+                        isinstance(value, str)
+                        and len(value) == 40
+                        and all(character in "0123456789abcdef" for character in value)
+                        for value in revisions.values()
+                    )
+                ):
+                    raise RuntimeError("runtime transaction journal v2 schema is invalid")
             state = journal.get("state")
             if state not in known_states:
                 raise RuntimeError("runtime transaction journal has an unknown state")

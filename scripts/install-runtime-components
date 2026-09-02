@@ -393,7 +393,8 @@ def reviewed_runtime_profile(integration_root: Path) -> tuple[str, str, str]:
         raise RuntimeInstallError("runtime profile manifest is invalid") from error
     profiles = data.get("profiles")
     if (
-        data.get("version") != 1
+        type(data.get("version")) is not int
+        or data["version"] != 1
         or not isinstance(profiles, dict)
         or data.get("active") not in profiles
     ):
@@ -575,7 +576,11 @@ def lock_evidence(arguments: argparse.Namespace) -> None:
 
 
 def validate_evidence(value: object) -> dict[str, Any]:
-    if not isinstance(value, dict) or value.get("version") != EVIDENCE_VERSION:
+    if (
+        not isinstance(value, dict)
+        or type(value.get("version")) is not int
+        or value["version"] != EVIDENCE_VERSION
+    ):
         raise RuntimeInstallError("artifact evidence manifest version mismatch")
     revisions = value.get("source_revisions")
     if (
@@ -809,6 +814,13 @@ def build_plan(
 
 
 def print_plan(plan: dict[str, Any], plan_hash: str) -> None:
+    print(f"PLAN runtime profile: {plan['runtime_profile']}")
+    for revision in (
+        "xgameruntime_git_sha",
+        "xodus_git_sha",
+        "integration_git_sha",
+    ):
+        print(f"PLAN source revision {revision}={plan['source_revisions'][revision]}")
     print(
         "PLAN user ownership: "
         + (
@@ -928,7 +940,8 @@ def validate_journal(journal: object, transaction: str) -> dict[str, Any]:
         raise RuntimeInstallError("transaction journal must be a JSON object")
     version = journal.get("version")
     if (
-        version not in {1, VERSION}
+        type(version) is not int
+        or version not in {1, VERSION}
         or journal.get("transaction_id") != transaction
         or journal.get("state") not in TRANSACTION_STATES
         or journal.get("recovery_operation")

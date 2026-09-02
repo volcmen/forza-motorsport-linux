@@ -125,6 +125,29 @@ def test_reviewed_runtime_profile_rejects_invalid_manifest(
         installer_module().reviewed_runtime_profile(integration)
 
 
+@pytest.mark.parametrize("version", ("true", "1.0"))
+def test_reviewed_runtime_profile_rejects_non_integer_version(
+    tmp_path: Path, version: str
+):
+    integration = tmp_path / "integration"
+    profile = integration / "manifests/runtime-profiles.toml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        f"""version = {version}
+active = "legacy-v0.1"
+
+[profiles."legacy-v0.1"]
+status = "candidate"
+xgameruntime_revision = "1111111111111111111111111111111111111111"
+xodus_revision = "2222222222222222222222222222222222222222"
+""",
+        encoding="ascii",
+    )
+
+    with pytest.raises(RuntimeError, match="manifest is invalid"):
+        installer_module().reviewed_runtime_profile(integration)
+
+
 def test_missing_runtime_profile_fails_before_destinations_change(tmp_path: Path):
     fixture = setup_fixture(tmp_path)
     before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
@@ -199,6 +222,27 @@ def test_v1_evidence_cannot_create_a_new_plan_or_install(tmp_path: Path):
     assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
 
 
+@pytest.mark.parametrize("version", (True, 2.0))
+def test_evidence_rejects_non_integer_version_before_destinations_change(
+    tmp_path: Path, version: bool | float
+):
+    fixture = setup_fixture(tmp_path)
+    run_tool(fixture, "lock-evidence")
+    evidence: Path = fixture["evidence"]  # type: ignore[assignment]
+    value = json.loads(evidence.read_text())
+    value["version"] = version
+    evidence.write_text(json.dumps(value), encoding="ascii")
+    evidence.chmod(0o600)
+    before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
+    before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
+
+    failed = run_tool(fixture, "plan", check=False)
+
+    assert failed.returncode != 0
+    assert "version mismatch" in failed.stderr.lower()
+    assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
+
+
 def test_v1_journal_status_and_interrupted_rollback_remain_supported(
     tmp_path: Path,
 ):
@@ -260,6 +304,34 @@ def test_accept_rejects_a_v1_journal(tmp_path: Path):
     assert json.loads(journal_path.read_text())["version"] == 1
 
 
+@pytest.mark.parametrize("version", (True, 2.0))
+def test_journal_rejects_non_integer_version(tmp_path: Path, version: bool | float):
+    del tmp_path
+    module = installer_module()
+    journal = json.loads(json.dumps(valid_v2_journal(module, version)))
+
+    with pytest.raises(RuntimeError, match="journal header is invalid"):
+        module.validate_journal(journal, "a" * 24)
+
+
+def test_plan_prints_profile_and_reviewed_source_revisions(tmp_path: Path):
+    fixture = setup_fixture(tmp_path)
+    run_tool(fixture, "lock-evidence")
+
+    output = run_tool(fixture, "plan").stdout.splitlines()
+
+    assert output[:5] == [
+        "PLAN runtime profile: fixture",
+        "PLAN source revision xgameruntime_git_sha="
+        + fixture["env"]["FORZA_RUNTIME_EXPECTED_XGAMERUNTIME_SHA"],  # type: ignore[index]
+        "PLAN source revision xodus_git_sha="
+        + fixture["env"]["FORZA_RUNTIME_EXPECTED_XODUS_SHA"],  # type: ignore[index]
+        "PLAN source revision integration_git_sha="
+        + fixture["integration_sha"],  # type: ignore[operator]
+        "PLAN user ownership: require managed or empty destinations",
+    ]
+
+
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -271,6 +343,55 @@ def installer_module():
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+def valid_v2_journal(module, version: bool | float) -> dict[str, object]:
+    transaction = "a" * 24
+    artifacts = []
+    for role in module.INSTALL_ORDER:
+        contract = module.ROLES.get(
+            role,
+            {
+                "destination_root": "user",
+                "destination_relative": module.INSTALL_MANIFEST,
+                "target_mode": module.MANIFEST_MODE,
+            },
+        )
+        target_mode = contract["target_mode"]
+        artifacts.append(
+            {
+                "role": role,
+                "destination_root": contract["destination_root"],
+                "destination_relative": contract["destination_relative"],
+                "target_mode": target_mode,
+                "installed_mode": target_mode,
+                "source_sha256": "0" * 64,
+                "installed_sha256": "0" * 64,
+                "phase": "installed",
+                "before": {"present": False},
+                "stage_name": f".forza-runtime-{transaction}-{role}.stage",
+                "backup_name": f".forza-runtime-{transaction}-{role}.backup",
+                "recovery_name": f".forza-runtime-{transaction}-{role}.recovery",
+            }
+        )
+    return {
+        "version": version,
+        "transaction_id": transaction,
+        "state": "installed",
+        "recovery_operation": None,
+        "plan_sha256": "0" * 64,
+        "evidence_manifest_sha256": "1" * 64,
+        "runtime_profile": "fixture",
+        "source_revisions": {
+            "xgameruntime_git_sha": "2" * 40,
+            "xodus_git_sha": "3" * 40,
+            "integration_git_sha": "4" * 40,
+        },
+        "roots": {"compat-tool": "/compat", "user": "/user"},
+        "adopt_unmanaged": False,
+        "user_manager_reload_required": False,
+        "artifacts": artifacts,
+    }
 
 
 def git(repo: Path, *arguments: str) -> str:

@@ -285,6 +285,27 @@ write_runtime_transaction() {
     chmod 600 -- "$root/$transaction/journal.json"
 }
 
+write_v2_runtime_transaction() {
+    local state=$1
+    local root="$FORZA_RUNTIME_TEST_USER_ROOT/.local/state/forza-motorsport-linux/runtime-transactions"
+    local transaction=aaaaaaaaaaaaaaaaaaaaaaaa
+    mkdir -p -- "$root/$transaction"
+    chmod 700 -- "$root" "$root/$transaction"
+    printf '{"version":2,"transaction_id":"%s","state":"%s","runtime_profile":"fixture","source_revisions":{"xgameruntime_git_sha":"1111111111111111111111111111111111111111","xodus_git_sha":"2222222222222222222222222222222222222222","integration_git_sha":"3333333333333333333333333333333333333333"}}\n' \
+        "$transaction" "$state" >"$root/$transaction/journal.json"
+    chmod 600 -- "$root/$transaction/journal.json"
+}
+
+write_runtime_journal() {
+    local journal=$1
+    local root="$FORZA_RUNTIME_TEST_USER_ROOT/.local/state/forza-motorsport-linux/runtime-transactions"
+    local transaction=aaaaaaaaaaaaaaaaaaaaaaaa
+    mkdir -p -- "$root/$transaction"
+    chmod 700 -- "$root" "$root/$transaction"
+    printf '%s\n' "$journal" >"$root/$transaction/journal.json"
+    chmod 600 -- "$root/$transaction/journal.json"
+}
+
 tear_down() {
     local pid
     for pid in "${SOCKET_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
@@ -383,6 +404,52 @@ test_allows_an_installed_runtime_transaction_for_manual_validation() {
     run_launcher /usr/bin/true
     assert_eq "$status" 0 || return 1
     assert_log_contains 'start xodus-forza.service'
+}
+
+test_allows_v2_terminal_runtime_transactions_for_manual_validation() {
+    local transaction_state
+    for transaction_state in installed accepted rolled_back runtime_restored; do
+        write_v2_runtime_transaction "$transaction_state"
+        run_launcher /usr/bin/true
+        assert_eq "$status" 0 || return 1
+        assert_log_contains 'start xodus-forza.service' || return 1
+        tear_down
+        set_up
+    done
+}
+
+test_refuses_v2_unfinished_runtime_transactions_before_service_start() {
+    local transaction_state
+    for transaction_state in prepared installing rolling_back recovery_required; do
+        write_v2_runtime_transaction "$transaction_state"
+        run_launcher_capturing_stderr /usr/bin/true
+        assert_eq "$status" 1 || return 1
+        assert_contains "$output" "requires recovery ($transaction_state)" || return 1
+        assert_log_not_contains 'start xodus-forza.service' || return 1
+        tear_down
+        set_up
+    done
+}
+
+test_refuses_malformed_v2_runtime_transactions_before_service_start() {
+    local transaction=aaaaaaaaaaaaaaaaaaaaaaaa
+    local valid_revisions='{"xgameruntime_git_sha":"1111111111111111111111111111111111111111","xodus_git_sha":"2222222222222222222222222222222222222222","integration_git_sha":"3333333333333333333333333333333333333333"}'
+    local malformed
+    for malformed in \
+        "{\"version\":2,\"transaction_id\":\"$transaction\",\"state\":\"installed\",\"source_revisions\":$valid_revisions}" \
+        "{\"version\":2,\"transaction_id\":\"$transaction\",\"state\":\"installed\",\"runtime_profile\":\"\",\"source_revisions\":$valid_revisions}" \
+        "{\"version\":2,\"transaction_id\":\"$transaction\",\"state\":\"installed\",\"runtime_profile\":\"fixture\",\"source_revisions\":{\"xgameruntime_git_sha\":\"invalid\",\"xodus_git_sha\":\"2222222222222222222222222222222222222222\",\"integration_git_sha\":\"3333333333333333333333333333333333333333\"}}" \
+        "{\"version\":2,\"transaction_id\":\"$transaction\",\"state\":\"installed\",\"runtime_profile\":\"fixture\",\"source_revisions\":{\"xgameruntime_git_sha\":\"1111111111111111111111111111111111111111\",\"xodus_git_sha\":\"2222222222222222222222222222222222222222\",\"integration_git_sha\":\"3333333333333333333333333333333333333333\",\"extra\":\"4444444444444444444444444444444444444444\"}}" \
+        "{\"version\":2.0,\"transaction_id\":\"$transaction\",\"state\":\"installed\",\"runtime_profile\":\"fixture\",\"source_revisions\":$valid_revisions}" \
+        "{\"version\":true,\"transaction_id\":\"$transaction\",\"state\":\"installed\",\"runtime_profile\":\"fixture\",\"source_revisions\":$valid_revisions}"; do
+        write_runtime_journal "$malformed"
+        run_launcher_capturing_stderr /usr/bin/true
+        assert_eq "$status" 1 || return 1
+        assert_contains "$output" 'cannot validate runtime transaction state' || return 1
+        assert_log_not_contains 'start xodus-forza.service' || return 1
+        tear_down
+        set_up
+    done
 }
 
 test_refuses_a_malformed_runtime_transaction_before_service_start() {
@@ -749,6 +816,9 @@ for test_name in \
     test_rejects_missing_game_command \
     test_refuses_every_unfinished_runtime_transaction_state \
     test_allows_an_installed_runtime_transaction_for_manual_validation \
+    test_allows_v2_terminal_runtime_transactions_for_manual_validation \
+    test_refuses_v2_unfinished_runtime_transactions_before_service_start \
+    test_refuses_malformed_v2_runtime_transactions_before_service_start \
     test_refuses_a_malformed_runtime_transaction_before_service_start \
     test_starts_and_stops_service_it_owns \
     test_owned_service_cleanup_removes_an_orphaned_socket \
