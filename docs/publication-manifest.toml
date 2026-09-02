@@ -73,7 +73,7 @@ distributed = false
 
 [[artifacts]]
 name = "xgameruntime.dll-clean-build"
-sha256 = "7f8db913fc17c29b458f2d5c434e22058f797bfd16c8d2cadc1d332ecc577a2a"
+sha256 = "208f5970e14160b6426c7eee849659a210a9f0ee92d5cac96a39a828f82b1570"
 distributed = false
 
 [[artifacts]]
