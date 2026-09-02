@@ -30,7 +30,7 @@ def test_publication_manifest_pins_working_legacy_xodus():
     component = load_publication_manifest()["components"]["xodus_legacy"]
     assert component == {
         "state": "verified",
-        "revision": "76cab7667119efc04938b1128a107c22dec613ca",
+        "revision": "45dc65b241ce279a3997b5677704bc022324f238",
         "evidence": "docs/evidence/v0.1-xodus.md",
     }
 
@@ -74,7 +74,7 @@ def test_readme_names_supported_and_unsupported_boundaries():
         "Experimental",
         "AppID 2440510",
         "legacy-v0.1",
-        "76cab7667119efc04938b1128a107c22dec613ca",
+        "45dc65b241ce279a3997b5677704bc022324f238",
         "Verified current: game launch",
         "Retest required",
         "Rejected live experiment",

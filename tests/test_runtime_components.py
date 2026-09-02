@@ -63,7 +63,7 @@ def test_runtime_profile_manifest_selects_legacy_v0_1():
 
     assert data["version"] == 1
     assert data["active"] == "legacy-v0.1"
-    assert profile["xodus_revision"] == "76cab7667119efc04938b1128a107c22dec613ca"
+    assert profile["xodus_revision"] == "45dc65b241ce279a3997b5677704bc022324f238"
     assert len(profile["xgameruntime_revision"]) == 40
     assert profile["status"] == "candidate"
 
