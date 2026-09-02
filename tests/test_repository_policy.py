@@ -30,9 +30,32 @@ def test_publication_manifest_pins_working_legacy_xodus():
     component = load_publication_manifest()["components"]["xodus_legacy"]
     assert component == {
         "state": "verified",
-        "revision": "45dc65b241ce279a3997b5677704bc022324f238",
+        "revision": "4bc5db01571065c74eaecca095e78281ea11fdd3",
         "evidence": "docs/evidence/v0.1-xodus.md",
     }
+
+
+def test_publication_manifest_pins_reviewed_clean_builds():
+    artifacts = {
+        artifact["name"]: artifact["sha256"]
+        for artifact in load_publication_manifest()["artifacts"]
+    }
+
+    assert artifacts["xodus-service-clean-build"] == (
+        "07ffad8fea3dd66e8351b6b5b004e35b565e6f7f10ce9cbc537dcbd7b172c674"
+    )
+    assert artifacts["xodus-cli-clean-build"] == (
+        "dfe2a638e7e6edeeca00d344f429395ec84a3d3c8a762a268c5ea753c6e28049"
+    )
+    assert artifacts["xodus-overlay-clean-build"] == (
+        "3227377e92b84326c1b4686b5d0fcf129ee0c6dc92645b87c9c0f9fc06514de7"
+    )
+    assert artifacts["xgameruntime.dll-clean-build"] == (
+        "c510d0e6c1db38af636f097fb000a90c578ca1a2bebd93d0ee939e95dd587d38"
+    )
+    assert artifacts["xgameruntime.so-clean-build"] == (
+        "251f392cab1feacf2b23be051fa2ae53f056484bc8bf8e7a6c33de3717fe28b9"
+    )
 
 
 def _is_prohibited_binary(path):
@@ -74,7 +97,7 @@ def test_readme_names_supported_and_unsupported_boundaries():
         "Experimental",
         "AppID 2440510",
         "legacy-v0.1",
-        "45dc65b241ce279a3997b5677704bc022324f238",
+        "4bc5db01571065c74eaecca095e78281ea11fdd3",
         "Verified current: game launch",
         "Retest required",
         "Rejected live experiment",

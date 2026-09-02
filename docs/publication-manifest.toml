@@ -5,7 +5,7 @@ integration_binding = "immutable-tag"
 
 [components.xodus_legacy]
 state = "verified"
-revision = "45dc65b241ce279a3997b5677704bc022324f238"
+revision = "4bc5db01571065c74eaecca095e78281ea11fdd3"
 evidence = "docs/evidence/v0.1-xodus.md"
 
 [components.xgameruntime_legacy]
@@ -48,12 +48,12 @@ distributed = false
 
 [[artifacts]]
 name = "xodus-service-clean-build"
-sha256 = "2b7922dcd9dd52667b68387160c08ada9f638365c325f5b3b986e2d748982b7d"
+sha256 = "07ffad8fea3dd66e8351b6b5b004e35b565e6f7f10ce9cbc537dcbd7b172c674"
 distributed = false
 
 [[artifacts]]
 name = "xodus-cli-clean-build"
-sha256 = "67436f1cbdcddb7f2148b462a2f199f2563687b97ec94982e111f058b4324a46"
+sha256 = "dfe2a638e7e6edeeca00d344f429395ec84a3d3c8a762a268c5ea753c6e28049"
 distributed = false
 
 [[artifacts]]
@@ -73,12 +73,12 @@ distributed = false
 
 [[artifacts]]
 name = "xgameruntime.dll-clean-build"
-sha256 = "063f903c4bc9a8ef663773dbcef3a78cda47d5e5406f84a3de0057f67c504f75"
+sha256 = "c510d0e6c1db38af636f097fb000a90c578ca1a2bebd93d0ee939e95dd587d38"
 distributed = false
 
 [[artifacts]]
 name = "xgameruntime.so-clean-build"
-sha256 = "513f37c56f6f726f847352910546286a12cb0650cab4a3000b4d6c16985d2c70"
+sha256 = "251f392cab1feacf2b23be051fa2ae53f056484bc8bf8e7a6c33de3717fe28b9"
 distributed = false
 
 [[claims]]
