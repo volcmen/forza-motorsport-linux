@@ -12,7 +12,7 @@ evidence = "docs/evidence/v0.1-xodus.md"
 state = "experimental"
 base_revision = "a6e6199f81aeb8a96e8ff281e781f5eba2146fe7"
 parity_revision = "9ca4f07d828cc36566a980bf33d35d3f6739c4f0"
-revision = "36913a67441546a4cf7ba458a73674dbafc090c0"
+revision = "37915642dda7f05238063a155cf33c81e745c48a"
 evidence = "docs/evidence/v0.1-xgameruntime.md"
 
 [components.wine_controller]
@@ -73,12 +73,12 @@ distributed = false
 
 [[artifacts]]
 name = "xgameruntime.dll-clean-build"
-sha256 = "208f5970e14160b6426c7eee849659a210a9f0ee92d5cac96a39a828f82b1570"
+sha256 = "15a1c70affb479532f5b9846111d7dfc0c9ec6ef5e3504ee510c5fcb3d8b90a6"
 distributed = false
 
 [[artifacts]]
 name = "xgameruntime.so-clean-build"
-sha256 = "a76562d1da66f75b77ebbd2805a307d198c4a77e432f9b6948f637290a8da671"
+sha256 = "0456cae33d090691667b1185b5f0e41482515236e57a59a8e535874bf48d2f8b"
 distributed = false
 
 [[claims]]
