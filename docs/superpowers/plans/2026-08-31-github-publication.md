@@ -1,5 +1,9 @@
 # Forza Motorsport Linux GitHub Publication Implementation Plan
 
+> **Superseded — do not execute.** The approved v0.1 working-baseline plan is
+> `2026-09-02-forza-v0.1-publication.md`. This file is retained as design
+> history because it predates the live regression and legacy-pair restoration.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Publish the verified integration repository and component branches, request upstream review in the correct projects, and post an accurate compatibility update to Proton issue 7151.
