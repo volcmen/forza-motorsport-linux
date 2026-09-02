@@ -1530,6 +1530,10 @@ def mutate_existing(arguments: argparse.Namespace, operation: str) -> None:
                 lambda journal: (
                     journal["state"] in {"prepared", "installed", "installing"}
                     or (
+                        journal["state"] == "runtime_restored"
+                        and journal["recovery_operation"] == "restore-runtime"
+                    )
+                    or (
                         journal["state"] in {"rolling_back", "recovery_required"}
                         and journal["recovery_operation"] == "rollback"
                     )

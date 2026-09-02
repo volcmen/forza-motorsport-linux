@@ -531,6 +531,19 @@ def test_accept_then_restore_runtime_keeps_manifest_owned_xodus(tmp_path: Path):
     assert "state=runtime_restored" in run_tool(fixture, "status").stdout
 
 
+def test_full_rollback_after_runtime_restore_restores_original_install(tmp_path: Path):
+    fixture = setup_fixture(tmp_path)
+    plan_digest = lock_and_plan(fixture)
+    run_tool(fixture, "install", "--plan-sha256", plan_digest)
+    run_tool(fixture, "accept")
+    run_tool(fixture, "restore-runtime")
+
+    run_tool(fixture, "rollback")
+
+    assert_original_install_restored(fixture)
+    assert "state=rolled_back" in run_tool(fixture, "status").stdout
+
+
 def test_source_symlink_and_unsafe_mode_are_rejected(tmp_path: Path):
     fixture = setup_fixture(tmp_path)
     source = fixture["artifacts"]["xodus-overlay"][0]  # type: ignore[index]
