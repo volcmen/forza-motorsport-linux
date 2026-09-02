@@ -9,9 +9,10 @@ revision = "23da0ab8323a1631ba2aacb069a06af22b8a20ac"
 evidence = "docs/evidence/v0.1-xodus.md"
 
 [components.xgameruntime_legacy]
-state = "unresolved"
+state = "experimental"
 base_revision = "a6e6199f81aeb8a96e8ff281e781f5eba2146fe7"
-source_diff_sha256 = "223eb07e2bc58549befb54558fb4f6d24a5d9f1b87d3ae525d5bdc2cf72abd55"
+revision = "9ca4f07d828cc36566a980bf33d35d3f6739c4f0"
+evidence = "docs/evidence/v0.1-xgameruntime.md"
 
 [components.wine_controller]
 state = "experimental"

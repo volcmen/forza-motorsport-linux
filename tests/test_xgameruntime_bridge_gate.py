@@ -45,3 +45,27 @@ def test_transport_fixture_covers_private_socket_and_social_protocols():
         "invalid_network_response",
     ]
     assert all(marker in fixture for marker in required)
+
+
+def test_legacy_transport_fixture_is_synthetic_and_uses_fixed_call_indexes():
+    fixture = (
+        ROOT / "tools/xgameruntime-legacy-transport-test.py"
+    ).read_text().lower()
+
+    required = [
+        "invite_connect = 3",
+        "invite_poll = 4",
+        "invite_close = 5",
+        "social_ui = 6",
+        "0o600",
+        "xdsi",
+        "xdui",
+        "inviteaccept",
+        "max_invite_uri = 4096",
+        "fragment",
+        "connection refusal",
+    ]
+    forbidden = ["http://", "https://", "token", "xuid", "secretservice"]
+
+    assert all(marker in fixture for marker in required)
+    assert all(marker not in fixture for marker in forbidden)
