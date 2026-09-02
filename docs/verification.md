@@ -20,6 +20,30 @@ git diff --check
 
 The tests use only synthetic patch bytes and temporary roots. A passing gate proves repository contracts, not game compatibility, account authentication, online play, or invite delivery. CI runs the same `just verify` command and deliberately uploads no system information, runtime logs, or artifacts.
 
+## Current manual evidence
+
+The table below is the current live-claim boundary for the restored
+`legacy-v0.1` pair. Automated and hermetic green results do not upgrade a row.
+
+| Claim | Current status |
+| --- | --- |
+| Game launch past the logo | **VERIFIED CURRENT** |
+| Online profile and content download | **RETEST REQUIRED** |
+| Controller navigation and driving | **RETEST REQUIRED** |
+| Controller disconnect and reconnect | **RETEST REQUIRED** |
+| AP702 absent | **RETEST REQUIRED** |
+| Linux-to-Windows Xbox invite | **RETEST REQUIRED** |
+| Linux join to a Windows player's published activity | **RETEST REQUIRED** |
+| Keyboard and controller operation in the social picker | **RETEST REQUIRED** |
+| Clean Xodus and socket shutdown after game exit | **RETEST REQUIRED** |
+| Second launch without a system reboot | **RETEST REQUIRED** |
+| Automatic incoming invite notifications | **NOT SUPPORTED** |
+
+The newer WineGDK `ef069c85c8b3ee049971a9e22a317309b30bb09f` and Xodus
+`b76690da6ff59ace8981bf0428cd729fcd15673d` pair is **REJECTED LIVE**. Its
+hermetic source gates are not game-compatibility evidence and it is not the
+`legacy-v0.1` installable profile.
+
 ## Publication authority
 
 `docs/publication-manifest.toml` is the machine-readable publication authority.
@@ -49,8 +73,8 @@ compiled Wine artifacts.
 
 | Source branch | Final local commit | Compile/link | Wine PE runtime | Live/manual |
 | --- | --- | --- | --- | --- |
-| [`fix/wgi-physical-nonroamable-id`](../patches/wine-controller/README.md) | `ddd302d97c6008d79ea4f3e3ad56014cb548e514` | **GREEN** | **BLOCKED before test dispatch** | Controller/Forza matrix **NOT RUN** |
-| [`fix/storage-trim-property`](../patches/wine-storage-trim/README.md) | `a7719bd8d0719e5ea6061387db020fa6a6b39d27` | **GREEN** | **BLOCKED before test dispatch** | Installation and Forza/AP702 A/B **NOT RUN** |
+| [`fix/wgi-physical-nonroamable-id`](../patches/wine-controller/README.md) | `ddd302d97c6008d79ea4f3e3ad56014cb548e514` | **GREEN** | **BLOCKED before test dispatch** | Controller/Forza matrix **RETEST REQUIRED** |
+| [`fix/storage-trim-property`](../patches/wine-storage-trim/README.md) | `a7719bd8d0719e5ea6061387db020fa6a6b39d27` | **GREEN** | **BLOCKED before test dispatch** | Installation and Forza/AP702 A/B **RETEST REQUIRED** |
 
 Both focused PE test commands stopped during canonical Wine bootstrap with
 `secur32.dll` initialization failure and `kernel32.dll` status `c0000135`,
@@ -143,7 +167,6 @@ cargo test -p xodus-service --offline
 cargo test -p xodus-overlay --offline
 cargo test --workspace --offline -- --skip test_get_xbox_live_dev_token
 cargo build --release -p xodus-service -p xodus-cli -p xodus-overlay --offline
-rg -n 'Authorization:|XBL3\.0|ms-xbl-multiplayer://inviteAccept\?.+' docs crates || true
 git diff --check
 ```
 
@@ -190,12 +213,12 @@ connection string, or activation URI, is present in this evidence.
 
 | Check | Status |
 | --- | --- |
-| Keyboard navigation/action parity | **NOT RUN** |
-| Physical Xbox controller navigation/hotplug | **NOT RUN** |
-| Invite from a published Private Multiplayer lobby | **NOT RUN** |
-| Join a compatible remote activity | **NOT RUN** |
-| Deliberate cancellation | **NOT RUN** |
-| Peer disconnect/service shutdown cleanup | **NOT RUN** |
+| Keyboard navigation/action parity | **RETEST REQUIRED** |
+| Physical Xbox controller navigation/hotplug | **RETEST REQUIRED** |
+| Invite from a published Private Multiplayer lobby | **RETEST REQUIRED** |
+| Join a compatible remote activity | **RETEST REQUIRED** |
+| Deliberate cancellation | **RETEST REQUIRED** |
+| Peer disconnect/service shutdown cleanup | **RETEST REQUIRED** |
 | Automatic incoming invite notification | **NOT SUPPORTED** |
 
 The game-facing path still depends on the separately reviewed `xgameruntime`
@@ -205,10 +228,11 @@ compatibility prefix, Steam configuration, and game were not mutated or
 started. The branch remains local: it has not been pushed and no public pull
 request exists.
 
-## Local WineGDK XGameRuntime source gate
+## Rejected live WineGDK/Xodus source experiment
 
-WineGDK commit `ef069c85c8b3ee049971a9e22a317309b30bb09f` is the reviewed
-local source tip for the bounded Xodus transport, XGameUi invite-only flow,
+WineGDK commit `ef069c85c8b3ee049971a9e22a317309b30bb09f` and Xodus commit
+`b76690da6ff59ace8981bf0428cd729fcd15673d` form the rejected newer pair. The
+WineGDK source tip covers bounded Xodus transport, XGameUi invite-only flow,
 XGameInvite activation delivery, reference-counted runtime lifecycle, and
 runtime-owned WinRT initialization outside loader lock. It also serializes the
 MSA token-request field as the canonical `ClientId` expected by Xodus.
@@ -221,8 +245,9 @@ skip).
 See [`xgameruntime-baseline.md`](evidence/xgameruntime-baseline.md) for exact
 source revisions, per-matrix counts, artifact hashes, unload/state semantics,
 and isolation boundaries. This proves the source pair inside the hermetic
-GE-Proton overlay only. Installation, the licensed external threading backend,
-live Xodus/Microsoft behavior, and the manual Forza matrix remain outstanding.
+GE-Proton overlay only. It does not undo the **REJECTED LIVE** result.
+Installation, live Xodus/Microsoft behavior, and the manual Forza matrix remain
+outside that evidence.
 Unsolicited Xbox invite notification remains **NOT SUPPORTED**; XDSI carries
 only an activation URI already accepted and published by trusted Xodus UI.
 

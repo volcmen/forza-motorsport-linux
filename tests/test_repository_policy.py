@@ -70,15 +70,43 @@ def test_declared_licenses_exist():
 
 def test_readme_names_supported_and_unsupported_boundaries():
     readme = (ROOT / "README.md").read_text()
-    required = [
+    required = {
         "Experimental",
         "AppID 2440510",
+        "legacy-v0.1",
+        "23da0ab8323a1631ba2aacb069a06af22b8a20ac",
+        "Verified current: game launch",
+        "Retest required",
+        "Rejected live experiment",
         "KDE Wallet",
+        "Do not install GNOME Keyring",
         "Microsoft binaries are not distributed",
         "Incoming invite notifications are not supported",
+        "source-only",
         "Uninstall",
+    }
+    missing = {item for item in required if item not in readme}
+    assert not missing
+
+
+def test_readme_rejects_the_newer_pair_as_an_installable_runtime():
+    readme = (ROOT / "README.md").read_text()
+    newer_pair = (
+        "ef069c85c8b3ee049971a9e22a317309b30bb09f",
+        "b76690da6ff59ace8981bf0428cd729fcd15673d",
+    )
+    pair_boundaries = [
+        paragraph
+        for paragraph in readme.split("\n\n")
+        if all(revision in paragraph for revision in newer_pair)
     ]
-    assert all(item in readme for item in required)
+
+    assert pair_boundaries
+    assert all("REJECTED LIVE" in paragraph for paragraph in pair_boundaries)
+    assert all(
+        "reviewed installable pair" not in paragraph.lower()
+        for paragraph in pair_boundaries
+    )
 
 
 def test_verify_workflow_installs_just_before_running_the_gate():

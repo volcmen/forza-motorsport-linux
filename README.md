@@ -2,7 +2,29 @@
 
 ## Status and tested matrix
 
-**Experimental.** This project targets Steam **AppID 2440510** with the reviewed `GE-Proton11-3-FM` layout. Local tests cover launcher ownership, read-only diagnostics, exact-build patch transactions, and reversible user-local installation. They do not prove that every Linux system can launch, authenticate, play, or use multiplayer.
+**Experimental.** This source-only project targets the Steam edition of Forza
+Motorsport, **AppID 2440510**, with the reviewed `GE-Proton11-3-FM` layout. It
+is environment-specific integration work, not ordinary upstream Proton support.
+
+The v0.1 installable profile is `legacy-v0.1`. It binds Xodus commit
+`23da0ab8323a1631ba2aacb069a06af22b8a20ac` to the matching legacy
+XGameRuntime generation and the repository's recoverable launcher and installer.
+The current evidence boundary is narrow:
+
+- **Verified current: game launch.** On 2026-09-02, the restored legacy pair
+  passed the logo and launched the game.
+- **Retest required.** Online content, controller behavior, AP702 absence,
+  invite/join flows, social-picker input, clean shutdown, and repeat launch all
+  require a fresh run against that same restored pair.
+- **Incoming invite notifications are not supported.** An explicitly opened
+  invite/join flow is a different capability and still requires retesting.
+
+**Rejected live experiment:** WineGDK
+`ef069c85c8b3ee049971a9e22a317309b30bb09f` with Xodus
+`b76690da6ff59ace8981bf0428cd729fcd15673d` is **REJECTED LIVE**. Its hermetic
+source tests remain useful, but the pair produced protocol rejection, flicker,
+or exit after the logo and is neither a v0.1 dependency nor an installable
+profile.
 
 | Area | Boundary |
 | --- | --- |
@@ -44,7 +66,7 @@ bin/forza-doctor
 scripts/install-user --check --xodus-build-dir /absolute/path/to/xodus-build
 ```
 
-Both commands are read-only. The install check validates every source artifact and destination, reports conflicts with corrective actions, and prints the exact install plan without creating directories, copying files, writing a journal, or invoking systemd. The doctor exits nonzero for missing prerequisites and prints `PASS`, `WARN`, and `FAIL`. It accepts only `disabled` and `static` unit states; mixed or unknown patch states fail. Before installation, a missing installed patcher or manifest is expected. KDE Wallet is checked through the D-Bus **Secret Service** interface (`org.freedesktop.secrets`): an existing owner or activatable KDE provider is accepted. Do not install or substitute GNOME Keyring for this workflow.
+Both commands are read-only. The install check validates every source artifact and destination, reports conflicts with corrective actions, and prints the exact install plan without creating directories, copying files, writing a journal, or invoking systemd. The doctor exits nonzero for missing prerequisites and prints `PASS`, `WARN`, and `FAIL`. It accepts only `disabled` and `static` unit states; mixed or unknown patch states fail. Before installation, a missing installed patcher or manifest is expected. KDE Wallet is checked through the D-Bus **Secret Service** interface (`org.freedesktop.secrets`): an existing owner or activatable KDE provider is accepted. **Do not install GNOME Keyring** or substitute it for this workflow.
 
 ## User-local install
 
@@ -139,13 +161,14 @@ Steam invokes the generated line, which runs `forza-linux` around Steam's game c
 
 ## Invite/join workflow
 
-Outgoing Microsoft/Xbox invite and join are experimental through Xodus. They require a successful game session and are not a promised feature. **Incoming invite notifications are not supported.** Steam invites are not a replacement for Microsoft/Xbox invites.
+Outgoing Microsoft/Xbox invite and join are **RETEST REQUIRED** through the
+legacy v0.1 pair. They require a successful game session and are not a promised
+feature. **Incoming invite notifications are not supported.** Steam invites are
+not a replacement for Microsoft/Xbox invites.
 
-The reviewed local WineGDK bridge also carries an activation URI from trusted
-Xodus UI back into Forza through the deprecated `XGameInviteRegisterForEvent`
-compatibility callback. That is the accepted Join path, not automatic receipt
-of Xbox network notifications. The source gate is green; installed and live
-game validation is still pending.
+The newer WineGDK/Xodus social bridge is source-only experimental evidence. Its
+local activation-delivery design does not make it part of v0.1, and its green
+hermetic source gate does not override the rejected live result.
 
 ## Known limitations
 
@@ -169,6 +192,18 @@ Uninstall removes only files proven by its install manifest. Modified, replaced,
 This repository contains only scripts, manifests, documentation, and synthetic test fixtures. It does not redistribute Wine, Proton, Xodus, Microsoft, Steam, or game binaries. The supported-build manifest records reviewed hashes and byte edits.
 
 ### Component source status
+
+The v0.1 runtime is the legacy protocol generation: Xodus commit
+`23da0ab8323a1631ba2aacb069a06af22b8a20ac` and the legacy XGameRuntime source
+recorded in `docs/publication-manifest.toml`. The current installed-artifact
+hashes and reconstruction evidence are recorded there and in `docs/evidence`;
+the separately supplied licensed Microsoft runtime remains outside public
+evidence and repository transactions.
+
+The newer WineGDK commit `ef069c85c8b3ee049971a9e22a317309b30bb09f`
+and Xodus commit `b76690da6ff59ace8981bf0428cd729fcd15673d` are a
+**REJECTED LIVE** source experiment. They are not the v0.1 runtime and must not
+be installed by the `legacy-v0.1` profile.
 
 The selected implementation bases are `xodus-gaming/wine` `bleeding-edge` for the standalone Wine fixes, `xodus-gaming/xodus` `main` for Xodus, and `Weather-OS/WineGDK` `b03ba49c4f326c36aa6930fbe6cf72841ef3738c` for the local experimental XGameRuntime bridge now reviewed at `ef069c85c8b3ee049971a9e22a317309b30bb09f`. Fresh inspection found that xgameruntime PR 19 is an IDL template rather than a Unixlib transport, while `oot-cpp` cannot replace the Wine submodule layout. The component roadmap is sequential: these companion branches and immutable SHAs are not public yet, and stale local branch history is reference-only. The planned public names are `forza-social-invite-join`, `xodus-social-invite-bridge`, `wgi-physical-nonroamable-id`, and `storage-trim-property`; they are names for future reviewed publication, not current download locations. The XGameRuntime deliverable is an explicitly AI-assisted experimental WineGDK branch, not an upstream `xodus-gaming/xgameruntime` code PR.
 
