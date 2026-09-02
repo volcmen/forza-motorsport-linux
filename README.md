@@ -32,7 +32,7 @@ profile.
 | Diagnostics | Reports readiness without changing Steam, credentials, or systemd state. |
 | Patches | Only reviewed controller/mountmgr hashes, with backups and restoration. |
 | Install | User-local and runtime-component transactions are manifest-backed, recoverable, and never enable the service. |
-| Social | Outgoing Microsoft/Xbox invite and join are experimental through Xodus. |
+| Social | Outgoing Microsoft/Xbox invite and join are **RETEST REQUIRED** through Xodus. |
 
 ## What this project does
 

@@ -89,6 +89,19 @@ def test_readme_names_supported_and_unsupported_boundaries():
     assert not missing
 
 
+def test_readme_top_status_marks_outgoing_social_as_retest_required():
+    readme = (ROOT / "README.md").read_text()
+    status = readme.split("## Status and tested matrix", 1)[1].split(
+        "## What this project does", 1
+    )[0]
+
+    assert (
+        "| Social | Outgoing Microsoft/Xbox invite and join are **RETEST REQUIRED** "
+        "through Xodus. |"
+    ) in status
+    assert "invite and join are experimental" not in status
+
+
 def test_readme_rejects_the_newer_pair_as_an_installable_runtime():
     readme = (ROOT / "README.md").read_text()
     newer_pair = (
@@ -107,6 +120,33 @@ def test_readme_rejects_the_newer_pair_as_an_installable_runtime():
         "reviewed installable pair" not in paragraph.lower()
         for paragraph in pair_boundaries
     )
+    installable_boundaries = [
+        paragraph
+        for paragraph in readme.split("\n\n")
+        if "installable profile is" in paragraph.lower()
+        or "one installable runtime profile" in paragraph.lower()
+    ]
+    assert installable_boundaries
+    assert all("legacy-v0.1" in paragraph for paragraph in installable_boundaries)
+    assert all(
+        not any(revision in paragraph for revision in newer_pair)
+        for paragraph in installable_boundaries
+    )
+
+
+def test_verification_names_legacy_gate_ownership_and_current_counts():
+    verification = (ROOT / "docs/verification.md").read_text()
+    runtime_gate = verification.split(
+        "## Recoverable runtime-component source gate", 1
+    )[1]
+
+    assert "97 passing cases" in runtime_gate
+    assert "34 passing behavior cases" in runtime_gate
+    assert (
+        "exact clean integration, legacy XGameRuntime, and legacy Xodus revisions"
+        in runtime_gate
+    )
+    assert "exact clean integration/WineGDK/Xodus" not in runtime_gate
 
 
 def test_verify_workflow_installs_just_before_running_the_gate():
