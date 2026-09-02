@@ -85,6 +85,15 @@ source compile/link result, but it also cannot be reported as runtime GREEN.
 No source branch or artifact was installed into the live compatibility tool or
 game prefix, and no live Steam setting was changed by these source tasks.
 
+The 2026-09-02 release revalidation forced recompilation of the changed
+controller, storage, and test sources without changing their bytes. All five
+focused compile/link targets exited 0 under Clang/LLD 22.1.8, both source ranges
+remained clean at the pinned base/tip pairs, and fresh review-only hashes are
+recorded in the linked component documents. Windows.Gaming.Input, neighboring
+DirectInput, and kernel32 volume runtime attempts again stopped before dispatch
+at the same build-prefix initialization boundary. Each used a separate
+temporary prefix; no default Wine prefix or Wine process remained.
+
 The controller evidence records the supported physical XInput identity grammar
 and the outstanding manual controller matrix. The storage evidence records the
 unconditional `TrimEnabled = TRUE` compatibility policy; that policy requires

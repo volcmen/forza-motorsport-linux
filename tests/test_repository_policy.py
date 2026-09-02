@@ -30,7 +30,7 @@ def test_publication_manifest_pins_working_legacy_xodus():
     component = load_publication_manifest()["components"]["xodus_legacy"]
     assert component == {
         "state": "verified",
-        "revision": "3a26a6cba6623ff135a8acab0a2def347899d72b",
+        "revision": "7b236772297b3475ea4f3cb830feb5b224f3064a",
         "evidence": "docs/evidence/v0.1-xodus.md",
     }
 
@@ -97,7 +97,7 @@ def test_readme_names_supported_and_unsupported_boundaries():
         "Experimental",
         "AppID 2440510",
         "legacy-v0.1",
-        "3a26a6cba6623ff135a8acab0a2def347899d72b",
+        "7b236772297b3475ea4f3cb830feb5b224f3064a",
         "Verified live matrix",
         "Rejected live experiment",
         "KDE Wallet",
@@ -299,3 +299,27 @@ def test_release_document_cannot_exist_with_required_unresolved_claims():
     ]
     release_document = ROOT / "docs/release-v0.1.0.md"
     assert not release_document.exists() or not unresolved
+
+
+def test_release_document_describes_the_verified_source_only_boundary():
+    data = load_publication_manifest()
+    assert all(
+        claim["state"] == "verified"
+        for claim in data["claims"]
+        if claim["required"]
+    )
+
+    release = (ROOT / "docs/release-v0.1.0.md").read_text()
+    required = {
+        "## Verified on the tested system",
+        "## Source revisions",
+        "## Known limitations",
+        "## Installation boundary",
+        "## Rollback",
+        "source-only",
+        "7b236772297b3475ea4f3cb830feb5b224f3064a",
+        "a1548b1cf57371715d10b608bc81a77a188e40d4",
+        "Automatic incoming Xbox invite notifications are not supported",
+        "not ordinary upstream Proton support",
+    }
+    assert all(item in release for item in required)

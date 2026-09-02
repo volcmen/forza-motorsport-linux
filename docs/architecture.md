@@ -6,7 +6,7 @@ The repository is a local control surface for one experimental Steam layout: App
 
 The v0.1 runtime profile is `legacy-v0.1`. It uses the reconstructed legacy
 XGameRuntime protocol generation with Xodus
-`3a26a6cba6623ff135a8acab0a2def347899d72b`. This is the only installable
+`7b236772297b3475ea4f3cb830feb5b224f3064a`. This is the only installable
 runtime-component profile, and game launch is its only current live-verified
 claim.
 

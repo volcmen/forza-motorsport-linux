@@ -15,7 +15,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 | Local compatibility branch | `fix/storage-trim-property` |
 | Production commit | `943f12e4a30786c3a99213057a9e6aefeb22ff0a` |
 | Final local commit | `a7719bd8d0719e5ea6061387db020fa6a6b39d27` |
-| Evidence date | 2026-08-31 |
+| Evidence date | 2026-09-02 |
 
 The compatibility branch is planned and local. It has not been pushed or
 published, so the branch name and commit identifiers are provenance records,
@@ -155,3 +155,48 @@ compatibility tool or game prefix. AP702 disappearance is not verified by this
 source task. The behavior remains a compatibility answer until maintainers
 agree whether canonical Wine should report a fixed capability or derive the
 value from the backing device.
+
+## 2026-09-02 release revalidation
+
+The clean source worktree remained at
+`a7719bd8d0719e5ea6061387db020fa6a6b39d27`; its merge base with the configured
+upstream branch remained
+`b1dd32734a34472a28eb5be9922df06e07ac0834`. The source-range whitespace gate
+exited 0.
+
+The two changed sources were touched only to force recompilation without
+changing their bytes. These exact root targets then compiled and linked with
+Clang and LLD 22.1.8 and exited 0:
+
+```bash
+make -C "$storage_build" \
+    dlls/mountmgr.sys/x86_64-windows/mountmgr.sys
+make -C "$storage_build" \
+    dlls/kernel32/tests/x86_64-windows/kernel32_test.exe
+```
+
+The resulting review-only hashes were:
+
+```text
+ffbb1b89ea5f3bc6060194db5e314e200a80bd7738f54b7590d6e40d9794ad4a  mountmgr.sys
+2fdb8a9a09f7272adb7b77f0e4d8c7f812c11de37dc53f934236b3075372ef85  kernel32_test.exe
+```
+
+The focused runtime target was retried with an isolated temporary prefix:
+
+```bash
+WINEPREFIX="$temporary_prefix" \
+    make -C "$storage_build/dlls/kernel32/tests" \
+    x86_64-windows/volume.ok
+```
+
+It exited 2 during `wineboot.exe`, with `secur32.dll` initialization failure and
+`kernel32.dll` status `c0000135`, before the volume test dispatched. The
+classification therefore remains **BLOCKED before dispatch**. The temporary
+prefix was removed and no default Wine prefix or Wine process remained.
+
+The separately observed AP702-absent game result passed through the reviewed
+exact-build fallback recorded in
+[`v0.1-live-validation.md`](../../docs/evidence/v0.1-live-validation.md). That
+game result does not claim that this standalone source branch was installed or
+that the compatibility policy is ready for canonical Wine.

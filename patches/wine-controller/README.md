@@ -14,7 +14,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 | Canonical base | `b1dd32734a34472a28eb5be9922df06e07ac0834` |
 | Local compatibility branch | `fix/wgi-physical-nonroamable-id` |
 | Final local commit | `ddd302d97c6008d79ea4f3e3ad56014cb548e514` |
-| Evidence date | 2026-08-31 |
+| Evidence date | 2026-09-02 |
 
 The compatibility branch is planned and local. It has not been pushed or
 published, so the branch name and commit identifiers below are provenance
@@ -134,3 +134,51 @@ The parser intentionally covers the observed physical XInput device-path
 grammar; it is not a claim about every HID, DirectInput, virtual-controller, or
 future device-path form. Actual game/controller behavior still requires the
 manual matrix on a separately authorized installed build.
+
+## 2026-09-02 release revalidation
+
+The clean source worktree remained at
+`ddd302d97c6008d79ea4f3e3ad56014cb548e514`; its merge base with the configured
+upstream branch remained
+`b1dd32734a34472a28eb5be9922df06e07ac0834`. The source-range whitespace gate
+exited 0.
+
+The actual changed sources were touched only to force recompilation without
+changing their bytes. These exact root targets then compiled and linked with
+Clang and LLD 22.1.8 and exited 0:
+
+```bash
+make -C "$controller_build" \
+    dlls/windows.gaming.input/x86_64-windows/windows.gaming.input.dll
+make -C "$controller_build" \
+    dlls/windows.gaming.input/tests/x86_64-windows/windows.gaming.input_test.exe
+make -C "$controller_build" \
+    dlls/dinput/tests/x86_64-windows/dinput_test.exe
+```
+
+The resulting review-only hashes were:
+
+```text
+befe134a5a45fddf8b61f966f61fea359e3c4c6da5ad772cd285d34f4e8975ff  windows.gaming.input.dll
+cb3e13cd571a684a56467a4c7d911cf7b51932c0428ef6c4ce731245d30ee618  windows.gaming.input_test.exe
+780af7f065b4e2b374e6ccca73146f9b78ea0466bff5fe35d2d42085ff490694  dinput_test.exe
+```
+
+Both runtime suites were retried with separate temporary `WINEPREFIX` values:
+
+```bash
+WINEPREFIX="$temporary_prefix" \
+    make -C "$controller_build/dlls/windows.gaming.input/tests" test
+WINEPREFIX="$temporary_prefix" \
+    make -C "$controller_build/dlls/dinput/tests" test
+```
+
+Each exited 2 during `wineboot.exe`, with `secur32.dll` initialization failure
+and `kernel32.dll` status `c0000135`, before either test executable dispatched.
+The classification therefore remains **BLOCKED before dispatch**. The temporary
+prefixes were removed and no default Wine prefix or Wine process remained.
+
+The separately observed Forza controller and hotplug matrix passed through the
+reviewed exact-build fallback recorded in
+[`v0.1-live-validation.md`](../../docs/evidence/v0.1-live-validation.md). That
+game result does not claim that this standalone source branch was installed.

@@ -5,7 +5,7 @@ integration_binding = "immutable-tag"
 
 [components.xodus_legacy]
 state = "verified"
-revision = "3a26a6cba6623ff135a8acab0a2def347899d72b"
+revision = "7b236772297b3475ea4f3cb830feb5b224f3064a"
 evidence = "docs/evidence/v0.1-xodus.md"
 
 [components.xgameruntime_legacy]
