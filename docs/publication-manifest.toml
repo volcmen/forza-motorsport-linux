@@ -5,7 +5,7 @@ integration_binding = "immutable-tag"
 
 [components.xodus_legacy]
 state = "verified"
-revision = "23da0ab8323a1631ba2aacb069a06af22b8a20ac"
+revision = "76cab7667119efc04938b1128a107c22dec613ca"
 evidence = "docs/evidence/v0.1-xodus.md"
 
 [components.xgameruntime_legacy]
@@ -48,7 +48,7 @@ distributed = false
 
 [[artifacts]]
 name = "xodus-service-clean-build"
-sha256 = "d8f6c15ec55c81ec6b48ec3572939b7774f23ff53baa862ce60969d06b02c643"
+sha256 = "8bf0c55a2baebdae77a00bfe7ca89b19f8afe329fa2966a513be0d182246db11"
 distributed = false
 
 [[artifacts]]

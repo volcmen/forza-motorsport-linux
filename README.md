@@ -7,7 +7,7 @@ Motorsport, **AppID 2440510**, with the reviewed `GE-Proton11-3-FM` layout. It
 is environment-specific integration work, not ordinary upstream Proton support.
 
 The v0.1 installable profile is `legacy-v0.1`. It binds Xodus commit
-`23da0ab8323a1631ba2aacb069a06af22b8a20ac` to the matching legacy
+`76cab7667119efc04938b1128a107c22dec613ca` to the matching legacy
 XGameRuntime generation and the repository's recoverable launcher and installer.
 The current evidence boundary is narrow:
 
@@ -194,7 +194,7 @@ This repository contains only scripts, manifests, documentation, and synthetic t
 ### Component source status
 
 The v0.1 runtime is the legacy protocol generation: Xodus commit
-`23da0ab8323a1631ba2aacb069a06af22b8a20ac` and the legacy XGameRuntime source
+`76cab7667119efc04938b1128a107c22dec613ca` and the legacy XGameRuntime source
 recorded in `docs/publication-manifest.toml`. The current installed-artifact
 hashes and reconstruction evidence are recorded there and in `docs/evidence`;
 the separately supplied licensed Microsoft runtime remains outside public
