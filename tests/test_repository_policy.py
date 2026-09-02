@@ -1,9 +1,29 @@
 import subprocess
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
+PUBLICATION_MANIFEST = ROOT / "docs/publication-manifest.toml"
+PUBLICATION_STATES = {"verified", "experimental", "rejected", "unresolved"}
+REQUIRED_CLAIMS = {
+    "game-launch",
+    "online-profile-content",
+    "controller-navigation-driving",
+    "controller-hotplug",
+    "ap702-absent",
+    "linux-to-windows-invite",
+    "linux-join-windows-activity",
+    "social-ui-keyboard-controller",
+    "xodus-clean-shutdown",
+    "repeat-launch-no-reboot",
+    "incoming-invite-notifications",
+}
 FORBIDDEN_SUFFIXES = {".dll", ".exe", ".sys", ".so"}
 FORBIDDEN_TEXT = ("authorization: " + "xbl3.0 x=", "proof_" + "private_key=")
+
+
+def load_publication_manifest():
+    return tomllib.loads(PUBLICATION_MANIFEST.read_text(encoding="utf-8"))
 
 
 def _is_prohibited_binary(path):
@@ -146,3 +166,24 @@ def test_xgameruntime_plan_supersession_and_publication_boundary_are_consistent(
     assert "AppID prefix and user-supplied Microsoft threading DLL remain untouched" in roadmap
     assert "Do not open an upstream `xodus-gaming/xgameruntime` code PR" in publication
     assert "do not submit it as an upstream `xodus-gaming/xgameruntime` code PR" in spec
+
+
+def test_publication_manifest_classifies_every_required_claim():
+    data = load_publication_manifest()
+    claims = {claim["id"]: claim for claim in data["claims"]}
+    assert set(claims) == REQUIRED_CLAIMS
+    assert all(claim["state"] in PUBLICATION_STATES for claim in claims.values())
+    assert claims["game-launch"]["state"] == "verified"
+    assert claims["incoming-invite-notifications"]["state"] == "rejected"
+    assert all(claim["evidence"] for claim in claims.values())
+
+
+def test_release_document_cannot_exist_with_required_unresolved_claims():
+    data = load_publication_manifest()
+    unresolved = [
+        claim["id"]
+        for claim in data["claims"]
+        if claim["required"] and claim["state"] == "unresolved"
+    ]
+    release_document = ROOT / "docs/release-v0.1.0.md"
+    assert not release_document.exists() or not unresolved

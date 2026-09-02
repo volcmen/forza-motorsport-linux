@@ -20,6 +20,14 @@ git diff --check
 
 The tests use only synthetic patch bytes and temporary roots. A passing gate proves repository contracts, not game compatibility, account authentication, online play, or invite delivery. CI runs the same `just verify` command and deliberately uploads no system information, runtime logs, or artifacts.
 
+## Publication authority
+
+`docs/publication-manifest.toml` is the machine-readable publication authority.
+It records component revisions and public open-source artifact hashes. The final
+integration revision is not stored in the manifest: it is the commit referenced
+by the immutable `v0.1.0` tag. A `docs/release-v0.1.0.md` release document
+cannot be created while any required manifest claim is `unresolved`.
+
 ## Integration branch readiness
 
 A green repository gate does not make `feature/integration-repository`

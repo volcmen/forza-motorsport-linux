@@ -1,0 +1,120 @@
+version = 1
+app_id = "2440510"
+release = "v0.1.0"
+integration_binding = "immutable-tag"
+
+[components.xodus_legacy]
+state = "verified"
+revision = "23da0ab8323a1631ba2aacb069a06af22b8a20ac"
+
+[components.xgameruntime_legacy]
+state = "unresolved"
+base_revision = "a6e6199f81aeb8a96e8ff281e781f5eba2146fe7"
+source_diff_sha256 = "223eb07e2bc58549befb54558fb4f6d24a5d9f1b87d3ae525d5bdc2cf72abd55"
+
+[components.wine_controller]
+state = "experimental"
+revision = "ddd302d97c6008d79ea4f3e3ad56014cb548e514"
+
+[components.wine_storage]
+state = "experimental"
+revision = "a7719bd8d0719e5ea6061387db020fa6a6b39d27"
+
+[components.winegdk_next]
+state = "rejected"
+revision = "ef069c85c8b3ee049971a9e22a317309b30bb09f"
+
+[components.xodus_next]
+state = "rejected"
+revision = "b76690da6ff59ace8981bf0428cd729fcd15673d"
+
+[[artifacts]]
+name = "xodus-service"
+sha256 = "bf79404bd4fd12bd953121844e0355657c1de7502f1c8a0ab239939511421d1b"
+distributed = false
+
+[[artifacts]]
+name = "xodus-cli"
+sha256 = "83b024c6fe711df18e204d012caec797e33aea6d5230aff88ba3202b4f3ced59"
+distributed = false
+
+[[artifacts]]
+name = "xodus-overlay"
+sha256 = "bcbbd6fcdb204b656332fe50678e12e8a886c741136c90a6c02fe9fc8aeb7ac7"
+distributed = false
+
+[[artifacts]]
+name = "xgameruntime.dll"
+sha256 = "f20191f8cdb1a6f01cf2fc87c6d2fb4c2a0e998f3728a6f92d5a80042973e37c"
+distributed = false
+
+[[artifacts]]
+name = "xgameruntime.so"
+sha256 = "89b071b69b16c880816ff2287203cf3d4b27bec8c6fe4f85ab7f4415ccba82d5"
+distributed = false
+
+[[claims]]
+id = "game-launch"
+state = "verified"
+required = true
+evidence = "manual-user-confirmation-2026-09-02"
+
+[[claims]]
+id = "online-profile-content"
+state = "unresolved"
+required = true
+evidence = "current-restored-pair-retest-required"
+
+[[claims]]
+id = "controller-navigation-driving"
+state = "unresolved"
+required = true
+evidence = "current-restored-pair-retest-required"
+
+[[claims]]
+id = "controller-hotplug"
+state = "unresolved"
+required = true
+evidence = "current-restored-pair-retest-required"
+
+[[claims]]
+id = "ap702-absent"
+state = "unresolved"
+required = true
+evidence = "current-restored-pair-retest-required"
+
+[[claims]]
+id = "linux-to-windows-invite"
+state = "unresolved"
+required = true
+evidence = "current-restored-pair-retest-required"
+
+[[claims]]
+id = "linux-join-windows-activity"
+state = "unresolved"
+required = true
+evidence = "current-restored-pair-retest-required"
+
+[[claims]]
+id = "social-ui-keyboard-controller"
+state = "unresolved"
+required = true
+evidence = "current-restored-pair-retest-required"
+
+[[claims]]
+id = "xodus-clean-shutdown"
+state = "unresolved"
+required = true
+evidence = "current-restored-pair-retest-required"
+
+[[claims]]
+id = "repeat-launch-no-reboot"
+state = "unresolved"
+required = true
+evidence = "current-restored-pair-retest-required"
+
+[[claims]]
+id = "incoming-invite-notifications"
+state = "rejected"
+required = false
+evidence = "unsupported-by-design"
