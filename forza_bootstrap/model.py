@@ -16,9 +16,13 @@ class BootstrapError(RuntimeError):
 
 def canonical_json(value: Any) -> bytes:
     """Return deterministic ASCII JSON suitable for hash-bound plans."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
-        "ascii"
-    )
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
 
 
 def sha256_bytes(data: bytes) -> str:

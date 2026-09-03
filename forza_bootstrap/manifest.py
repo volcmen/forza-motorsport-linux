@@ -8,7 +8,7 @@ import tomllib
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import SplitResult, urlsplit
 
 from .model import (
     ArtifactSpec,
@@ -58,6 +58,38 @@ _ARTIFACT_KEYS = frozenset(
 _SUPPORTED_HOST = ("arch", "x86_64", "native-steam")
 _APP_ID = "2440510"
 _PROTONUP_VERSION = "0.1.5"
+_PROTONUP_PROJECT_RELATIVE = "tools/protonup"
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_RUNTIME_PROFILE_PATH = _REPOSITORY_ROOT / "manifests" / "runtime-profiles.toml"
+_APPROVED_GE = {
+    "name": "GE-Proton11-3",
+    "release": "GE-Proton11-3",
+    "url": (
+        "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/"
+        "GE-Proton11-3/GE-Proton11-3.tar.gz"
+    ),
+    "filename": "GE-Proton11-3.tar.gz",
+    "size": 532_524_366,
+    "sha256": "861c2edc8d40d051fb1e7a692deb953be52bd339c46d90f2b7dde50ddad91266",
+    "expected_root": "GE-Proton11-3",
+}
+_APPROVED_SOURCES = (
+    (
+        "xodus",
+        "https://github.com/volcmen/xodus",
+        "7b236772297b3475ea4f3cb830feb5b224f3064a",
+    ),
+    (
+        "xgameruntime",
+        "https://github.com/volcmen/wine-forza-motorsport",
+        "a1548b1cf57371715d10b608bc81a77a188e40d4",
+    ),
+)
+_APPROVED_BUILDER_BASE = (
+    "docker.io/library/archlinux:base-devel@sha256:"
+    "694da1fce635e3a14d90751941b08f02c500e8724682f7a00768e7152251ec34"
+)
+_APPROVED_ARCH_SNAPSHOT = "https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch"
 
 
 def _mapping(value: object, name: str) -> Mapping[str, object]:
@@ -97,17 +129,39 @@ def _sha256(value: object, name: str) -> str:
 def _safe_relative(value: object, name: str) -> str:
     path = _string(value, name)
     parsed = PurePosixPath(path)
-    if parsed.is_absolute() or not parsed.parts or any(part in {"", ".", ".."} for part in parsed.parts):
+    if (
+        parsed.is_absolute()
+        or str(parsed) != path
+        or not parsed.parts
+        or any(part in {"", ".", ".."} for part in parsed.parts)
+    ):
         raise BootstrapError(f"{name} must be a safe relative path")
     return path
 
 
-def _https_url(value: object, name: str) -> str:
+def _split_https_url(value: object, name: str) -> tuple[str, SplitResult]:
     url = _string(value, name)
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+    if any(character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F for character in url):
         raise BootstrapError(f"{name} must be an HTTPS URL")
-    return url
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        _port = parsed.port
+    except ValueError as error:
+        raise BootstrapError(f"{name} must be an HTTPS URL") from error
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or parsed.username
+        or parsed.password
+        or any(character.isspace() or ord(character) < 0x20 for character in hostname)
+    ):
+        raise BootstrapError(f"{name} must be an HTTPS URL")
+    return url, parsed
+
+
+def _https_url(value: object, name: str) -> str:
+    return _split_https_url(value, name)[0]
 
 
 def _redirect_hosts(value: object, name: str) -> tuple[str, ...]:
@@ -117,8 +171,17 @@ def _redirect_hosts(value: object, name: str) -> tuple[str, ...]:
     if len(set(hosts)) != len(hosts):
         raise BootstrapError(f"{name} contains duplicate hosts")
     for host in hosts:
-        parsed = urlparse(f"https://{host}")
-        if parsed.hostname != host or parsed.port is not None:
+        try:
+            parsed = urlsplit(f"https://{host}")
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError as error:
+            raise BootstrapError(f"{name} contains an invalid host") from error
+        if (
+            any(character.isspace() or ord(character) < 0x20 for character in host)
+            or hostname != host
+            or port is not None
+        ):
             raise BootstrapError(f"{name} contains an invalid host")
     return hosts
 
@@ -129,9 +192,9 @@ def _download(value: object, name: str) -> DownloadSpec:
     size = _integer(table["size"], "size")
     if size < 0:
         raise BootstrapError("size must be non-negative")
-    url = _https_url(table["url"], "url")
+    url, parsed_url = _split_https_url(table["url"], "url")
     hosts = _redirect_hosts(table["allowed_redirect_hosts"], "allowed_redirect_hosts")
-    if urlparse(url).hostname not in hosts:
+    if parsed_url.hostname not in hosts:
         raise BootstrapError("download URL host must be an allowed redirect host")
     return DownloadSpec(
         name=_string(table["name"], "name"),
@@ -151,7 +214,10 @@ def _protonup(value: object) -> ProtonUpSpec:
     version = _string(table["version"], "protonup.version")
     if version != _PROTONUP_VERSION:
         raise BootstrapError(f"unsupported ProtonUp version: {version}")
-    return ProtonUpSpec(version=version, project_relative=_safe_relative(table["project_relative"], "project_relative"))
+    project_relative = _safe_relative(table["project_relative"], "project_relative")
+    if project_relative != _PROTONUP_PROJECT_RELATIVE:
+        raise BootstrapError("protonup project path disagrees with approved repository input")
+    return ProtonUpSpec(version=version, project_relative=project_relative)
 
 
 def _sources(value: object, expected_revisions: Mapping[str, str]) -> tuple[SourceSpec, ...]:
@@ -174,6 +240,9 @@ def _sources(value: object, expected_revisions: Mapping[str, str]) -> tuple[Sour
     actual_revisions = {source.name: source.revision for source in sources}
     if actual_revisions != dict(expected_revisions):
         raise BootstrapError("sources disagree with the active runtime profile")
+    actual_sources = tuple((source.name, source.repository, source.revision) for source in sources)
+    if actual_sources != _APPROVED_SOURCES:
+        raise BootstrapError("sources disagree with approved repository inputs")
     return tuple(sources)
 
 
@@ -188,10 +257,13 @@ def _builder(value: object) -> BuilderSpec:
     epoch = _integer(table["source_date_epoch"], "source_date_epoch")
     if epoch < 0:
         raise BootstrapError("source_date_epoch must be non-negative")
+    arch_snapshot = _https_url(table["arch_snapshot"], "arch_snapshot")
+    if base_image != _APPROVED_BUILDER_BASE or arch_snapshot != _APPROVED_ARCH_SNAPSHOT:
+        raise BootstrapError("builder disagrees with approved repository inputs")
     return BuilderSpec(
         image=image,
         base_image=base_image,
-        arch_snapshot=_https_url(table["arch_snapshot"], "arch_snapshot"),
+        arch_snapshot=arch_snapshot,
         source_date_epoch=epoch,
     )
 
@@ -231,12 +303,9 @@ def _artifacts(value: object) -> tuple[ArtifactSpec, ...]:
     return tuple(artifacts)
 
 
-def _runtime_profile(manifest_path: Path, profile: str) -> Mapping[str, str]:
-    runtime_path = manifest_path.parent / "runtime-profiles.toml"
-    if not runtime_path.is_file():
-        runtime_path = Path(__file__).parents[1] / "manifests" / "runtime-profiles.toml"
+def _runtime_profile(profile: str) -> Mapping[str, str]:
     try:
-        data = tomllib.loads(runtime_path.read_text(encoding="utf-8"))
+        data = tomllib.loads(_RUNTIME_PROFILE_PATH.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise BootstrapError("runtime profile manifest is unavailable") from error
     if set(data) != {"version", "active", "profiles"}:
@@ -284,10 +353,10 @@ def load_bootstrap_manifest(path: Path) -> BootstrapManifest:
     if host != _SUPPORTED_HOST:
         raise BootstrapError("unsupported host")
     profile = _string(root["profile"], "profile")
-    expected_revisions = _runtime_profile(path, profile)
+    expected_revisions = _runtime_profile(profile)
     ge = _download(root["ge"], "ge")
-    if ge.release != "GE-Proton11-3":
-        raise BootstrapError(f"unsupported GE-Proton release: {ge.release}")
+    if any(getattr(ge, field) != expected for field, expected in _APPROVED_GE.items()):
+        raise BootstrapError("GE-Proton input disagrees with approved repository values")
     return BootstrapManifest(
         schema=schema,
         app_id=app_id,

@@ -15,6 +15,13 @@ def test_cli_parses_bootstrap_modes_as_mutually_exclusive() -> None:
     assert failure.value.code == 2
 
 
+def test_cli_rejects_combined_check_and_rollback() -> None:
+    with pytest.raises(SystemExit) as failure:
+        parse_args(["bootstrap", "--check", "--rollback"])
+
+    assert failure.value.code == 2
+
+
 @pytest.mark.parametrize("command", ("bootstrap", "snapshot", "compare"))
 def test_cli_exposes_each_bootstrap_command(command: str) -> None:
     assert parse_args([command]).command == command

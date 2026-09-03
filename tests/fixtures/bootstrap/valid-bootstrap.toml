@@ -11,14 +11,14 @@ version = "0.1.5"
 project_relative = "tools/protonup"
 
 [ge]
-name = "ge-proton"
+name = "GE-Proton11-3"
 release = "GE-Proton11-3"
-url = "https://example.invalid/GE-Proton11-3.tar.gz"
+url = "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton11-3/GE-Proton11-3.tar.gz"
 filename = "GE-Proton11-3.tar.gz"
 size = 532524366
 sha256 = "861c2edc8d40d051fb1e7a692deb953be52bd339c46d90f2b7dde50ddad91266"
 expected_root = "GE-Proton11-3"
-allowed_redirect_hosts = ["example.invalid"]
+allowed_redirect_hosts = ["github.com"]
 
 [bundle]
 name = "forza-bootstrap-bundle"
@@ -42,7 +42,7 @@ revision = "a1548b1cf57371715d10b608bc81a77a188e40d4"
 
 [builder]
 image = "registry.example.invalid/forza-builder@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-base_image = "archlinux@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+base_image = "docker.io/library/archlinux:base-devel@sha256:694da1fce635e3a14d90751941b08f02c500e8724682f7a00768e7152251ec34"
 arch_snapshot = "https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch"
 source_date_epoch = 1756684800
 
