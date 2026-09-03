@@ -18,8 +18,9 @@ from .model import BootstrapError
 from .safeio import (
     BOOTSTRAP_LOCK_NAME,
     DIRECTORY,
+    _assert_bootstrap_lock,
+    _open_private_regular,
     _validate_private_directory,
-    _validate_private_regular,
     acquire_bootstrap_lock,
     atomic_write_private_json,
     ensure_private_directory,
@@ -120,6 +121,11 @@ _UPDATABLE_FIELDS = frozenset(
         "patch_backup_manifest",
         "compatibility_tool_disposition",
     }
+)
+_WRITE_ONCE_FIELDS = (
+    "child_runtime_transaction",
+    "patch_backup_manifest",
+    "compatibility_tool_disposition",
 )
 
 
@@ -232,20 +238,8 @@ def _open_transaction(root_fd: int, transaction_id: str) -> int:
 
 
 def _validate_root_lock(root_fd: int) -> None:
-    try:
-        fd = os.open(
-            BOOTSTRAP_LOCK_NAME,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-            dir_fd=root_fd,
-        )
-    except OSError as error:
-        if error.errno == errno.ELOOP:
-            raise BootstrapError("symlink refused for bootstrap lock") from error
-        raise
-    try:
-        _validate_private_regular(fd, BOOTSTRAP_LOCK_NAME)
-    finally:
-        os.close(fd)
+    fd = _open_private_regular(root_fd, BOOTSTRAP_LOCK_NAME)
+    os.close(fd)
 
 
 def _prepublication_name(transaction_id: str) -> str:
@@ -266,20 +260,8 @@ def _recover_prepublication_transaction(
             if state.transaction_id != transaction_id:
                 raise BootstrapError("staging directory and state transaction id differ")
         elif len(entries) == 1 and temporary.fullmatch(entries[0]) is not None:
-            try:
-                temporary_fd = os.open(
-                    entries[0],
-                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                    dir_fd=transaction_fd,
-                )
-            except OSError as error:
-                if error.errno == errno.ELOOP:
-                    raise BootstrapError(f"symlink refused for bootstrap staging temporary: {entries[0]}") from error
-                raise
-            try:
-                _validate_private_regular(temporary_fd, entries[0])
-            finally:
-                os.close(temporary_fd)
+            temporary_fd = _open_private_regular(transaction_fd, entries[0])
+            os.close(temporary_fd)
             return None
         else:
             raise BootstrapError("bootstrap staging directory has unsafe contents")
@@ -407,18 +389,19 @@ def create_transaction(state_root: str | os.PathLike[str], manifest_sha256: str)
         os.close(lock_fd)
 
 
-def transition(
+def _validate_transition_request(
     state: BootstrapState,
     expected: BootstrapPhase,
     target: BootstrapPhase,
-    **updates: object,
-) -> BootstrapState:
-    """Persist one legal state transition only from the last durable state."""
+    updates: dict[str, object],
+) -> None:
     if not isinstance(expected, BootstrapPhase) or not isinstance(target, BootstrapPhase):
         raise BootstrapError("bootstrap transition phases are invalid")
     if state.phase != expected:
         raise BootstrapError(f"transition expected {state.phase.value}, not {expected.value}")
-    if target not in _ALLOWED_TRANSITIONS[expected]:
+    if target == expected and target in _TERMINAL_PHASES:
+        raise BootstrapError(f"transition from {expected.value} to {target.value} is not allowed")
+    if target != expected and target not in _ALLOWED_TRANSITIONS[expected]:
         raise BootstrapError(f"transition from {expected.value} to {target.value} is not allowed")
     invalid_updates = set(updates) - _UPDATABLE_FIELDS
     if invalid_updates:
@@ -426,6 +409,44 @@ def transition(
     if state._state_root is None:
         raise BootstrapError("bootstrap state is not bound to private storage")
 
+
+def _updated_state(
+    state: BootstrapState,
+    target: BootstrapPhase,
+    updates: dict[str, object],
+) -> BootstrapState:
+    value = _state_value(state)
+    value["phase"] = target.value
+    for key, update in updates.items():
+        if key == "completed_boundaries" and isinstance(update, tuple):
+            value[key] = list(update)
+        else:
+            value[key] = update
+    next_state = _state_from_value(value, state._state_root)  # type: ignore[arg-type]
+    existing_boundaries = state.completed_boundaries
+    if next_state.completed_boundaries[: len(existing_boundaries)] != existing_boundaries:
+        raise BootstrapError("state completed_boundaries may only append new entries")
+    for field_name in _WRITE_ONCE_FIELDS:
+        existing = getattr(state, field_name)
+        if existing is not None and getattr(next_state, field_name) != existing:
+            raise BootstrapError(f"state {field_name} is write-once")
+    if target == state.phase and next_state == state:
+        raise BootstrapError("same-phase bootstrap transition is a no-op")
+    return next_state
+
+
+def transition_locked(
+    state: BootstrapState,
+    expected: BootstrapPhase,
+    target: BootstrapPhase,
+    *,
+    lock_fd: int,
+    **updates: object,
+) -> BootstrapState:
+    """Persist a transition while reusing the caller's state-root lock."""
+    _validate_transition_request(state, expected, target, updates)
+    assert state._state_root is not None
+    _assert_bootstrap_lock(state._state_root, lock_fd)
     root_fd = open_owned_root(state._state_root)
     try:
         transaction_fd = _open_transaction(root_fd, state.transaction_id)
@@ -437,17 +458,26 @@ def transition(
                 raise BootstrapError(
                     f"transition does not match last durable state; expected {durable.phase.value}"
                 )
-            value = _state_value(state)
-            value["phase"] = target.value
-            for key, update in updates.items():
-                if key == "completed_boundaries" and isinstance(update, tuple):
-                    value[key] = list(update)
-                else:
-                    value[key] = update
-            next_state = _state_from_value(value, state._state_root)
+            next_state = _updated_state(durable, target, updates)
             atomic_write_private_json(transaction_fd, "state.json", _state_value(next_state))
             return next_state
         finally:
             os.close(transaction_fd)
     finally:
         os.close(root_fd)
+
+
+def transition(
+    state: BootstrapState,
+    expected: BootstrapPhase,
+    target: BootstrapPhase,
+    **updates: object,
+) -> BootstrapState:
+    """Persist one legal state transition only from the last durable state."""
+    _validate_transition_request(state, expected, target, updates)
+    assert state._state_root is not None
+    lock_fd = acquire_bootstrap_lock(state._state_root)
+    try:
+        return transition_locked(state, expected, target, lock_fd=lock_fd, **updates)
+    finally:
+        os.close(lock_fd)

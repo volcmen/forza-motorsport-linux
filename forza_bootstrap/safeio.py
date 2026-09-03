@@ -20,6 +20,7 @@ DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _RENAME_NOREPLACE = 1
+_NONREGULAR_OPEN_ERRNOS = frozenset({errno.ENXIO, errno.EISDIR, errno.ENODEV})
 BOOTSTRAP_LOCK_NAME = "bootstrap.lock"
 _LIBC = ctypes.CDLL(None, use_errno=True)
 _RENAMEAT2 = getattr(_LIBC, "renameat2", None)
@@ -126,6 +127,8 @@ def _open_private_regular(parent_fd: int, name: str) -> int:
     except OSError as error:
         if error.errno == errno.ELOOP:
             raise BootstrapError(f"symlink refused for private file: {name}") from error
+        if error.errno in _NONREGULAR_OPEN_ERRNOS:
+            raise BootstrapError(f"private file is not regular: {name}") from error
         raise
     try:
         _validate_private_regular(fd, name)
@@ -274,6 +277,8 @@ def acquire_bootstrap_lock(runtime_dir: str | os.PathLike[str]) -> int:
             except OSError as error:
                 if error.errno == errno.ELOOP:
                     raise BootstrapError("symlink refused for bootstrap lock") from error
+                if error.errno in _NONREGULAR_OPEN_ERRNOS:
+                    raise BootstrapError("bootstrap lock is not a regular file") from error
                 raise
             _validate_private_regular(fd, BOOTSTRAP_LOCK_NAME)
         else:
@@ -291,4 +296,30 @@ def acquire_bootstrap_lock(runtime_dir: str | os.PathLike[str]) -> int:
     finally:
         if fd is not None:
             os.close(fd)
+        os.close(parent_fd)
+
+
+def _assert_bootstrap_lock(runtime_dir: str | os.PathLike[str], lock_fd: int) -> None:
+    """Ensure *lock_fd* names and exclusively locks this runtime's lock file."""
+    parent_fd = open_owned_root(runtime_dir)
+    lock_path_fd: int | None = None
+    try:
+        lock_path_fd = _open_private_regular(parent_fd, BOOTSTRAP_LOCK_NAME)
+        try:
+            supplied = os.fstat(lock_fd)
+        except OSError as error:
+            raise BootstrapError("bootstrap lock descriptor is invalid") from error
+        _validate_private_regular(lock_fd, BOOTSTRAP_LOCK_NAME)
+        on_disk = os.fstat(lock_path_fd)
+        if (supplied.st_dev, supplied.st_ino) != (on_disk.st_dev, on_disk.st_ino):
+            raise BootstrapError("bootstrap lock descriptor does not match state root")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise BootstrapError("bootstrap lock is already held") from error
+        except OSError as error:
+            raise BootstrapError("bootstrap lock descriptor cannot be locked") from error
+    finally:
+        if lock_path_fd is not None:
+            os.close(lock_path_fd)
         os.close(parent_fd)

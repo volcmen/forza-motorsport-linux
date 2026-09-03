@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import stat
 import threading
 from pathlib import Path
@@ -271,6 +272,213 @@ def test_transition_persists_only_allowed_typed_updates(tmp_path: Path) -> None:
             BootstrapPhase.AWAITING_STEAM_PREFIX,
             manifest_sha256="4" * 64,
         )
+
+
+def test_concurrent_transitions_from_same_durable_state_allow_only_one_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forza_bootstrap import state as state_module
+
+    state = create_transaction(tmp_path, "a" * 64)
+    entered_write = threading.Event()
+    release_write = threading.Event()
+    first_outcome: list[object] = []
+    second_outcome: list[object] = []
+    real_write = state_module.atomic_write_private_json
+
+    def pause_first_writer(*args: object, **kwargs: object) -> None:
+        if threading.current_thread().name == "first-transition":
+            entered_write.set()
+            assert release_write.wait(timeout=2)
+        real_write(*args, **kwargs)
+
+    monkeypatch.setattr(state_module, "atomic_write_private_json", pause_first_writer)
+
+    def first_transition() -> None:
+        try:
+            first_outcome.append(
+                transition(
+                    state,
+                    BootstrapPhase.NEW,
+                    BootstrapPhase.PREPARING,
+                    completed_boundaries=("first-writer",),
+                )
+            )
+        except BootstrapError as error:  # pragma: no cover - asserted below
+            first_outcome.append(error)
+
+    worker = threading.Thread(target=first_transition, name="first-transition")
+    worker.start()
+    assert entered_write.wait(timeout=2)
+    try:
+        try:
+            second_outcome.append(
+                transition(
+                    state,
+                    BootstrapPhase.NEW,
+                    BootstrapPhase.PREPARING,
+                    completed_boundaries=("second-writer",),
+                )
+            )
+        except BootstrapError as error:
+            second_outcome.append(error)
+    finally:
+        release_write.set()
+        worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert len(first_outcome) == 1
+    assert len(second_outcome) == 1
+    assert not isinstance(first_outcome[0], BootstrapError)
+    assert isinstance(second_outcome[0], BootstrapError)
+    assert load_unfinished_transaction(tmp_path) == first_outcome[0]
+    assert first_outcome[0].completed_boundaries == ("first-writer",)  # type: ignore[union-attr]
+
+
+def test_transition_locked_reuses_coordinator_lock_without_self_deadlock(
+    tmp_path: Path,
+) -> None:
+    from forza_bootstrap import state as state_module
+
+    state = create_transaction(tmp_path, "b" * 64)
+    lock_fd = acquire_bootstrap_lock(tmp_path)
+    try:
+        prepared = state_module.transition_locked(
+            state,
+            BootstrapPhase.NEW,
+            BootstrapPhase.PREPARING,
+            lock_fd=lock_fd,
+            completed_boundaries=("coordinator-owned-lock",),
+        )
+    finally:
+        os.close(lock_fd)
+
+    assert load_unfinished_transaction(tmp_path) == prepared
+
+
+def test_same_phase_transition_appends_multiple_durable_checkpoints(tmp_path: Path) -> None:
+    state = create_transaction(tmp_path, "c" * 64)
+    state = transition(state, BootstrapPhase.NEW, BootstrapPhase.PREPARING)
+    state = transition(
+        state,
+        BootstrapPhase.PREPARING,
+        BootstrapPhase.AWAITING_STEAM_PREFIX,
+    )
+    state = transition(
+        state,
+        BootstrapPhase.AWAITING_STEAM_PREFIX,
+        BootstrapPhase.PLANNED_FINISH,
+    )
+    state = transition(
+        state,
+        BootstrapPhase.PLANNED_FINISH,
+        BootstrapPhase.INSTALLING_FINISH,
+        completed_boundaries=("finish-started",),
+    )
+
+    first_checkpoint = transition(
+        state,
+        BootstrapPhase.INSTALLING_FINISH,
+        BootstrapPhase.INSTALLING_FINISH,
+        completed_boundaries=("finish-started", "runtime-installed"),
+    )
+    second_checkpoint = transition(
+        first_checkpoint,
+        BootstrapPhase.INSTALLING_FINISH,
+        BootstrapPhase.INSTALLING_FINISH,
+        completed_boundaries=(
+            "finish-started",
+            "runtime-installed",
+            "patch-installed",
+        ),
+    )
+
+    assert second_checkpoint.completed_boundaries == (
+        "finish-started",
+        "runtime-installed",
+        "patch-installed",
+    )
+    assert load_unfinished_transaction(tmp_path) == second_checkpoint
+
+
+def test_same_phase_transition_rejects_no_op(tmp_path: Path) -> None:
+    state = create_transaction(tmp_path, "d" * 64)
+
+    with pytest.raises(BootstrapError, match="no-op"):
+        transition(state, BootstrapPhase.NEW, BootstrapPhase.NEW)
+
+    assert load_unfinished_transaction(tmp_path) == state
+
+
+@pytest.mark.parametrize(
+    "boundaries",
+    (
+        ("snapshot", "preflight"),
+        ("preflight",),
+        ("preflight", "replacement"),
+    ),
+)
+def test_transition_completed_boundaries_only_append_to_existing_order(
+    tmp_path: Path, boundaries: tuple[str, ...]
+) -> None:
+    state = create_transaction(tmp_path, "e" * 64)
+    prepared = transition(
+        state,
+        BootstrapPhase.NEW,
+        BootstrapPhase.PREPARING,
+        completed_boundaries=("preflight", "snapshot"),
+    )
+
+    with pytest.raises(BootstrapError, match="only append"):
+        transition(
+            prepared,
+            BootstrapPhase.PREPARING,
+            BootstrapPhase.AWAITING_STEAM_PREFIX,
+            completed_boundaries=boundaries,
+        )
+
+    assert load_unfinished_transaction(tmp_path) == prepared
+
+
+@pytest.mark.parametrize(
+    ("field", "initial", "replacement"),
+    (
+        ("child_runtime_transaction", "1" * 24, "2" * 24),
+        (
+            "patch_backup_manifest",
+            "/private/forza-backups/forza-patch-20260903T120000Z.json",
+            "/private/forza-backups/forza-patch-20260903T120001Z.json",
+        ),
+        ("compatibility_tool_disposition", "created", "adopted"),
+    ),
+)
+def test_transition_recovery_evidence_is_write_once_or_idempotently_equal(
+    tmp_path: Path, field: str, initial: str, replacement: str
+) -> None:
+    state = create_transaction(tmp_path, "f" * 64)
+    prepared = transition(
+        state,
+        BootstrapPhase.NEW,
+        BootstrapPhase.PREPARING,
+        **{field: initial},
+    )
+    idempotent = transition(
+        prepared,
+        BootstrapPhase.PREPARING,
+        BootstrapPhase.AWAITING_STEAM_PREFIX,
+        **{field: initial},
+    )
+
+    assert getattr(idempotent, field) == initial
+    for forbidden in (None, replacement):
+        with pytest.raises(BootstrapError, match="write-once"):
+            transition(
+                idempotent,
+                BootstrapPhase.AWAITING_STEAM_PREFIX,
+                BootstrapPhase.PLANNED_FINISH,
+                **{field: forbidden},
+            )
+        assert load_unfinished_transaction(tmp_path) == idempotent
 
 
 def test_create_recovers_from_crash_before_initial_state_publication(
@@ -606,3 +814,64 @@ def test_staging_temp_symlink_is_a_bootstrap_error(tmp_path: Path) -> None:
 
     with pytest.raises(BootstrapError, match="symlink"):
         load_unfinished_transaction(tmp_path)
+
+
+def test_private_json_unix_socket_is_a_prompt_bootstrap_error(tmp_path: Path) -> None:
+    private_socket = socket.socket(socket.AF_UNIX)
+    private_socket.bind(str(tmp_path / "state.json"))
+    (tmp_path / "state.json").chmod(0o600)
+
+    def read_socket() -> None:
+        parent_fd = os.open(tmp_path, DIRECTORY)
+        try:
+            read_private_json(parent_fd, "state.json")
+        finally:
+            os.close(parent_fd)
+
+    try:
+        assert_rejects_hostile_special_file_promptly(read_socket)
+    finally:
+        private_socket.close()
+
+
+def test_bootstrap_lock_directory_is_a_prompt_bootstrap_error(tmp_path: Path) -> None:
+    (tmp_path / "bootstrap.lock").mkdir(mode=0o700)
+
+    assert_rejects_hostile_special_file_promptly(lambda: acquire_bootstrap_lock(tmp_path))
+
+
+def test_root_lock_unix_socket_is_a_prompt_bootstrap_error(tmp_path: Path) -> None:
+    from forza_bootstrap import state as state_module
+
+    root_socket = socket.socket(socket.AF_UNIX)
+    root_socket.bind(str(tmp_path / "bootstrap.lock"))
+    (tmp_path / "bootstrap.lock").chmod(0o600)
+    root_fd = os.open(tmp_path, DIRECTORY)
+    try:
+        assert_rejects_hostile_special_file_promptly(
+            lambda: state_module._validate_root_lock(root_fd)
+        )
+    finally:
+        os.close(root_fd)
+        root_socket.close()
+
+
+def test_staging_temp_unix_socket_is_a_prompt_bootstrap_error(tmp_path: Path) -> None:
+    transaction_id = "3" * 24
+    staging = tmp_path / f".bootstrap-staging-{transaction_id}"
+    staging.mkdir(mode=0o700)
+    staging.chmod(0o700)
+    temporary = staging / f".state.json.{'4' * 24}.tmp"
+    staging_socket = socket.socket(socket.AF_UNIX)
+    staging_fd = os.open(staging, DIRECTORY)
+    try:
+        staging_socket.bind(f"/proc/self/fd/{staging_fd}/{temporary.name}")
+    finally:
+        os.close(staging_fd)
+    temporary.chmod(0o600)
+    try:
+        assert_rejects_hostile_special_file_promptly(
+            lambda: load_unfinished_transaction(tmp_path)
+        )
+    finally:
+        staging_socket.close()
