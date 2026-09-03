@@ -192,6 +192,18 @@ def test_verify_workflow_installs_ripgrep_for_bash_assertions():
     assert workflow.index(install_tools) < workflow.index(gate)
 
 
+def test_verify_workflow_provides_an_executable_unit_stub():
+    workflow = (ROOT / ".github/workflows/verify.yml").read_text()
+    unit_stub = (
+        'install -Dm755 /bin/true '
+        '"$HOME/.local/libexec/xodus-forza/xodus-service"'
+    )
+    gate = "run: just verify"
+
+    assert unit_stub in workflow
+    assert workflow.index(unit_stub) < workflow.index(gate)
+
+
 def test_verify_gate_runs_every_behavior_and_format_suite():
     gate = subprocess.run(
         ["just", "--dry-run", "verify"],
