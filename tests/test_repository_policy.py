@@ -21,6 +21,38 @@ REQUIRED_CLAIMS = {
 }
 FORBIDDEN_SUFFIXES = {".dll", ".exe", ".sys", ".so"}
 FORBIDDEN_TEXT = ("authorization: " + "xbl3.0 x=", "proof_" + "private_key=")
+PUBLIC_COMPONENTS = {
+    "xodus_legacy": (
+        "https://github.com/volcmen/xodus",
+        "forza-social-invite-join-v0.1",
+        "7b236772297b3475ea4f3cb830feb5b224f3064a",
+    ),
+    "xgameruntime_legacy": (
+        "https://github.com/volcmen/wine-forza-motorsport",
+        "forza-xgameui-invite-join-v0.1",
+        "a1548b1cf57371715d10b608bc81a77a188e40d4",
+    ),
+    "wine_controller": (
+        "https://github.com/volcmen/wine-forza-motorsport",
+        "wgi-physical-nonroamable-id",
+        "ddd302d97c6008d79ea4f3e3ad56014cb548e514",
+    ),
+    "wine_storage": (
+        "https://github.com/volcmen/wine-forza-motorsport",
+        "storage-trim-property",
+        "a7719bd8d0719e5ea6061387db020fa6a6b39d27",
+    ),
+    "winegdk_next": (
+        "https://github.com/volcmen/WineGDK",
+        "xodus-social-invite-bridge-experimental",
+        "d96a768e25f632b04a457e4cb9f585e89ef5d095",
+    ),
+    "xodus_next": (
+        "https://github.com/volcmen/xodus",
+        "xodus-social-invite-bridge",
+        "ee9db0f68122a9731b9b66cc24767693d1737f5c",
+    ),
+}
 
 
 def load_publication_manifest():
@@ -33,7 +65,27 @@ def test_publication_manifest_pins_working_legacy_xodus():
         "state": "verified",
         "revision": "7b236772297b3475ea4f3cb830feb5b224f3064a",
         "evidence": "docs/evidence/v0.1-xodus.md",
+        "repository": "https://github.com/volcmen/xodus",
+        "branch": "forza-social-invite-join-v0.1",
+        "source_url": (
+            "https://github.com/volcmen/xodus/commit/"
+            "7b236772297b3475ea4f3cb830feb5b224f3064a"
+        ),
     }
+
+
+def test_publication_manifest_links_exact_public_component_sources():
+    data = load_publication_manifest()
+
+    assert data["integration_repository"] == (
+        "https://github.com/volcmen/forza-motorsport-linux"
+    )
+    for name, (repository, branch, revision) in PUBLIC_COMPONENTS.items():
+        component = data["components"][name]
+        assert component["repository"] == repository
+        assert component["branch"] == branch
+        assert component["revision"] == revision
+        assert component["source_url"] == f"{repository}/commit/{revision}"
 
 
 def test_publication_manifest_pins_reviewed_clean_builds():
@@ -265,7 +317,7 @@ def test_readme_documents_source_provenance_and_required_runtime_placement():
         "xodus-social-invite-bridge",
         "wgi-physical-nonroamable-id",
         "storage-trim-property",
-        "complete build-from-source path cannot be claimed",
+        "source branches are public at the immutable revisions",
         "steamapps/compatdata/2440510/pfx/drive_c/windows/system32/xgameruntime.dll.threading",
         "AP702",
         "HDD/SSD launch rejection",
@@ -359,6 +411,16 @@ def test_release_document_describes_the_verified_source_only_boundary():
     }
     assert all(item in release for item in required)
 
+    assert "https://github.com/volcmen/forza-motorsport-linux" in release
+    for name in (
+        "xodus_legacy",
+        "xgameruntime_legacy",
+        "wine_controller",
+        "wine_storage",
+    ):
+        repository, _, revision = PUBLIC_COMPONENTS[name]
+        assert f"{repository}/commit/{revision}" in release
+
 
 def test_upstream_publication_drafts_are_complete_and_path_safe():
     draft_paths = [
@@ -405,7 +467,7 @@ def test_proton_draft_reports_only_manifest_verified_live_claims():
     assert "not ordinary upstream Proton support" in proton
 
 
-def test_upstream_ledger_and_wine_drafts_name_exact_prepared_actions():
+def test_upstream_ledger_records_published_sources_and_prepared_reviews():
     ledger = (ROOT / "docs/upstream.md").read_text()
     actions = [
         "Integration repository creation",
@@ -419,8 +481,14 @@ def test_upstream_ledger_and_wine_drafts_name_exact_prepared_actions():
         "Proton issue 7151 comment",
         "v0.1.0 tag and source-only release",
     ]
-    assert all(f"| {action} | `prepared` |" in ledger for action in actions)
-    assert "https://github.com/volcmen/" not in ledger
+    published = actions[:5]
+    prepared = actions[5:]
+    assert all(f"| {action} | `published` |" in ledger for action in published)
+    assert all(f"| {action} | `prepared` |" in ledger for action in prepared)
+    assert "https://github.com/volcmen/forza-motorsport-linux" in ledger
+    for repository, branch, revision in PUBLIC_COMPONENTS.values():
+        assert f"{repository}/tree/{branch}" in ledger
+        assert f"{repository}/commit/{revision}" in ledger
 
     controller = (ROOT / "docs/upstream/wine-controller-pr.md").read_text()
     storage = (ROOT / "docs/upstream/wine-storage-issue.md").read_text()
@@ -434,3 +502,47 @@ def test_upstream_ledger_and_wine_drafts_name_exact_prepared_actions():
         "# mountmgr: define device-backed StorageDeviceTrimProperty semantics\n"
     )
     assert "storage-trim-property" in storage
+
+
+def test_upstream_drafts_link_published_sources_without_placeholders():
+    drafts = {
+        "xodus-94-comment.md": ("xodus_legacy", "xodus_next"),
+        "proton-7151-comment.md": (
+            "xodus_legacy",
+            "xgameruntime_legacy",
+            "wine_controller",
+            "wine_storage",
+        ),
+        "wine-controller-pr.md": ("wine_controller",),
+        "wine-storage-issue.md": ("wine_storage",),
+    }
+    evidence_url = (
+        "https://github.com/volcmen/forza-motorsport-linux/blob/"
+        "d46640d20c304c9329a99ba823052289ed1f06b6/"
+        "docs/evidence/v0.1-live-validation.md"
+    )
+
+    for filename, components in drafts.items():
+        text = (ROOT / "docs/upstream" / filename).read_text()
+        assert "will be inserted" not in text
+        assert evidence_url in text
+        for name in components:
+            repository, _, revision = PUBLIC_COMPONENTS[name]
+            assert f"{repository}/commit/{revision}" in text
+
+
+def test_readme_and_verification_describe_sources_as_public():
+    readme = (ROOT / "README.md").read_text()
+    verification = (ROOT / "docs/verification.md").read_text()
+
+    stale_phrases = (
+        "not public yet",
+        "remain local, planned, and unpublished",
+        "The branch remains local: it has not been pushed",
+    )
+    assert not [phrase for phrase in stale_phrases if phrase in readme]
+    assert not [phrase for phrase in stale_phrases if phrase in verification]
+    assert "https://github.com/volcmen/xodus/commit/" in readme
+    assert "https://github.com/volcmen/wine-forza-motorsport/commit/" in readme
+    assert "https://github.com/volcmen/xodus/commit/" in verification
+    assert "https://github.com/volcmen/wine-forza-motorsport/commit/" in verification

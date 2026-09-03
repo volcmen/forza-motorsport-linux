@@ -1,11 +1,11 @@
 # windows.gaming.input: identify physical XInput controllers
 
-This draft targets `xodus-gaming/wine:bleeding-edge` from branch
-`wgi-physical-nonroamable-id`.
+This draft targets `xodus-gaming/wine:bleeding-edge` from public branch
+[`wgi-physical-nonroamable-id`](https://github.com/volcmen/wine-forza-motorsport/tree/wgi-physical-nonroamable-id).
 
 Base: `b1dd32734a34472a28eb5be9922df06e07ac0834`
 
-Tip: `ddd302d97c6008d79ea4f3e3ad56014cb548e514`
+Tip: [`ddd302d97c6008d79ea4f3e3ad56014cb548e514`](https://github.com/volcmen/wine-forza-motorsport/commit/ddd302d97c6008d79ea4f3e3ad56014cb548e514)
 
 ## Problem
 
@@ -38,5 +38,6 @@ DLL and its tests and is not exported or installed.
   the reviewed exact-build fallback. This standalone source branch itself was
   not installed for that observation.
 
-No compiled artifact is attached. The immutable branch and integration evidence
-links will be inserted after publication, before this draft PR is opened.
+No compiled artifact is attached. The redacted
+[integration evidence](https://github.com/volcmen/forza-motorsport-linux/blob/d46640d20c304c9329a99ba823052289ed1f06b6/docs/evidence/v0.1-live-validation.md)
+records the separate exact-build fallback observation and its limitations.

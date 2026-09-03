@@ -54,29 +54,33 @@ integration revision is not stored in the manifest: it is the commit referenced
 by the immutable `v0.1.0` tag. A `docs/release-v0.1.0.md` release document
 cannot be created while any required manifest claim is `unresolved`.
 
-## Integration branch readiness
+## Integration publication state
 
-A green repository gate does not make `feature/integration-repository`
-merge-ready or publication-ready. The previously recorded
-`scripts/patch-known-build` publication race was resolved and independently
-approved at integration commit
-`5d7b4fe460813d23b08b7c59731048e446ef3ddd`. Later cross-plan installed-artifact
-and manual game/service gates remain outstanding, so this source result does
-not claim merge, publication, installation, or gameplay readiness.
+The reviewed integration history is published at
+[`volcmen/forza-motorsport-linux`](https://github.com/volcmen/forza-motorsport-linux).
+The repository CI runs the same source-only gate described above. Publication
+does not turn a synthetic gate into gameplay evidence; live claims remain bound
+to the exact accepted runtime revisions and human-observed matrix recorded in
+[`v0.1-live-validation.md`](evidence/v0.1-live-validation.md).
+The corresponding tested source pair is public at Xodus
+[`7b236772297b3475ea4f3cb830feb5b224f3064a`](https://github.com/volcmen/xodus/commit/7b236772297b3475ea4f3cb830feb5b224f3064a)
+and legacy XGameRuntime
+[`a1548b1cf57371715d10b608bc81a77a188e40d4`](https://github.com/volcmen/wine-forza-motorsport/commit/a1548b1cf57371715d10b608bc81a77a188e40d4).
 
-## Local Wine source evidence
+## Published Wine source evidence
 
 Two source branches were built from canonical
 [`xodus-gaming/wine`](https://github.com/xodus-gaming/wine) `bleeding-edge` at
-`b1dd32734a34472a28eb5be9922df06e07ac0834`. As of 2026-08-31, both branches
-and all listed commits remain local, planned, and unpublished. Their SHAs are
-provenance records, not public fetch locations, and this repository vendors no
-compiled Wine artifacts.
+`b1dd32734a34472a28eb5be9922df06e07ac0834`. GitHub places that base in the
+same fork network as `AllanVester/wine-forza-motorsport`, so both public
+branches live in the existing
+[`volcmen/wine-forza-motorsport`](https://github.com/volcmen/wine-forza-motorsport)
+fork. This repository vendors no compiled Wine artifacts.
 
 | Source branch | Final local commit | Compile/link | Wine PE runtime | Live/manual |
 | --- | --- | --- | --- | --- |
-| [`fix/wgi-physical-nonroamable-id`](../patches/wine-controller/README.md) | `ddd302d97c6008d79ea4f3e3ad56014cb548e514` | **GREEN** | **BLOCKED before test dispatch** | Controller behavior **VERIFIED** through the reviewed exact-build fallback; this source branch was not installed. |
-| [`fix/storage-trim-property`](../patches/wine-storage-trim/README.md) | `a7719bd8d0719e5ea6061387db020fa6a6b39d27` | **GREEN** | **BLOCKED before test dispatch** | AP702 absence **VERIFIED** through the reviewed exact-build fallback; this source branch was not installed. |
+| [`wgi-physical-nonroamable-id`](https://github.com/volcmen/wine-forza-motorsport/tree/wgi-physical-nonroamable-id) | [`ddd302d97c6008d79ea4f3e3ad56014cb548e514`](https://github.com/volcmen/wine-forza-motorsport/commit/ddd302d97c6008d79ea4f3e3ad56014cb548e514) | **GREEN** | **BLOCKED before test dispatch** | Controller behavior **VERIFIED** through the reviewed exact-build fallback; this source branch was not installed. |
+| [`storage-trim-property`](https://github.com/volcmen/wine-forza-motorsport/tree/storage-trim-property) | [`a7719bd8d0719e5ea6061387db020fa6a6b39d27`](https://github.com/volcmen/wine-forza-motorsport/commit/a7719bd8d0719e5ea6061387db020fa6a6b39d27) | **GREEN** | **BLOCKED before test dispatch** | AP702 absence **VERIFIED** through the reviewed exact-build fallback; this source branch was not installed. |
 
 Both focused PE test commands stopped during canonical Wine bootstrap with
 `secur32.dll` initialization failure and `kernel32.dll` status `c0000135`,
@@ -101,7 +105,7 @@ maintainer agreement and a canonical device-detection design before canonical
 Wine inclusion. See each linked provenance document for the exact changed
 files, commands, exit states, and semantic limitations.
 
-## Local Xodus social source evidence
+## Published Xodus social source evidence
 
 The scoped Xodus social branch was developed from official `xodus/main` at
 `a92abacb0743f16c769279b9057c8c28435e5ef9`. The final reviewed public source range is
@@ -120,7 +124,12 @@ and versioned-XDUI documentation commit
 
 The public-history rewrite preserved every source tree and commit message while
 replacing only author/committer metadata with the project's GitHub noreply
-identity.
+identity. The final current-line source is published as
+[`xodus-social-invite-bridge`](https://github.com/volcmen/xodus/tree/xodus-social-invite-bridge)
+at [`ee9db0f68122a9731b9b66cc24767693d1737f5c`](https://github.com/volcmen/xodus/commit/ee9db0f68122a9731b9b66cc24767693d1737f5c).
+The tested legacy v0.1 reproduction is separately published as
+[`forza-social-invite-join-v0.1`](https://github.com/volcmen/xodus/tree/forza-social-invite-join-v0.1)
+at [`7b236772297b3475ea4f3cb830feb5b224f3064a`](https://github.com/volcmen/xodus/commit/7b236772297b3475ea4f3cb830feb5b224f3064a).
 
 The local source commits in that range are:
 
@@ -241,13 +250,14 @@ The game-facing path still depends on the separately reviewed `xgameruntime`
 bridge and a future installed-artifact hash/parity gate. No compiled Xodus
 artifact was installed. The live Xodus checkout, installed service, keychain,
 compatibility prefix, Steam configuration, and game were not mutated or
-started. The branch remains local: it has not been pushed and no public pull
+started. The current-line branch is public for review, but no public Xodus pull
 request exists.
 
 ## Rejected live WineGDK/Xodus source experiment
 
-WineGDK commit `d96a768e25f632b04a457e4cb9f585e89ef5d095` and Xodus commit
-`ee9db0f68122a9731b9b66cc24767693d1737f5c` form the rejected newer pair. The
+WineGDK commit [`d96a768e25f632b04a457e4cb9f585e89ef5d095`](https://github.com/volcmen/WineGDK/commit/d96a768e25f632b04a457e4cb9f585e89ef5d095)
+and Xodus commit [`ee9db0f68122a9731b9b66cc24767693d1737f5c`](https://github.com/volcmen/xodus/commit/ee9db0f68122a9731b9b66cc24767693d1737f5c)
+form the rejected newer pair. The
 WineGDK source tip covers bounded Xodus transport, XGameUi invite-only flow,
 XGameInvite activation delivery, reference-counted runtime lifecycle, and
 runtime-owned WinRT initialization outside loader lock. It also serializes the

@@ -1,11 +1,12 @@
 # mountmgr: define device-backed StorageDeviceTrimProperty semantics
 
-I have a compatibility branch named `storage-trim-property` based on
-`xodus-gaming/wine:bleeding-edge`.
+I have a public compatibility branch named
+[`storage-trim-property`](https://github.com/volcmen/wine-forza-motorsport/tree/storage-trim-property)
+based on `xodus-gaming/wine:bleeding-edge`.
 
 Base: `b1dd32734a34472a28eb5be9922df06e07ac0834`
 
-Tip: `a7719bd8d0719e5ea6061387db020fa6a6b39d27`
+Tip: [`a7719bd8d0719e5ea6061387db020fa6a6b39d27`](https://github.com/volcmen/wine-forza-motorsport/commit/a7719bd8d0719e5ea6061387db020fa6a6b39d27)
 
 Forza Motorsport queries `IOCTL_STORAGE_QUERY_PROPERTY` with
 `StorageDeviceTrimProperty` and rejects a volume as an HDD when the capability
@@ -28,5 +29,6 @@ The production module and kernel32 test executable compile and link with
 Clang/LLD 22.1.8. The standard volume PE test remains **BLOCKED before
 dispatch** because the old build tree cannot initialize its Wine test prefix
 (`secur32.dll`, then `kernel32.dll` status `c0000135`); no dispatched assertion
-failed. No binary is attached, and the exact source/evidence links will be
-inserted after publication before this issue is opened.
+failed. No binary is attached. The redacted
+[integration evidence](https://github.com/volcmen/forza-motorsport-linux/blob/d46640d20c304c9329a99ba823052289ed1f06b6/docs/evidence/v0.1-live-validation.md)
+records the exact-build fallback observation and its limitations.

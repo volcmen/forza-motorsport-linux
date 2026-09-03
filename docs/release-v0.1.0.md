@@ -5,7 +5,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # v0.1.0 release evidence
 
-Forza Motorsport Linux tools v0.1.0 is an experimental, source-only release
+[`Forza Motorsport Linux tools`](https://github.com/volcmen/forza-motorsport-linux)
+v0.1.0 is an experimental, source-only release
 for the Steam edition, AppID `2440510`, with the reviewed
 `GE-Proton11-3-FM` layout. It documents one reproducible configuration and is
 not ordinary upstream Proton support.
@@ -32,10 +33,10 @@ in [`docs/evidence/v0.1-live-validation.md`](evidence/v0.1-live-validation.md).
 
 | Component | Revision | Release role |
 | --- | --- | --- |
-| Xodus legacy | `7b236772297b3475ea4f3cb830feb5b224f3064a` | Reviewed v0.1 service, CLI, and social overlay |
-| XGameRuntime legacy | `a1548b1cf57371715d10b608bc81a77a188e40d4` | Reviewed v0.1 bridge |
-| Wine controller source | `ddd302d97c6008d79ea4f3e3ad56014cb548e514` | Experimental source proposal; not installed directly |
-| Wine storage source | `a7719bd8d0719e5ea6061387db020fa6a6b39d27` | Experimental compatibility source; not installed directly |
+| Xodus legacy | [`7b236772297b3475ea4f3cb830feb5b224f3064a`](https://github.com/volcmen/xodus/commit/7b236772297b3475ea4f3cb830feb5b224f3064a) | Reviewed v0.1 service, CLI, and social overlay |
+| XGameRuntime legacy | [`a1548b1cf57371715d10b608bc81a77a188e40d4`](https://github.com/volcmen/wine-forza-motorsport/commit/a1548b1cf57371715d10b608bc81a77a188e40d4) | Reviewed v0.1 bridge |
+| Wine controller source | [`ddd302d97c6008d79ea4f3e3ad56014cb548e514`](https://github.com/volcmen/wine-forza-motorsport/commit/ddd302d97c6008d79ea4f3e3ad56014cb548e514) | Experimental source proposal; not installed directly |
+| Wine storage source | [`a7719bd8d0719e5ea6061387db020fa6a6b39d27`](https://github.com/volcmen/wine-forza-motorsport/commit/a7719bd8d0719e5ea6061387db020fa6a6b39d27) | Experimental compatibility source; not installed directly |
 
 The immutable `v0.1.0` tag identifies the integration-repository revision.
 The newer WineGDK/Xodus protocol pair is rejected live and is not part of this

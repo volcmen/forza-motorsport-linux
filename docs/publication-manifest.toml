@@ -2,11 +2,15 @@ version = 1
 app_id = "2440510"
 release = "v0.1.0"
 integration_binding = "immutable-tag"
+integration_repository = "https://github.com/volcmen/forza-motorsport-linux"
 
 [components.xodus_legacy]
 state = "verified"
 revision = "7b236772297b3475ea4f3cb830feb5b224f3064a"
 evidence = "docs/evidence/v0.1-xodus.md"
+repository = "https://github.com/volcmen/xodus"
+branch = "forza-social-invite-join-v0.1"
+source_url = "https://github.com/volcmen/xodus/commit/7b236772297b3475ea4f3cb830feb5b224f3064a"
 
 [components.xgameruntime_legacy]
 state = "verified"
@@ -14,22 +18,37 @@ base_revision = "a6e6199f81aeb8a96e8ff281e781f5eba2146fe7"
 parity_revision = "04a4551646273c68e35f8d1712eb547eaf162692"
 revision = "a1548b1cf57371715d10b608bc81a77a188e40d4"
 evidence = "docs/evidence/v0.1-live-validation.md"
+repository = "https://github.com/volcmen/wine-forza-motorsport"
+branch = "forza-xgameui-invite-join-v0.1"
+source_url = "https://github.com/volcmen/wine-forza-motorsport/commit/a1548b1cf57371715d10b608bc81a77a188e40d4"
 
 [components.wine_controller]
 state = "experimental"
 revision = "ddd302d97c6008d79ea4f3e3ad56014cb548e514"
+repository = "https://github.com/volcmen/wine-forza-motorsport"
+branch = "wgi-physical-nonroamable-id"
+source_url = "https://github.com/volcmen/wine-forza-motorsport/commit/ddd302d97c6008d79ea4f3e3ad56014cb548e514"
 
 [components.wine_storage]
 state = "experimental"
 revision = "a7719bd8d0719e5ea6061387db020fa6a6b39d27"
+repository = "https://github.com/volcmen/wine-forza-motorsport"
+branch = "storage-trim-property"
+source_url = "https://github.com/volcmen/wine-forza-motorsport/commit/a7719bd8d0719e5ea6061387db020fa6a6b39d27"
 
 [components.winegdk_next]
 state = "rejected"
 revision = "d96a768e25f632b04a457e4cb9f585e89ef5d095"
+repository = "https://github.com/volcmen/WineGDK"
+branch = "xodus-social-invite-bridge-experimental"
+source_url = "https://github.com/volcmen/WineGDK/commit/d96a768e25f632b04a457e4cb9f585e89ef5d095"
 
 [components.xodus_next]
 state = "rejected"
 revision = "ee9db0f68122a9731b9b66cc24767693d1737f5c"
+repository = "https://github.com/volcmen/xodus"
+branch = "xodus-social-invite-bridge"
+source_url = "https://github.com/volcmen/xodus/commit/ee9db0f68122a9731b9b66cc24767693d1737f5c"
 
 [[artifacts]]
 name = "xodus-service"
