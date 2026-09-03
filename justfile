@@ -7,7 +7,7 @@ test:
     systemd-analyze --user verify config/xodus-forza.service
 
 lint:
-    shellcheck -e SC2329 bin/forza-linux bin/forza-doctor scripts/print-steam-options scripts/install-user scripts/uninstall-user tests/*.bash
+    shellcheck -e SC2317,SC2329 bin/forza-linux bin/forza-doctor scripts/print-steam-options scripts/install-user scripts/uninstall-user tests/*.bash
     shfmt -d -i 4 -ci bin/forza-linux bin/forza-doctor scripts/print-steam-options scripts/install-user scripts/uninstall-user tests/*.bash
     uv run ruff check scripts/secure-user-files scripts/patch-known-build scripts/install-runtime-components tools/*.py tests/*.py
 

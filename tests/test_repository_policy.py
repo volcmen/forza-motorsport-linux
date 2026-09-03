@@ -228,6 +228,19 @@ def test_verify_gate_runs_every_behavior_and_format_suite():
     assert all(command in gate for command in required)
 
 
+def test_verify_gate_ignores_indirect_test_function_diagnostics_portably():
+    gate = subprocess.run(
+        ["just", "--dry-run", "verify"],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    ).stdout
+
+    assert "shellcheck -e SC2317,SC2329" in gate
+
+
 def test_xodus_unit_allows_creation_of_runtime_socket_and_tokens():
     lines = (ROOT / "config/xodus-forza.service").read_text().splitlines()
     writable = [line for line in lines if line.startswith("ReadWritePaths=")]
