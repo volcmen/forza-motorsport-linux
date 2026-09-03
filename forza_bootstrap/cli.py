@@ -8,6 +8,14 @@ import sys
 from collections.abc import Sequence
 
 from .model import BootstrapError
+from .snapshot import (
+    ChangeRule,
+    Snapshot,
+    compare_snapshots,
+    output_snapshot,
+    read_snapshot,
+    render_comparison,
+)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -38,10 +46,28 @@ def _unavailable(_: argparse.Namespace) -> None:
     raise BootstrapError("command is unavailable in this build")
 
 
+def _capture_current_snapshot() -> Snapshot:
+    """Defer current-scope resolution to the bootstrap coordinator task."""
+    raise BootstrapError("command is unavailable in this build")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run a parsed command, without claiming an unavailable command succeeded."""
     arguments = parse_args(argv)
     try:
+        if arguments.command == "snapshot":
+            output_snapshot(_capture_current_snapshot(), arguments.output, sys.stdout)
+            return 0
+        if arguments.command == "compare" and arguments.before and arguments.after:
+            before = read_snapshot(arguments.before)
+            after = read_snapshot(arguments.after)
+            rules = tuple(
+                ChangeRule(item.logical_path, "unchanged", item.sha256, item.mode)
+                for item in before.records
+            )
+            comparison = compare_snapshots(before, after, rules)
+            print(render_comparison(comparison), end="")
+            return 0 if comparison.ok else 1
         _unavailable(arguments)
     except BootstrapError as error:
         print(f"error: {error}", file=sys.stderr)
