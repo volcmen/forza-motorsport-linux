@@ -56,11 +56,16 @@ def _open_absolute_directory(path: str | os.PathLike[str], *, create: bool) -> t
                     raise
                 os.mkdir(part, _PRIVATE_DIRECTORY_MODE, dir_fd=fd)
                 os.fsync(fd)
-                next_fd = os.open(part, DIRECTORY, dir_fd=fd)
+                try:
+                    next_fd = os.open(part, DIRECTORY, dir_fd=fd)
+                except OSError as error:
+                    if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                        raise BootstrapError(f"symlink refused in private path: {part}") from error
+                    raise
                 if index == len(parts) - 1:
                     created_final = True
             except OSError as error:
-                if error.errno == errno.ELOOP:
+                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
                     raise BootstrapError(f"symlink refused in private path: {part}") from error
                 raise
             os.close(fd)
@@ -117,7 +122,7 @@ def _validate_private_regular(fd: int, name: str) -> None:
 def _open_private_regular(parent_fd: int, name: str) -> int:
     _leaf_name(name)
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
     except OSError as error:
         if error.errno == errno.ELOOP:
             raise BootstrapError(f"symlink refused for private file: {name}") from error
@@ -255,7 +260,7 @@ def acquire_bootstrap_lock(runtime_dir: str | os.PathLike[str]) -> int:
         try:
             fd = os.open(
                 BOOTSTRAP_LOCK_NAME,
-                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
                 _PRIVATE_FILE_MODE,
                 dir_fd=parent_fd,
             )
@@ -263,7 +268,7 @@ def acquire_bootstrap_lock(runtime_dir: str | os.PathLike[str]) -> int:
             try:
                 fd = os.open(
                     BOOTSTRAP_LOCK_NAME,
-                    os.O_RDWR | os.O_NOFOLLOW,
+                    os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
                     dir_fd=parent_fd,
                 )
             except OSError as error:

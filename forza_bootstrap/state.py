@@ -215,7 +215,7 @@ def _open_private_child(root_fd: int, name: str, label: str) -> int:
     try:
         fd = os.open(name, DIRECTORY, dir_fd=root_fd)
     except OSError as error:
-        if error.errno == errno.ELOOP:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
             raise BootstrapError(f"symlink refused for {label}: {name}") from error
         raise
     try:
@@ -233,7 +233,11 @@ def _open_transaction(root_fd: int, transaction_id: str) -> int:
 
 def _validate_root_lock(root_fd: int) -> None:
     try:
-        fd = os.open(BOOTSTRAP_LOCK_NAME, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+        fd = os.open(
+            BOOTSTRAP_LOCK_NAME,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=root_fd,
+        )
     except OSError as error:
         if error.errno == errno.ELOOP:
             raise BootstrapError("symlink refused for bootstrap lock") from error
@@ -262,7 +266,16 @@ def _recover_prepublication_transaction(
             if state.transaction_id != transaction_id:
                 raise BootstrapError("staging directory and state transaction id differ")
         elif len(entries) == 1 and temporary.fullmatch(entries[0]) is not None:
-            temporary_fd = os.open(entries[0], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=transaction_fd)
+            try:
+                temporary_fd = os.open(
+                    entries[0],
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=transaction_fd,
+                )
+            except OSError as error:
+                if error.errno == errno.ELOOP:
+                    raise BootstrapError(f"symlink refused for bootstrap staging temporary: {entries[0]}") from error
+                raise
             try:
                 _validate_private_regular(temporary_fd, entries[0])
             finally:

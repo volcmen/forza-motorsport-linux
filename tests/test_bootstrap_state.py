@@ -61,6 +61,24 @@ def write_prepublication_transaction(root: Path, transaction_id: str) -> None:
     )
 
 
+def assert_rejects_hostile_special_file_promptly(operation: object) -> None:
+    outcome: list[BaseException] = []
+
+    def invoke() -> None:
+        try:
+            operation()  # type: ignore[operator]
+        except (BootstrapError, OSError) as error:
+            outcome.append(error)
+
+    worker = threading.Thread(target=invoke, daemon=True)
+    worker.start()
+    worker.join(timeout=0.25)
+
+    assert not worker.is_alive(), "hostile special file blocked before validation"
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], BootstrapError)
+
+
 def test_new_transaction_is_private_and_single(tmp_path: Path) -> None:
     state = create_transaction(tmp_path, "1" * 64)
 
@@ -507,4 +525,84 @@ def test_state_rejects_unhashable_compatibility_tool_disposition(
     )
 
     with pytest.raises(BootstrapError, match="compatibility_tool_disposition"):
+        load_unfinished_transaction(tmp_path)
+
+
+def test_private_json_fifo_is_rejected_before_it_can_block(tmp_path: Path) -> None:
+    fifo = tmp_path / "state.json"
+    os.mkfifo(fifo, 0o600)
+
+    def read_fifo() -> None:
+        parent_fd = os.open(tmp_path, DIRECTORY)
+        try:
+            read_private_json(parent_fd, "state.json")
+        finally:
+            os.close(parent_fd)
+
+    assert_rejects_hostile_special_file_promptly(read_fifo)
+
+
+def test_staging_temp_fifo_is_rejected_before_it_can_block(tmp_path: Path) -> None:
+    transaction_id = "a" * 24
+    staging = tmp_path / f".bootstrap-staging-{transaction_id}"
+    staging.mkdir(mode=0o700)
+    staging.chmod(0o700)
+    os.mkfifo(staging / f".state.json.{'b' * 24}.tmp", 0o600)
+
+    assert_rejects_hostile_special_file_promptly(lambda: load_unfinished_transaction(tmp_path))
+
+
+def test_root_lock_fifo_is_rejected_before_it_can_block(tmp_path: Path) -> None:
+    from forza_bootstrap import state as state_module
+
+    os.mkfifo(tmp_path / "bootstrap.lock", 0o600)
+    root_fd = os.open(tmp_path, DIRECTORY)
+    try:
+        assert_rejects_hostile_special_file_promptly(
+            lambda: state_module._validate_root_lock(root_fd)
+        )
+    finally:
+        os.close(root_fd)
+
+
+def test_root_directory_symlink_is_a_bootstrap_error(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "root"
+    root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(BootstrapError, match="symlink"):
+        load_unfinished_transaction(root)
+
+
+def test_transaction_directory_symlink_is_a_bootstrap_error(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / ("c" * 24)).symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(BootstrapError, match="symlink"):
+        load_unfinished_transaction(tmp_path)
+
+
+def test_staging_directory_symlink_is_a_bootstrap_error(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / f".bootstrap-staging-{'d' * 24}").symlink_to(
+        outside, target_is_directory=True
+    )
+
+    with pytest.raises(BootstrapError, match="symlink"):
+        load_unfinished_transaction(tmp_path)
+
+
+def test_staging_temp_symlink_is_a_bootstrap_error(tmp_path: Path) -> None:
+    transaction_id = "e" * 24
+    staging = tmp_path / f".bootstrap-staging-{transaction_id}"
+    staging.mkdir(mode=0o700)
+    staging.chmod(0o700)
+    outside = tmp_path / "outside"
+    outside.write_text("outside", encoding="ascii")
+    (staging / f".state.json.{'f' * 24}.tmp").symlink_to(outside)
+
+    with pytest.raises(BootstrapError, match="symlink"):
         load_unfinished_transaction(tmp_path)
