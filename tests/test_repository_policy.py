@@ -183,6 +183,15 @@ def test_verify_workflow_installs_just_before_running_the_gate():
     assert workflow.index(python_tools) < workflow.index(gate)
 
 
+def test_verify_workflow_installs_ripgrep_for_bash_assertions():
+    workflow = (ROOT / ".github/workflows/verify.yml").read_text()
+    install_tools = "sudo apt-get install --yes shellcheck shfmt systemd ripgrep"
+    gate = "run: just verify"
+
+    assert install_tools in workflow
+    assert workflow.index(install_tools) < workflow.index(gate)
+
+
 def test_verify_gate_runs_every_behavior_and_format_suite():
     gate = subprocess.run(
         ["just", "--dry-run", "verify"],
