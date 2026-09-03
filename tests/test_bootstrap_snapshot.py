@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import errno
 import io
+import json
 import os
 from pathlib import Path
 
 import pytest
 
 import forza_bootstrap.cli as cli_module
+import forza_bootstrap.snapshot as snapshot_module
 from forza_bootstrap.cli import main
 from forza_bootstrap.model import ArtifactSpec, BootstrapError, sha256_bytes
 from forza_bootstrap.snapshot import (
@@ -25,6 +28,7 @@ from forza_bootstrap.snapshot import (
     capture_snapshot,
     compare_snapshots,
     output_snapshot,
+    read_snapshot,
     render_comparison,
     write_snapshot,
 )
@@ -63,6 +67,23 @@ def snapshot(*records: FileRecord, **updates: object) -> Snapshot:
     }
     values.update(updates)
     return Snapshot(**values)  # type: ignore[arg-type]
+
+
+def write_snapshot_value(path: Path, value: object) -> None:
+    path.write_text(json.dumps(value))
+    path.chmod(0o600)
+
+
+def snapshot_value(**updates: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "version": 1,
+        "transaction_id": TRANSACTION,
+        "manifest_sha256": MANIFEST,
+        "steam_root_id": ROOT_ID,
+        "records": [],
+    }
+    values.update(updates)
+    return values
 
 
 def test_compare_classifies_exact_expected_unchanged_and_unexpected() -> None:
@@ -191,6 +212,113 @@ def test_private_digest_and_path_never_enter_human_report() -> None:
     assert "[private local digest verified]" in report
 
 
+def test_cli_refuses_private_snapshot_stdout_without_leaking(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    private_path = "private/sensitive-component"
+    private_digest = "f" * 64
+    value = snapshot(
+        FileRecord(private_path, "regular", 0o600, 4, private_digest, True)
+    )
+    monkeypatch.setattr(cli_module, "_capture_current_snapshot", lambda: value)
+
+    assert main(["snapshot"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: private snapshot requires explicit owner-only output\n"
+    assert private_path not in captured.out + captured.err
+    assert private_digest not in captured.out + captured.err
+
+
+def test_private_canonical_bytes_require_explicit_owner_only_file(tmp_path: Path) -> None:
+    os.chmod(tmp_path, 0o700)
+    private_path = "private/sensitive-component"
+    private_digest = "f" * 64
+    value = snapshot(
+        FileRecord(private_path, "regular", 0o600, 4, private_digest, True)
+    )
+
+    with pytest.raises(BootstrapError) as failure:
+        canonical_snapshot_bytes(value)
+
+    assert str(failure.value) == "private snapshot requires explicit owner-only output"
+    assert private_path not in str(failure.value)
+    assert private_digest not in str(failure.value)
+
+    output = tmp_path / "private.json"
+    write_snapshot(output, value)
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert read_snapshot(output) == value
+
+
+def test_private_duplicate_scope_error_is_fixed_and_redacted() -> None:
+    private_path = "private/sensitive-component"
+
+    with pytest.raises(BootstrapError) as failure:
+        build_snapshot_scope(
+            TRANSACTION,
+            MANIFEST,
+            {
+                "steam": (
+                    artifact(private_path, "first", private=True),
+                    artifact(private_path, "second", private=True),
+                )
+            },
+        )
+
+    assert str(failure.value) == "private snapshot capture failed"
+    assert private_path not in str(failure.value)
+
+
+def test_private_nonregular_error_is_fixed_and_redacted(tmp_path: Path) -> None:
+    steam_root = tmp_path / "steam"
+    steam_root.mkdir()
+    (steam_root / "sensitive-source").mkdir()
+    private_path = "private/sensitive-component"
+    scope = build_snapshot_scope(
+        TRANSACTION,
+        MANIFEST,
+        {"steam": (artifact(private_path, "sensitive-source", private=True),)},
+    )
+
+    with pytest.raises(BootstrapError) as failure:
+        capture_snapshot(scope, {"steam": steam_root})
+
+    message = str(failure.value)
+    assert message == "private snapshot capture failed"
+    assert private_path not in message
+    assert str(steam_root) not in message
+
+
+def test_private_filesystem_error_discards_oserror_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steam_root = tmp_path / "steam"
+    steam_root.mkdir()
+    (steam_root / "sensitive-source").write_bytes(b"data")
+    private_path = "private/sensitive-component"
+    physical_path = str(steam_root / "sensitive-source")
+    scope = build_snapshot_scope(
+        TRANSACTION,
+        MANIFEST,
+        {"steam": (artifact(private_path, "sensitive-source", private=True),)},
+    )
+
+    def fail_read(_fd: int, _size: int) -> bytes:
+        raise OSError(errno.EIO, "simulated private read failure", physical_path)
+
+    monkeypatch.setattr(snapshot_module.os, "read", fail_read)
+
+    with pytest.raises(BootstrapError) as failure:
+        capture_snapshot(scope, {"steam": steam_root})
+
+    message = str(failure.value)
+    assert message == "private snapshot capture failed"
+    assert private_path not in message
+    assert physical_path not in message
+
+
 def test_canonical_snapshot_bytes_sort_records_and_use_only_logical_paths() -> None:
     value = snapshot(record("z/item", None), record("a/item", b"x"))
 
@@ -208,6 +336,131 @@ def test_canonical_snapshot_bytes_sort_records_and_use_only_logical_paths() -> N
 
 def artifact(logical_path: str, relative_path: str, *, private: bool = False) -> ArtifactSpec:
     return ArtifactSpec(logical_path, relative_path, 1, "a" * 64, 0o644, private)
+
+
+@pytest.mark.parametrize("invalid", (".", "a//b", "a/", "a/./b"))
+def test_scope_construction_rejects_noncanonical_logical_and_relative_paths(
+    invalid: str,
+) -> None:
+    with pytest.raises(BootstrapError, match="logical path"):
+        build_snapshot_scope(
+            TRANSACTION,
+            MANIFEST,
+            {"steam": (artifact(invalid, "valid"),)},
+        )
+    with pytest.raises(BootstrapError, match="relative path"):
+        build_snapshot_scope(
+            TRANSACTION,
+            MANIFEST,
+            {"steam": (artifact("valid", invalid),)},
+        )
+
+
+@pytest.mark.parametrize("invalid", (".", "a//b"))
+def test_capture_rejects_noncanonical_path_without_indexerror(
+    tmp_path: Path, invalid: str
+) -> None:
+    steam_root = tmp_path / "steam"
+    steam_root.mkdir()
+    scope = SnapshotScope(
+        1,
+        TRANSACTION,
+        MANIFEST,
+        (SnapshotTarget("managed/item", "steam", invalid),),
+    )
+
+    with pytest.raises(BootstrapError, match="relative path"):
+        capture_snapshot(scope, {"steam": steam_root})
+
+
+@pytest.mark.parametrize("invalid", (".", "a//b", [], {}, Path("path-like")))
+def test_rule_rejects_noncanonical_or_nonstr_logical_path(invalid: object) -> None:
+    item = record("guard/a", None)
+
+    with pytest.raises(BootstrapError, match="logical path"):
+        compare_snapshots(
+            snapshot(item),
+            snapshot(item),
+            (ChangeRule(invalid, "unchanged", None, None),),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("invalid", (".", "a//b", [], {}, True))
+def test_deserialize_rejects_noncanonical_or_nonstr_logical_path(
+    tmp_path: Path, invalid: object
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    source = tmp_path / "snapshot.json"
+    write_snapshot_value(
+        source,
+        snapshot_value(
+            records=[
+                {
+                    "logical_path": invalid,
+                    "state": "absent",
+                    "mode": None,
+                    "size": None,
+                    "sha256": None,
+                    "private": False,
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(BootstrapError, match="logical path"):
+        read_snapshot(source)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    (
+        ("transaction_id", True),
+        ("transaction_id", []),
+        ("transaction_id", {}),
+        ("manifest_sha256", True),
+        ("manifest_sha256", []),
+        ("steam_root_id", True),
+        ("steam_root_id", []),
+        ("steam_root_id", {}),
+        ("steam_root_id", "/private/absolute/root"),
+        ("steam_root_id", "01:2"),
+        ("steam_root_id", "1:-2"),
+    ),
+)
+def test_deserialize_normalizes_adversarial_identity_types(
+    tmp_path: Path, field: str, invalid: object
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    source = tmp_path / "snapshot.json"
+    write_snapshot_value(source, snapshot_value(**{field: invalid}))
+
+    with pytest.raises(BootstrapError, match="snapshot"):
+        read_snapshot(source)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    (
+        ("transaction_id", Path("not-a-token")),
+        ("manifest_sha256", Path("not-a-digest")),
+        ("steam_root_id", Path("1:2")),
+    ),
+)
+def test_direct_snapshot_validation_normalizes_pathlike_identity_values(
+    field: str, invalid: object
+) -> None:
+    value = snapshot(**{field: invalid})
+
+    with pytest.raises(BootstrapError, match="snapshot"):
+        canonical_snapshot_bytes(value)
+
+
+def test_rule_validation_normalizes_unhashable_policy() -> None:
+    item = record("guard/a", b"same")
+    malformed = ChangeRule("guard/a", [], item.sha256, item.mode)  # type: ignore[arg-type]
+
+    with pytest.raises(BootstrapError, match="policy"):
+        compare_snapshots(snapshot(item), snapshot(item), (malformed,))
 
 
 def test_capture_hashes_only_supplied_paths_and_binds_descriptor_root_id(tmp_path: Path) -> None:
@@ -262,6 +515,35 @@ def test_capture_streams_regular_files_in_one_mib_blocks(
     capture_snapshot(scope, {"steam": steam_root})
 
     assert reads == [1024 * 1024, 1024 * 1024, 1024 * 1024]
+
+
+def test_capture_rejects_file_mutated_during_streaming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steam_root = tmp_path / "steam"
+    steam_root.mkdir()
+    target = steam_root / "changing"
+    target.write_bytes(b"before")
+    scope = build_snapshot_scope(
+        TRANSACTION,
+        MANIFEST,
+        {"steam": (artifact("managed/changing", "changing"),)},
+    )
+    real_read = os.read
+    changed = False
+
+    def mutate_after_read(fd: int, size: int) -> bytes:
+        nonlocal changed
+        block = real_read(fd, size)
+        if block and not changed:
+            changed = True
+            target.write_bytes(b"replacement with different size")
+        return block
+
+    monkeypatch.setattr(snapshot_module.os, "read", mutate_after_read)
+
+    with pytest.raises(BootstrapError, match="changed while hashing"):
+        capture_snapshot(scope, {"steam": steam_root})
 
 
 @pytest.mark.parametrize("kind", ("directory", "symlink", "fifo"))
