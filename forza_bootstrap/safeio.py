@@ -20,6 +20,7 @@ DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _RENAME_NOREPLACE = 1
+BOOTSTRAP_LOCK_NAME = "bootstrap.lock"
 _LIBC = ctypes.CDLL(None, use_errno=True)
 _RENAMEAT2 = getattr(_LIBC, "renameat2", None)
 if _RENAMEAT2 is not None:
@@ -249,36 +250,40 @@ def acquire_bootstrap_lock(runtime_dir: str | os.PathLike[str]) -> int:
     """Return a non-blocking, held owner-only lock descriptor."""
     ensure_private_directory(runtime_dir)
     parent_fd = open_owned_root(runtime_dir)
+    fd: int | None = None
     try:
         try:
             fd = os.open(
-                "bootstrap.lock",
+                BOOTSTRAP_LOCK_NAME,
                 os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                 _PRIVATE_FILE_MODE,
                 dir_fd=parent_fd,
             )
         except FileExistsError:
             try:
-                fd = os.open("bootstrap.lock", os.O_RDWR | os.O_NOFOLLOW, dir_fd=parent_fd)
+                fd = os.open(
+                    BOOTSTRAP_LOCK_NAME,
+                    os.O_RDWR | os.O_NOFOLLOW,
+                    dir_fd=parent_fd,
+                )
             except OSError as error:
                 if error.errno == errno.ELOOP:
                     raise BootstrapError("symlink refused for bootstrap lock") from error
                 raise
-            _validate_private_regular(fd, "bootstrap.lock")
+            _validate_private_regular(fd, BOOTSTRAP_LOCK_NAME)
         else:
-            try:
-                os.fchmod(fd, _PRIVATE_FILE_MODE)
-                _validate_private_regular(fd, "bootstrap.lock")
-                os.fsync(fd)
-                os.fsync(parent_fd)
-            except Exception:
-                os.close(fd)
-                raise
+            os.fchmod(fd, _PRIVATE_FILE_MODE)
+            _validate_private_regular(fd, BOOTSTRAP_LOCK_NAME)
+            os.fsync(fd)
+            os.fsync(parent_fd)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            os.close(fd)
             raise BootstrapError("bootstrap lock is already held") from error
-        return fd
+        result = fd
+        fd = None
+        return result
     finally:
+        if fd is not None:
+            os.close(fd)
         os.close(parent_fd)

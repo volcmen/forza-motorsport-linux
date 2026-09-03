@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -244,3 +245,166 @@ def test_transition_persists_only_allowed_typed_updates(tmp_path: Path) -> None:
             BootstrapPhase.AWAITING_STEAM_PREFIX,
             manifest_sha256="4" * 64,
         )
+
+
+def test_create_recovers_from_crash_before_initial_state_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forza_bootstrap import safeio
+
+    real_replace = safeio.os.replace
+
+    def interrupt_initial_state_publish(*args: object, **kwargs: object) -> None:
+        if args[1] == "state.json":
+            raise KeyboardInterrupt
+        real_replace(*args, **kwargs)
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(safeio.os, "replace", interrupt_initial_state_publish)
+        with pytest.raises(KeyboardInterrupt):
+            create_transaction(tmp_path, "4" * 64)
+
+    assert load_unfinished_transaction(tmp_path) is None
+    resumed = create_transaction(tmp_path, "4" * 64)
+    assert load_unfinished_transaction(tmp_path) == resumed
+
+
+def test_patch_backup_manifest_accepts_exact_patcher_manifest_reference(tmp_path: Path) -> None:
+    transaction_id = "e" * 24
+    reference = "/private/forza-backups/forza-patch-20260903T123456Z.1.json"
+    write_transaction(
+        tmp_path,
+        transaction_id,
+        state_value(transaction_id, patch_backup_manifest=reference),
+    )
+
+    assert load_unfinished_transaction(tmp_path).patch_backup_manifest == reference  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "forza-patch-20260903T123456Z.json",
+        "/private/forza-backups/../forza-patch-20260903T123456Z.json",
+        "/private/forza-backups/not-a-patch-manifest.json",
+        "/private/forza-backups/forza-patch-20260903T123456Z.json\x00suffix",
+        "a" * 64,
+    ),
+)
+def test_patch_backup_manifest_rejects_unsafe_or_wrong_reference(
+    tmp_path: Path, reference: str
+) -> None:
+    transaction_id = "f" * 24
+    write_transaction(
+        tmp_path,
+        transaction_id,
+        state_value(transaction_id, patch_backup_manifest=reference),
+    )
+
+    with pytest.raises(BootstrapError, match="patch_backup_manifest"):
+        load_unfinished_transaction(tmp_path)
+
+
+def test_concurrent_transaction_creators_do_not_both_succeed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forza_bootstrap import state as state_module
+
+    entered = threading.Event()
+    release = threading.Event()
+    result: list[object] = []
+    real_write = state_module.atomic_write_private_json
+
+    def pause_initial_write(*args: object, **kwargs: object) -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        real_write(*args, **kwargs)
+
+    monkeypatch.setattr(state_module, "atomic_write_private_json", pause_initial_write)
+
+    def first_creator() -> None:
+        try:
+            result.append(create_transaction(tmp_path, "5" * 64))
+        except BootstrapError as error:  # pragma: no cover - asserted below
+            result.append(error)
+
+    worker = threading.Thread(target=first_creator)
+    worker.start()
+    assert entered.wait(timeout=2)
+    with pytest.raises(BootstrapError, match="bootstrap lock"):
+        create_transaction(tmp_path, "5" * 64)
+    release.set()
+    worker.join(timeout=2)
+
+    assert len(result) == 1
+    assert isinstance(result[0], type(load_unfinished_transaction(tmp_path)))
+    assert load_unfinished_transaction(tmp_path) == result[0]
+
+
+def test_bootstrap_lock_closes_existing_file_after_validation_failure(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forza_bootstrap import safeio
+
+    closes: list[int] = []
+    opens: list[object] = [FileExistsError(), 20]
+
+    def open_existing(*_args: object, **_kwargs: object) -> int:
+        result = opens.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result  # type: ignore[return-value]
+
+    monkeypatch.setattr(safeio, "ensure_private_directory", lambda _path: None)
+    monkeypatch.setattr(safeio, "open_owned_root", lambda _path: 10)
+    monkeypatch.setattr(safeio.os, "open", open_existing)
+    monkeypatch.setattr(safeio.os, "close", closes.append)
+    monkeypatch.setattr(
+        safeio,
+        "_validate_private_regular",
+        lambda *_args: (_ for _ in ()).throw(BootstrapError("unsafe lock")),
+    )
+
+    with pytest.raises(BootstrapError, match="unsafe lock"):
+        acquire_bootstrap_lock("/private/runtime")
+
+    assert 20 in closes
+
+
+def test_bootstrap_lock_closes_file_after_flock_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
+    from forza_bootstrap import safeio
+
+    closes: list[int] = []
+    monkeypatch.setattr(safeio, "ensure_private_directory", lambda _path: None)
+    monkeypatch.setattr(safeio, "open_owned_root", lambda _path: 10)
+    monkeypatch.setattr(safeio.os, "open", lambda *args, **kwargs: 20)
+    monkeypatch.setattr(safeio.os, "close", closes.append)
+    monkeypatch.setattr(safeio.os, "fchmod", lambda *_args: None)
+    monkeypatch.setattr(safeio.os, "fsync", lambda *_args: None)
+    monkeypatch.setattr(safeio, "_validate_private_regular", lambda *_args: None)
+    monkeypatch.setattr(
+        safeio.fcntl,
+        "flock",
+        lambda *_args: (_ for _ in ()).throw(OSError("flock failed")),
+    )
+
+    with pytest.raises(OSError, match="flock failed"):
+        acquire_bootstrap_lock("/private/runtime")
+
+    assert 20 in closes
+
+
+@pytest.mark.parametrize("transaction_id", ("../escape", "short", "a" * 25))
+def test_open_transaction_rejects_invalid_id_before_filesystem_access(
+    monkeypatch: pytest.MonkeyPatch, transaction_id: str
+) -> None:
+    from forza_bootstrap import state as state_module
+
+    monkeypatch.setattr(
+        state_module.os,
+        "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("filesystem accessed")),
+    )
+
+    with pytest.raises(BootstrapError, match="transaction_id"):
+        state_module._open_transaction(99, transaction_id)
