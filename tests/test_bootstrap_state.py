@@ -335,6 +335,80 @@ def test_concurrent_transitions_from_same_durable_state_allow_only_one_update(
     assert first_outcome[0].completed_boundaries == ("first-writer",)  # type: ignore[union-attr]
 
 
+@pytest.mark.parametrize("descriptor_mode", ("same", "dup"))
+def test_transition_locked_serializes_callers_sharing_root_lock_description(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_mode: str,
+) -> None:
+    from forza_bootstrap import state as state_module
+
+    state = create_transaction(tmp_path, "b" * 64)
+    root_lock_fd = acquire_bootstrap_lock(tmp_path)
+    second_lock_fd = root_lock_fd if descriptor_mode == "same" else os.dup(root_lock_fd)
+    validated_callers = threading.Barrier(2, timeout=1)
+    stale_writers = threading.Barrier(2, timeout=1)
+    outcomes: dict[str, object] = {}
+    real_assert_lock = state_module._assert_bootstrap_lock
+    real_write = state_module.atomic_write_private_json
+
+    def synchronize_root_validation(*args: object, **kwargs: object) -> None:
+        real_assert_lock(*args, **kwargs)
+        validated_callers.wait()
+
+    def synchronize_stale_writers(*args: object, **kwargs: object) -> None:
+        try:
+            stale_writers.wait()
+        except threading.BrokenBarrierError:
+            pass
+        real_write(*args, **kwargs)
+
+    monkeypatch.setattr(state_module, "_assert_bootstrap_lock", synchronize_root_validation)
+    monkeypatch.setattr(state_module, "atomic_write_private_json", synchronize_stale_writers)
+
+    def invoke(boundary: str, lock_fd: int) -> None:
+        try:
+            outcomes[boundary] = state_module.transition_locked(
+                state,
+                BootstrapPhase.NEW,
+                BootstrapPhase.PREPARING,
+                lock_fd=lock_fd,
+                completed_boundaries=(boundary,),
+            )
+        except BootstrapError as error:  # pragma: no cover - asserted below
+            outcomes[boundary] = error
+
+    first = threading.Thread(target=invoke, args=("first-writer", root_lock_fd))
+    second = threading.Thread(target=invoke, args=("second-writer", second_lock_fd))
+    try:
+        first.start()
+        second.start()
+        first.join(timeout=3)
+        second.join(timeout=3)
+    finally:
+        if second_lock_fd != root_lock_fd:
+            os.close(second_lock_fd)
+        os.close(root_lock_fd)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    successes = [
+        outcome for outcome in outcomes.values() if not isinstance(outcome, BootstrapError)
+    ]
+    failures = [outcome for outcome in outcomes.values() if isinstance(outcome, BootstrapError)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], BootstrapError)
+    assert "last durable state" in str(failures[0])
+    winner = successes[0]
+    assert load_unfinished_transaction(tmp_path) == winner
+    assert winner.completed_boundaries in {("first-writer",), ("second-writer",)}  # type: ignore[union-attr]
+    journal_info = (tmp_path / "journal.lock").lstat()
+    assert stat.S_ISREG(journal_info.st_mode)
+    assert journal_info.st_uid == os.getuid()
+    assert stat.S_IMODE(journal_info.st_mode) == 0o600
+
+
 def test_transition_locked_reuses_coordinator_lock_without_self_deadlock(
     tmp_path: Path,
 ) -> None:
@@ -628,6 +702,61 @@ def test_bootstrap_lock_closes_file_after_flock_oserror(monkeypatch: pytest.Monk
     assert 20 in closes
 
 
+def test_journal_lock_closes_existing_file_after_validation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from forza_bootstrap import safeio
+
+    closes: list[int] = []
+    opens: list[object] = [FileExistsError(), 20]
+
+    def open_existing(*_args: object, **_kwargs: object) -> int:
+        result = opens.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result  # type: ignore[return-value]
+
+    monkeypatch.setattr(safeio, "open_owned_root", lambda _path: 10)
+    monkeypatch.setattr(safeio.os, "open", open_existing)
+    monkeypatch.setattr(safeio.os, "close", closes.append)
+    monkeypatch.setattr(
+        safeio,
+        "_validate_private_regular",
+        lambda *_args: (_ for _ in ()).throw(BootstrapError("unsafe journal lock")),
+    )
+
+    with pytest.raises(BootstrapError, match="unsafe journal lock"):
+        safeio._acquire_journal_lock("/private/runtime")
+
+    assert 20 in closes
+    assert 10 in closes
+
+
+def test_journal_lock_closes_file_after_flock_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from forza_bootstrap import safeio
+
+    closes: list[int] = []
+    monkeypatch.setattr(safeio, "open_owned_root", lambda _path: 10)
+    monkeypatch.setattr(safeio.os, "open", lambda *args, **kwargs: 20)
+    monkeypatch.setattr(safeio.os, "close", closes.append)
+    monkeypatch.setattr(safeio.os, "fchmod", lambda *_args: None)
+    monkeypatch.setattr(safeio.os, "fsync", lambda *_args: None)
+    monkeypatch.setattr(safeio, "_validate_private_regular", lambda *_args: None)
+    monkeypatch.setattr(
+        safeio.fcntl,
+        "flock",
+        lambda *_args: (_ for _ in ()).throw(OSError("flock failed")),
+    )
+
+    with pytest.raises(BootstrapError, match="journal lock descriptor cannot be locked"):
+        safeio._acquire_journal_lock("/private/runtime")
+
+    assert 20 in closes
+    assert 10 in closes
+
+
 @pytest.mark.parametrize("transaction_id", ("../escape", "short", "a" * 25))
 def test_open_transaction_rejects_invalid_id_before_filesystem_access(
     monkeypatch: pytest.MonkeyPatch, transaction_id: str
@@ -838,6 +967,108 @@ def test_bootstrap_lock_directory_is_a_prompt_bootstrap_error(tmp_path: Path) ->
     (tmp_path / "bootstrap.lock").mkdir(mode=0o700)
 
     assert_rejects_hostile_special_file_promptly(lambda: acquire_bootstrap_lock(tmp_path))
+
+
+@pytest.mark.parametrize("kind", ("fifo", "socket", "directory"))
+def test_transition_locked_rejects_hostile_journal_lock_promptly(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    from forza_bootstrap import state as state_module
+
+    state = create_transaction(tmp_path, "5" * 64)
+    root_lock_fd = acquire_bootstrap_lock(tmp_path)
+    journal_lock = tmp_path / "journal.lock"
+    journal_socket: socket.socket | None = None
+    if kind == "fifo":
+        os.mkfifo(journal_lock, 0o600)
+    elif kind == "socket":
+        journal_socket = socket.socket(socket.AF_UNIX)
+        journal_socket.bind(str(journal_lock))
+        journal_lock.chmod(0o600)
+    else:
+        journal_lock.mkdir(mode=0o700)
+
+    def invoke() -> None:
+        state_module.transition_locked(
+            state,
+            BootstrapPhase.NEW,
+            BootstrapPhase.PREPARING,
+            lock_fd=root_lock_fd,
+        )
+
+    try:
+        assert_rejects_hostile_special_file_promptly(invoke)
+    finally:
+        os.close(root_lock_fd)
+        if journal_socket is not None:
+            journal_socket.close()
+
+
+@pytest.mark.parametrize("kind", ("symlink", "wrong_mode"))
+def test_transition_locked_rejects_journal_lock_symlink_or_wrong_mode(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    from forza_bootstrap import state as state_module
+
+    state = create_transaction(tmp_path, "6" * 64)
+    journal_lock = tmp_path / "journal.lock"
+    if kind == "symlink":
+        outside = tmp_path / "outside-journal.lock"
+        outside.write_text("", encoding="ascii")
+        outside.chmod(0o600)
+        journal_lock.symlink_to(outside)
+        message = "symlink"
+    else:
+        journal_lock.write_text("", encoding="ascii")
+        journal_lock.chmod(0o640)
+        message = "mode"
+    root_lock_fd = acquire_bootstrap_lock(tmp_path)
+    try:
+        with pytest.raises(BootstrapError, match=message):
+            state_module.transition_locked(
+                state,
+                BootstrapPhase.NEW,
+                BootstrapPhase.PREPARING,
+                lock_fd=root_lock_fd,
+            )
+    finally:
+        os.close(root_lock_fd)
+
+
+def test_transition_locked_rejects_foreign_owned_journal_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from forza_bootstrap import safeio
+    from forza_bootstrap import state as state_module
+
+    state = create_transaction(tmp_path, "7" * 64)
+    journal_lock = tmp_path / "journal.lock"
+    journal_lock.write_text("", encoding="ascii")
+    journal_lock.chmod(0o600)
+    identity = (journal_lock.stat().st_dev, journal_lock.stat().st_ino)
+    real_fstat = safeio.os.fstat
+
+    def foreign_journal_owner(fd: int) -> object:
+        info = real_fstat(fd)
+        if (info.st_dev, info.st_ino) == identity:
+            return SimpleNamespace(st_mode=info.st_mode, st_uid=os.getuid() + 1)
+        return info
+
+    monkeypatch.setattr(safeio.os, "fstat", foreign_journal_owner)
+    root_lock_fd = acquire_bootstrap_lock(tmp_path)
+    try:
+        with pytest.raises(BootstrapError, match="ownership"):
+            state_module.transition_locked(
+                state,
+                BootstrapPhase.NEW,
+                BootstrapPhase.PREPARING,
+                lock_fd=root_lock_fd,
+            )
+    finally:
+        os.close(root_lock_fd)
 
 
 def test_root_lock_unix_socket_is_a_prompt_bootstrap_error(tmp_path: Path) -> None:

@@ -18,6 +18,8 @@ from .model import BootstrapError
 from .safeio import (
     BOOTSTRAP_LOCK_NAME,
     DIRECTORY,
+    JOURNAL_LOCK_NAME,
+    _acquire_journal_lock,
     _assert_bootstrap_lock,
     _open_private_regular,
     _validate_private_directory,
@@ -299,6 +301,10 @@ def _load_unfinished_transaction_locked(root: Path) -> BootstrapState | None:
             if name == BOOTSTRAP_LOCK_NAME:
                 _validate_root_lock(root_fd)
                 continue
+            if name == JOURNAL_LOCK_NAME:
+                lock_fd = _open_private_regular(root_fd, name)
+                os.close(lock_fd)
+                continue
             staging = _PREPUBLICATION_DIRECTORY.fullmatch(name)
             if staging is not None:
                 durable_name = staging.group(1)
@@ -447,24 +453,31 @@ def transition_locked(
     _validate_transition_request(state, expected, target, updates)
     assert state._state_root is not None
     _assert_bootstrap_lock(state._state_root, lock_fd)
-    root_fd = open_owned_root(state._state_root)
+    journal_lock_fd = _acquire_journal_lock(state._state_root)
     try:
-        transaction_fd = _open_transaction(root_fd, state.transaction_id)
+        root_fd = open_owned_root(state._state_root)
         try:
-            durable = _state_from_value(
-                read_private_json(transaction_fd, "state.json"), state._state_root
-            )
-            if durable != state:
-                raise BootstrapError(
-                    f"transition does not match last durable state; expected {durable.phase.value}"
+            transaction_fd = _open_transaction(root_fd, state.transaction_id)
+            try:
+                durable = _state_from_value(
+                    read_private_json(transaction_fd, "state.json"), state._state_root
                 )
-            next_state = _updated_state(durable, target, updates)
-            atomic_write_private_json(transaction_fd, "state.json", _state_value(next_state))
-            return next_state
+                if durable != state:
+                    raise BootstrapError(
+                        "transition does not match last durable state; "
+                        f"expected {durable.phase.value}"
+                    )
+                next_state = _updated_state(durable, target, updates)
+                atomic_write_private_json(
+                    transaction_fd, "state.json", _state_value(next_state)
+                )
+                return next_state
+            finally:
+                os.close(transaction_fd)
         finally:
-            os.close(transaction_fd)
+            os.close(root_fd)
     finally:
-        os.close(root_fd)
+        os.close(journal_lock_fd)
 
 
 def transition(

@@ -22,6 +22,7 @@ _PRIVATE_FILE_MODE = 0o600
 _RENAME_NOREPLACE = 1
 _NONREGULAR_OPEN_ERRNOS = frozenset({errno.ENXIO, errno.EISDIR, errno.ENODEV})
 BOOTSTRAP_LOCK_NAME = "bootstrap.lock"
+JOURNAL_LOCK_NAME = "journal.lock"
 _LIBC = ctypes.CDLL(None, use_errno=True)
 _RENAMEAT2 = getattr(_LIBC, "renameat2", None)
 if _RENAMEAT2 is not None:
@@ -290,6 +291,50 @@ def acquire_bootstrap_lock(runtime_dir: str | os.PathLike[str]) -> int:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise BootstrapError("bootstrap lock is already held") from error
+        result = fd
+        fd = None
+        return result
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(parent_fd)
+
+
+def _acquire_journal_lock(runtime_dir: str | os.PathLike[str]) -> int:
+    """Return a blocking journal lock after the caller has validated the root lock."""
+    parent_fd = open_owned_root(runtime_dir)
+    fd: int | None = None
+    try:
+        try:
+            fd = os.open(
+                JOURNAL_LOCK_NAME,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
+                _PRIVATE_FILE_MODE,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            try:
+                fd = os.open(
+                    JOURNAL_LOCK_NAME,
+                    os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=parent_fd,
+                )
+            except OSError as error:
+                if error.errno == errno.ELOOP:
+                    raise BootstrapError("symlink refused for journal lock") from error
+                if error.errno in _NONREGULAR_OPEN_ERRNOS:
+                    raise BootstrapError("journal lock is not a regular file") from error
+                raise
+            _validate_private_regular(fd, JOURNAL_LOCK_NAME)
+        else:
+            os.fchmod(fd, _PRIVATE_FILE_MODE)
+            _validate_private_regular(fd, JOURNAL_LOCK_NAME)
+            os.fsync(fd)
+            os.fsync(parent_fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as error:
+            raise BootstrapError("journal lock descriptor cannot be locked") from error
         result = fd
         fd = None
         return result
