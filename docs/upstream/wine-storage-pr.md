@@ -1,8 +1,7 @@
 # mountmgr: define device-backed StorageDeviceTrimProperty semantics
 
-I have a public compatibility branch named
-[`storage-trim-property`](https://github.com/volcmen/wine-forza-motorsport/tree/storage-trim-property)
-based on `xodus-gaming/wine:bleeding-edge`.
+This draft RFC targets `xodus-gaming/wine:bleeding-edge` from public branch
+[`storage-trim-property`](https://github.com/volcmen/wine-forza-motorsport/tree/storage-trim-property).
 
 Base: `b1dd32734a34472a28eb5be9922df06e07ac0834`
 
@@ -16,8 +15,8 @@ partial, full, padding, and unrelated-property buffer cases.
 The current production behavior unconditionally reports `TrimEnabled = TRUE`.
 That is useful in a dedicated compatibility build and the AP702 warning was
 absent in the tested game, but it is not an honest device-backed implementation
-for canonical Wine. I am therefore opening an issue rather than proposing that
-behavior as a PR.
+for canonical Wine. This draft PR is therefore an RFC for design feedback, not
+a merge-ready proposal.
 
 Which existing Wine boundary should be authoritative for a canonical result?
 In particular, should mountmgr derive this from the backing Unix device,

@@ -428,7 +428,7 @@ def test_upstream_publication_drafts_are_complete_and_path_safe():
         ROOT / "docs/upstream/xodus-94-comment.md",
         ROOT / "docs/upstream/proton-7151-comment.md",
         ROOT / "docs/upstream/wine-controller-pr.md",
-        ROOT / "docs/upstream/wine-storage-issue.md",
+        ROOT / "docs/upstream/wine-storage-pr.md",
     ]
     assert all(path.is_file() for path in draft_paths)
 
@@ -467,7 +467,7 @@ def test_proton_draft_reports_only_manifest_verified_live_claims():
     assert "not ordinary upstream Proton support" in proton
 
 
-def test_upstream_ledger_records_published_sources_and_prepared_reviews():
+def test_upstream_ledger_records_published_sources_and_review_urls():
     ledger = (ROOT / "docs/upstream.md").read_text()
     actions = [
         "Integration repository creation",
@@ -477,21 +477,29 @@ def test_upstream_ledger_records_published_sources_and_prepared_reviews():
         "WineGDK fork and experimental branch",
         "Xodus issue 94 comment",
         "Wine controller draft PR",
-        "Wine storage issue",
+        "Wine storage draft RFC PR",
         "Proton issue 7151 comment",
         "v0.1.0 tag and source-only release",
     ]
-    published = actions[:5]
-    prepared = actions[5:]
+    published = actions[:9]
+    prepared = actions[9:]
     assert all(f"| {action} | `published` |" in ledger for action in published)
     assert all(f"| {action} | `prepared` |" in ledger for action in prepared)
+    assert "No issue comment, issue, pull request" not in ledger
     assert "https://github.com/volcmen/forza-motorsport-linux" in ledger
     for repository, branch, revision in PUBLIC_COMPONENTS.values():
         assert f"{repository}/tree/{branch}" in ledger
         assert f"{repository}/commit/{revision}" in ledger
+    review_urls = {
+        "https://github.com/xodus-gaming/xodus/issues/94#issuecomment-5526430802",
+        "https://github.com/xodus-gaming/wine/pull/4",
+        "https://github.com/xodus-gaming/wine/pull/5",
+        "https://github.com/ValveSoftware/Proton/issues/7151#issuecomment-5526450265",
+    }
+    assert all(url in ledger for url in review_urls)
 
     controller = (ROOT / "docs/upstream/wine-controller-pr.md").read_text()
-    storage = (ROOT / "docs/upstream/wine-storage-issue.md").read_text()
+    storage = (ROOT / "docs/upstream/wine-storage-pr.md").read_text()
     assert controller.startswith(
         "# windows.gaming.input: identify physical XInput controllers\n"
     )
@@ -514,7 +522,7 @@ def test_upstream_drafts_link_published_sources_without_placeholders():
             "wine_storage",
         ),
         "wine-controller-pr.md": ("wine_controller",),
-        "wine-storage-issue.md": ("wine_storage",),
+        "wine-storage-pr.md": ("wine_storage",),
     }
     evidence_url = (
         "https://github.com/volcmen/forza-motorsport-linux/blob/"
