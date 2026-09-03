@@ -26,6 +26,7 @@ _ROOT_NAME = re.compile(r"[a-z][a-z0-9_-]*\Z")
 _ROOT_ID = re.compile(r"(?:0|[1-9][0-9]*):(?:0|[1-9][0-9]*)\Z")
 _NONREGULAR_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR, errno.ENXIO, errno.EISDIR})
 _PRIVATE_CAPTURE_ERROR = "private snapshot capture failed"
+_PRIVATE_COMPARISON_ERROR = "private snapshot comparison failed"
 _PRIVATE_OUTPUT_ERROR = "private snapshot requires explicit owner-only output"
 _FILESYSTEM_ERROR = "snapshot filesystem access failed"
 
@@ -174,6 +175,10 @@ def build_snapshot_scope(
     for root_name, artifacts in artifacts_by_root.items():
         if not isinstance(root_name, str) or _ROOT_NAME.fullmatch(root_name) is None:
             raise BootstrapError("snapshot root name is invalid")
+        if not isinstance(artifacts, Sequence) or isinstance(
+            artifacts, (str, bytes, bytearray)
+        ):
+            raise BootstrapError("snapshot artifact collection is invalid")
         for artifact in artifacts:
             if not isinstance(artifact, ArtifactSpec) or type(artifact.private) is not bool:
                 raise BootstrapError("snapshot artifact is invalid")
@@ -230,6 +235,7 @@ def _open_target(root_fd: int, target: SnapshotTarget) -> int | None:
                 raise
             os.close(parent_fd)
             parent_fd = next_fd
+        fd: int | None = None
         try:
             fd = os.open(
                 parts[-1],
@@ -244,11 +250,18 @@ def _open_target(root_fd: int, target: SnapshotTarget) -> int | None:
                     f"snapshot target is not regular: {target.logical_path}"
                 ) from error
             raise
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            os.close(fd)
-            raise BootstrapError(f"snapshot target is not regular: {target.logical_path}")
-        return fd
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise BootstrapError(
+                    f"snapshot target is not regular: {target.logical_path}"
+                )
+            result = fd
+            fd = None
+            return result
+        finally:
+            if fd is not None:
+                os.close(fd)
     finally:
         os.close(parent_fd)
 
@@ -496,49 +509,64 @@ def _matches_rule(item: FileRecord, rule: ChangeRule) -> bool:
     )
 
 
+def _declared_private_paths(snapshot: object) -> set[str]:
+    if not isinstance(snapshot, Snapshot) or type(snapshot.records) is not tuple:
+        return set()
+    return {
+        item.logical_path
+        for item in snapshot.records
+        if isinstance(item, FileRecord)
+        and item.private is True
+        and isinstance(item.logical_path, str)
+    }
+
+
 def compare_snapshots(
     before: Snapshot, after: Snapshot, rules: Sequence[ChangeRule]
 ) -> Comparison:
     """Classify a complete, identity-bound snapshot pair deterministically."""
-    before_records = _indexed_records(before)
-    after_records = _indexed_records(after)
-    for field in ("transaction_id", "manifest_sha256", "steam_root_id"):
-        if getattr(before, field) != getattr(after, field):
-            raise BootstrapError(f"snapshot {field} does not match")
-    if before.version != after.version:
-        raise BootstrapError("snapshot version does not match")
-    if set(before_records) != set(after_records):
-        raise BootstrapError("snapshot record coverage does not match")
-    indexed_rules: dict[str, ChangeRule] = {}
-    private_paths = {
-        logical_path for logical_path, item in before_records.items() if item.private
-    }
-    for rule in rules:
-        _validate_rule(rule)
-        if rule.logical_path in indexed_rules:
-            if rule.logical_path in private_paths:
-                raise BootstrapError(_PRIVATE_CAPTURE_ERROR)
-            raise BootstrapError(f"duplicate comparison rule: {rule.logical_path}")
-        indexed_rules[rule.logical_path] = rule
-    if set(indexed_rules) != set(before_records):
-        raise BootstrapError("comparison rule coverage does not match snapshot records")
+    private_paths = _declared_private_paths(before) | _declared_private_paths(after)
+    try:
+        before_records = _indexed_records(before)
+        after_records = _indexed_records(after)
+        for field in ("transaction_id", "manifest_sha256", "steam_root_id"):
+            if getattr(before, field) != getattr(after, field):
+                raise BootstrapError(f"snapshot {field} does not match")
+        if before.version != after.version:
+            raise BootstrapError("snapshot version does not match")
+        if set(before_records) != set(after_records):
+            raise BootstrapError("snapshot record coverage does not match")
+        if not isinstance(rules, Sequence) or isinstance(rules, (str, bytes, bytearray)):
+            raise BootstrapError("comparison rules are invalid")
+        indexed_rules: dict[str, ChangeRule] = {}
+        for rule in rules:
+            _validate_rule(rule)
+            if rule.logical_path in indexed_rules:
+                raise BootstrapError(f"duplicate comparison rule: {rule.logical_path}")
+            indexed_rules[rule.logical_path] = rule
+        if set(indexed_rules) != set(before_records):
+            raise BootstrapError("comparison rule coverage does not match snapshot records")
 
-    expected: list[ComparedRecord] = []
-    unchanged: list[ComparedRecord] = []
-    unexpected: list[ComparedRecord] = []
-    for logical_path in sorted(before_records):
-        before_item = before_records[logical_path]
-        after_item = after_records[logical_path]
-        rule = indexed_rules[logical_path]
-        compared = ComparedRecord(logical_path, before_item, after_item, rule.policy)
-        exact_after = _matches_rule(after_item, rule)
-        if rule.policy == "expected" and before_item != after_item and exact_after:
-            expected.append(compared)
-        elif rule.policy == "unchanged" and before_item == after_item and exact_after:
-            unchanged.append(compared)
-        else:
-            unexpected.append(compared)
-    return Comparison(tuple(expected), tuple(unchanged), tuple(unexpected))
+        expected: list[ComparedRecord] = []
+        unchanged: list[ComparedRecord] = []
+        unexpected: list[ComparedRecord] = []
+        for logical_path in sorted(before_records):
+            before_item = before_records[logical_path]
+            after_item = after_records[logical_path]
+            rule = indexed_rules[logical_path]
+            compared = ComparedRecord(logical_path, before_item, after_item, rule.policy)
+            exact_after = _matches_rule(after_item, rule)
+            if rule.policy == "expected" and before_item != after_item and exact_after:
+                expected.append(compared)
+            elif rule.policy == "unchanged" and before_item == after_item and exact_after:
+                unchanged.append(compared)
+            else:
+                unexpected.append(compared)
+        return Comparison(tuple(expected), tuple(unchanged), tuple(unexpected))
+    except BootstrapError:
+        if private_paths:
+            raise BootstrapError(_PRIVATE_COMPARISON_ERROR) from None
+        raise
 
 
 def render_comparison(comparison: Comparison) -> str:

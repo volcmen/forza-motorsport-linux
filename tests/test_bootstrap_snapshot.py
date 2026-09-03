@@ -7,6 +7,7 @@ import errno
 import io
 import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -194,6 +195,55 @@ def test_compare_rejects_extra_after_record() -> None:
         )
 
 
+def assert_private_comparison_error_is_redacted(
+    before: Snapshot, after: Snapshot, rules: object, private_path: str
+) -> None:
+    with pytest.raises(BootstrapError) as failure:
+        compare_snapshots(before, after, rules)  # type: ignore[arg-type]
+
+    assert str(failure.value) == "private snapshot comparison failed"
+    assert private_path not in str(failure.value)
+
+
+def test_after_private_path_redacts_earlier_before_duplicate_error() -> None:
+    private_path = "private/sensitive-component"
+    public = record(private_path, b"same")
+    private = record(private_path, b"same", private=True)
+
+    assert_private_comparison_error_is_redacted(
+        snapshot(public, public),
+        snapshot(private),
+        (ChangeRule(private_path, "unchanged", private.sha256, private.mode),),
+        private_path,
+    )
+
+
+def test_after_private_path_redacts_missing_rule_error() -> None:
+    private_path = "private/sensitive-component"
+
+    assert_private_comparison_error_is_redacted(
+        snapshot(record(private_path, b"same")),
+        snapshot(record(private_path, b"same", private=True)),
+        (),
+        private_path,
+    )
+
+
+def test_after_private_path_redacts_extra_rule_error() -> None:
+    private_path = "private/sensitive-component"
+    private = record(private_path, b"same", private=True)
+
+    assert_private_comparison_error_is_redacted(
+        snapshot(record(private_path, b"same")),
+        snapshot(private),
+        (
+            ChangeRule(private_path, "unchanged", private.sha256, private.mode),
+            ChangeRule("guard/extra", "unchanged", None, None),
+        ),
+        private_path,
+    )
+
+
 def test_private_digest_and_path_never_enter_human_report() -> None:
     digest = "f" * 64
     private_path = "private/local-component"
@@ -336,6 +386,32 @@ def test_canonical_snapshot_bytes_sort_records_and_use_only_logical_paths() -> N
 
 def artifact(logical_path: str, relative_path: str, *, private: bool = False) -> ArtifactSpec:
     return ArtifactSpec(logical_path, relative_path, 1, "a" * 64, 0o644, private)
+
+
+@pytest.mark.parametrize(
+    "invalid", (None, 1, "artifact", {"bad": "shape"}, artifact("a", "a"))
+)
+def test_scope_construction_rejects_invalid_artifact_collections(invalid: object) -> None:
+    with pytest.raises(BootstrapError) as failure:
+        build_snapshot_scope(
+            TRANSACTION,
+            MANIFEST,
+            {"steam": invalid},  # type: ignore[dict-item]
+        )
+
+    assert str(failure.value) == "snapshot artifact collection is invalid"
+
+
+@pytest.mark.parametrize("invalid", (None, 1, "scope", []))
+def test_scope_construction_rejects_invalid_root_collection(invalid: object) -> None:
+    with pytest.raises(BootstrapError) as failure:
+        build_snapshot_scope(
+            TRANSACTION,
+            MANIFEST,
+            invalid,  # type: ignore[arg-type]
+        )
+
+    assert str(failure.value) == "snapshot artifact scope is invalid"
 
 
 @pytest.mark.parametrize("invalid", (".", "a//b", "a/", "a/./b"))
@@ -546,6 +622,46 @@ def test_capture_rejects_file_mutated_during_streaming(
         capture_snapshot(scope, {"steam": steam_root})
 
 
+@pytest.mark.parametrize("failure_point", ("fstat", "validation"))
+def test_capture_closes_target_fd_when_post_open_validation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    steam_root = tmp_path / "steam"
+    steam_root.mkdir()
+    (steam_root / "target").write_bytes(b"data")
+    scope = build_snapshot_scope(
+        TRANSACTION,
+        MANIFEST,
+        {"steam": (artifact("managed/target", "target"),)},
+    )
+    before = len(os.listdir("/proc/self/fd"))
+    if failure_point == "fstat":
+        real_fstat = os.fstat
+
+        def fail_regular_fstat(fd: int) -> os.stat_result:
+            info = real_fstat(fd)
+            if stat.S_ISREG(info.st_mode):
+                raise OSError(errno.EIO, "injected fstat failure")
+            return info
+
+        monkeypatch.setattr(snapshot_module.os, "fstat", fail_regular_fstat)
+        expected = BootstrapError
+    else:
+
+        def fail_validation(_mode: int) -> bool:
+            raise RuntimeError("injected validation failure")
+
+        monkeypatch.setattr(snapshot_module.stat, "S_ISREG", fail_validation)
+        expected = RuntimeError
+
+    with pytest.raises(expected):
+        capture_snapshot(scope, {"steam": steam_root})
+
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
 @pytest.mark.parametrize("kind", ("directory", "symlink", "fifo"))
 def test_capture_rejects_non_regular_target(tmp_path: Path, kind: str) -> None:
     steam_root = tmp_path / "steam"
@@ -594,6 +710,37 @@ def test_capture_revalidates_scope_before_descriptor_access(tmp_path: Path) -> N
 
     with pytest.raises(BootstrapError, match="relative path"):
         capture_snapshot(scope, {"steam": steam_root})
+
+
+@pytest.mark.parametrize("invalid", (None, 1, "targets", [], {}))
+def test_capture_rejects_invalid_target_collections(tmp_path: Path, invalid: object) -> None:
+    steam_root = tmp_path / "steam"
+    steam_root.mkdir()
+    scope = SnapshotScope(1, TRANSACTION, MANIFEST, invalid)  # type: ignore[arg-type]
+
+    with pytest.raises(BootstrapError) as failure:
+        capture_snapshot(scope, {"steam": steam_root})
+
+    assert str(failure.value) == "snapshot targets are invalid"
+
+
+@pytest.mark.parametrize("invalid", (None, 1, "rules", {"bad": "shape"}, {1, 2}))
+def test_compare_rejects_invalid_rule_collections(invalid: object) -> None:
+    item = record("guard/a", b"same")
+
+    with pytest.raises(BootstrapError) as failure:
+        compare_snapshots(snapshot(item), snapshot(item), invalid)  # type: ignore[arg-type]
+
+    assert str(failure.value) == "comparison rules are invalid"
+
+
+def test_compare_rejects_invalid_rule_inside_valid_collection() -> None:
+    item = record("guard/a", b"same")
+
+    with pytest.raises(BootstrapError) as failure:
+        compare_snapshots(snapshot(item), snapshot(item), (object(),))  # type: ignore[arg-type]
+
+    assert str(failure.value) == "comparison rule is invalid"
 
 
 def test_stdout_snapshot_causes_no_filesystem_writes(tmp_path: Path) -> None:
