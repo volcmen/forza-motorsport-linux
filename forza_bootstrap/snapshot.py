@@ -29,6 +29,8 @@ _PRIVATE_CAPTURE_ERROR = "private snapshot capture failed"
 _PRIVATE_COMPARISON_ERROR = "private snapshot comparison failed"
 _PRIVATE_OUTPUT_ERROR = "private snapshot requires explicit owner-only output"
 _FILESYSTEM_ERROR = "snapshot filesystem access failed"
+_SNAPSHOT_READ_ERROR = "snapshot input could not be read"
+_SNAPSHOT_WRITE_ERROR = "snapshot output could not be written"
 
 
 @dataclass(frozen=True)
@@ -270,40 +272,52 @@ def _capture_target(root_fd: int, target: SnapshotTarget) -> FileRecord:
     fd = _open_target(root_fd, target)
     if fd is None:
         return FileRecord(target.logical_path, "absent", None, None, None, target.private)
+    verification_fd: int | None = None
     try:
         before = os.fstat(fd)
         digest = hashlib.sha256()
         while block := os.read(fd, _READ_SIZE):
             digest.update(block)
         after = os.fstat(fd)
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            stat.S_IMODE(before.st_mode),
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            stat.S_IMODE(after.st_mode),
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if not stat.S_ISREG(after.st_mode) or before_identity != after_identity:
+            raise BootstrapError("snapshot target changed while hashing")
+        verification_fd = _open_target(root_fd, target)
+        if verification_fd is None:
+            raise BootstrapError("snapshot target changed while hashing")
+        verification = os.fstat(verification_fd)
+        if (
+            not stat.S_ISREG(verification.st_mode)
+            or (verification.st_dev, verification.st_ino) != (after.st_dev, after.st_ino)
+        ):
+            raise BootstrapError("snapshot target changed while hashing")
+        return FileRecord(
+            target.logical_path,
+            "regular",
+            stat.S_IMODE(after.st_mode),
+            after.st_size,
+            digest.hexdigest(),
+            target.private,
+        )
     finally:
+        if verification_fd is not None:
+            os.close(verification_fd)
         os.close(fd)
-    before_identity = (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-        stat.S_IMODE(before.st_mode),
-        before.st_mtime_ns,
-        before.st_ctime_ns,
-    )
-    after_identity = (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        stat.S_IMODE(after.st_mode),
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-    )
-    if not stat.S_ISREG(after.st_mode) or before_identity != after_identity:
-        raise BootstrapError("snapshot target changed while hashing")
-    return FileRecord(
-        target.logical_path,
-        "regular",
-        stat.S_IMODE(after.st_mode),
-        after.st_size,
-        digest.hexdigest(),
-        target.private,
-    )
 
 
 def _validated_targets(scope: SnapshotScope) -> tuple[SnapshotTarget, ...]:
@@ -365,9 +379,12 @@ def capture_snapshot(
             raise BootstrapError(f"snapshot root is missing: {min(missing)}")
         for name in sorted(required_roots):
             try:
-                root_path = Path(roots[name])
-            except TypeError as error:
-                raise BootstrapError("snapshot root is invalid") from error
+                root_value = os.fspath(roots[name])
+                if not isinstance(root_value, str) or "\x00" in root_value:
+                    raise ValueError("invalid snapshot root")
+                root_path = Path(root_value)
+            except (TypeError, ValueError):
+                raise BootstrapError("snapshot root is invalid") from None
             descriptors[name] = _open_root(root_path, name)
         root_info = os.fstat(descriptors["steam"])
         root_id = f"{root_info.st_dev}:{root_info.st_ino}"
@@ -375,7 +392,7 @@ def capture_snapshot(
             _capture_target(descriptors[target.root_name], target)
             for target in targets
         )
-    except (BootstrapError, OSError) as error:
+    except (BootstrapError, OSError, ValueError) as error:
         if private:
             raise BootstrapError(_PRIVATE_CAPTURE_ERROR) from None
         if isinstance(error, OSError):
@@ -417,10 +434,10 @@ def _snapshot_value(snapshot: Snapshot) -> dict[str, object]:
 
 def canonical_snapshot_bytes(snapshot: Snapshot) -> bytes:
     """Serialize a validated snapshot in stable logical-path order."""
-    value = _snapshot_value(snapshot)
-    if any(item.private for item in snapshot.records):
+    private, _ = _snapshot_privacy(snapshot)
+    if private:
         raise BootstrapError(_PRIVATE_OUTPUT_ERROR)
-    return canonical_json(value)
+    return canonical_json(_snapshot_value(snapshot))
 
 
 def _snapshot_from_value(value: object) -> Snapshot:
@@ -455,26 +472,56 @@ def _snapshot_from_value(value: object) -> Snapshot:
 
 def write_snapshot(path: str | os.PathLike[str], snapshot: Snapshot) -> None:
     """Atomically write one validated snapshot to an absolute private path."""
-    output = Path(path)
-    if not output.is_absolute():
-        raise BootstrapError("snapshot output path must be absolute")
-    parent_fd = open_owned_root(output.parent)
+    private, _ = _snapshot_privacy(snapshot)
     try:
-        atomic_write_private_json(parent_fd, output.name, _snapshot_value(snapshot))
-    finally:
-        os.close(parent_fd)
+        value = _snapshot_value(snapshot)
+    except BootstrapError:
+        if private:
+            raise BootstrapError(_PRIVATE_OUTPUT_ERROR) from None
+        raise
+    try:
+        output = Path(path)
+    except (TypeError, ValueError):
+        if private:
+            raise BootstrapError(_PRIVATE_OUTPUT_ERROR) from None
+        raise BootstrapError(_SNAPSHOT_WRITE_ERROR) from None
+    if not output.is_absolute():
+        if private:
+            raise BootstrapError(_PRIVATE_OUTPUT_ERROR) from None
+        raise BootstrapError("snapshot output path must be absolute")
+    parent_fd: int | None = None
+    try:
+        try:
+            parent_fd = open_owned_root(output.parent)
+            atomic_write_private_json(parent_fd, output.name, value)
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
+    except (BootstrapError, OSError, ValueError):
+        if private:
+            raise BootstrapError(_PRIVATE_OUTPUT_ERROR) from None
+        raise BootstrapError(_SNAPSHOT_WRITE_ERROR) from None
 
 
 def read_snapshot(path: str | os.PathLike[str]) -> Snapshot:
     """Read one absolute owner-only snapshot without following links."""
-    source = Path(path)
+    try:
+        source = Path(path)
+    except (TypeError, ValueError):
+        raise BootstrapError(_SNAPSHOT_READ_ERROR) from None
     if not source.is_absolute():
         raise BootstrapError("snapshot input path must be absolute")
-    parent_fd = open_owned_root(source.parent)
+    parent_fd: int | None = None
     try:
-        return _snapshot_from_value(read_private_json(parent_fd, source.name))
-    finally:
-        os.close(parent_fd)
+        try:
+            parent_fd = open_owned_root(source.parent)
+            value = read_private_json(parent_fd, source.name)
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
+    except (BootstrapError, OSError, ValueError):
+        raise BootstrapError(_SNAPSHOT_READ_ERROR) from None
+    return _snapshot_from_value(value)
 
 
 def output_snapshot(snapshot: Snapshot, path: str | os.PathLike[str] | None, stream: TextIO) -> None:
@@ -509,23 +556,28 @@ def _matches_rule(item: FileRecord, rule: ChangeRule) -> bool:
     )
 
 
-def _declared_private_paths(snapshot: object) -> set[str]:
-    if not isinstance(snapshot, Snapshot) or type(snapshot.records) is not tuple:
-        return set()
-    return {
-        item.logical_path
-        for item in snapshot.records
-        if isinstance(item, FileRecord)
-        and item.private is True
-        and isinstance(item.logical_path, str)
-    }
+def _snapshot_privacy(snapshot: object) -> tuple[bool, set[str]]:
+    """Inspect only concrete record containers for declared private records."""
+    if not isinstance(snapshot, Snapshot) or type(snapshot.records) not in {list, tuple}:
+        return False, set()
+    private = False
+    paths: set[str] = set()
+    for item in snapshot.records:
+        if isinstance(item, FileRecord) and item.private is True:
+            private = True
+            if isinstance(item.logical_path, str):
+                paths.add(item.logical_path)
+    return private, paths
 
 
 def compare_snapshots(
     before: Snapshot, after: Snapshot, rules: Sequence[ChangeRule]
 ) -> Comparison:
     """Classify a complete, identity-bound snapshot pair deterministically."""
-    private_paths = _declared_private_paths(before) | _declared_private_paths(after)
+    before_private, before_private_paths = _snapshot_privacy(before)
+    after_private, after_private_paths = _snapshot_privacy(after)
+    private_paths = before_private_paths | after_private_paths
+    private = before_private or after_private or bool(private_paths)
     try:
         before_records = _indexed_records(before)
         after_records = _indexed_records(after)
@@ -564,7 +616,7 @@ def compare_snapshots(
                 unexpected.append(compared)
         return Comparison(tuple(expected), tuple(unchanged), tuple(unexpected))
     except BootstrapError:
-        if private_paths:
+        if private:
             raise BootstrapError(_PRIVATE_COMPARISON_ERROR) from None
         raise
 

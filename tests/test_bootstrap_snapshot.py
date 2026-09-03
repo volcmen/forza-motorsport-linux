@@ -302,6 +302,64 @@ def test_private_canonical_bytes_require_explicit_owner_only_file(tmp_path: Path
     assert read_snapshot(output) == value
 
 
+def test_private_scan_precedes_validation_of_malformed_record_list() -> None:
+    private_path = "private/sensitive-component"
+    public = record(private_path, b"same")
+    private = record(private_path, b"same", private=True)
+    malformed = snapshot(records=[public, public, private])
+
+    with pytest.raises(BootstrapError) as failure:
+        canonical_snapshot_bytes(malformed)
+
+    assert str(failure.value) == "private snapshot requires explicit owner-only output"
+    assert private_path not in str(failure.value)
+
+
+@pytest.mark.parametrize("kind", ("relative", "missing-parent"))
+def test_private_scan_redacts_explicit_output_failures(tmp_path: Path, kind: str) -> None:
+    private_path = "private/sensitive-component"
+    value = snapshot(record(private_path, b"same", private=True))
+    path = Path("relative.json") if kind == "relative" else tmp_path / "missing" / "out"
+
+    with pytest.raises(BootstrapError) as failure:
+        write_snapshot(path, value)
+
+    assert str(failure.value) == "private snapshot requires explicit owner-only output"
+    assert private_path not in str(failure.value)
+    assert str(path) not in str(failure.value)
+
+
+def test_private_comparison_scan_handles_late_private_in_malformed_list() -> None:
+    private_path = "private/sensitive-component"
+    public = record(private_path, b"same")
+    private = record(private_path, b"same", private=True)
+    malformed_before = snapshot(records=[public, public, private])
+
+    assert_private_comparison_error_is_redacted(
+        malformed_before,
+        snapshot(public),
+        (ChangeRule(private_path, "unchanged", public.sha256, public.mode),),
+        private_path,
+    )
+
+
+def test_privacy_scan_does_not_iterate_arbitrary_record_object() -> None:
+    class ExplodingRecords:
+        iterated = False
+
+        def __iter__(self):
+            self.iterated = True
+            raise AssertionError("arbitrary record object was iterated")
+
+    records = ExplodingRecords()
+    malformed = snapshot(records=records)
+
+    with pytest.raises(BootstrapError, match="records are invalid"):
+        canonical_snapshot_bytes(malformed)
+
+    assert records.iterated is False
+
+
 def test_private_duplicate_scope_error_is_fixed_and_redacted() -> None:
     private_path = "private/sensitive-component"
 
@@ -622,6 +680,41 @@ def test_capture_rejects_file_mutated_during_streaming(
         capture_snapshot(scope, {"steam": steam_root})
 
 
+def test_capture_rejects_parent_swap_during_streaming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steam_root = tmp_path / "steam"
+    parent = steam_root / "managed"
+    parent.mkdir(parents=True)
+    target = parent / "target"
+    target.write_bytes(b"same-size")
+    scope = build_snapshot_scope(
+        TRANSACTION,
+        MANIFEST,
+        {"steam": (artifact("managed/target", "managed/target"),)},
+    )
+    real_read = os.read
+    swapped = False
+    before_fds = len(os.listdir("/proc/self/fd"))
+
+    def swap_parent_after_read(fd: int, size: int) -> bytes:
+        nonlocal swapped
+        block = real_read(fd, size)
+        if block and not swapped:
+            swapped = True
+            parent.rename(steam_root / "old-managed")
+            parent.mkdir()
+            (parent / "target").write_bytes(b"new-bytes")
+        return block
+
+    monkeypatch.setattr(snapshot_module.os, "read", swap_parent_after_read)
+
+    with pytest.raises(BootstrapError, match="changed while hashing"):
+        capture_snapshot(scope, {"steam": steam_root})
+
+    assert len(os.listdir("/proc/self/fd")) == before_fds
+
+
 @pytest.mark.parametrize("failure_point", ("fstat", "validation"))
 def test_capture_closes_target_fd_when_post_open_validation_fails(
     tmp_path: Path,
@@ -724,6 +817,27 @@ def test_capture_rejects_invalid_target_collections(tmp_path: Path, invalid: obj
     assert str(failure.value) == "snapshot targets are invalid"
 
 
+@pytest.mark.parametrize("private", (False, True))
+def test_capture_normalizes_embedded_nul_root_without_path_leak(
+    private: bool,
+) -> None:
+    logical_path = "private/sensitive-component" if private else "managed/item"
+    root = "/private/root\x00hidden"
+    scope = build_snapshot_scope(
+        TRANSACTION,
+        MANIFEST,
+        {"steam": (artifact(logical_path, "item", private=private),)},
+    )
+
+    with pytest.raises(BootstrapError) as failure:
+        capture_snapshot(scope, {"steam": root})
+
+    expected = "private snapshot capture failed" if private else "snapshot root is invalid"
+    assert str(failure.value) == expected
+    assert root not in str(failure.value)
+    assert logical_path not in str(failure.value)
+
+
 @pytest.mark.parametrize("invalid", (None, 1, "rules", {"bad": "shape"}, {1, 2}))
 def test_compare_rejects_invalid_rule_collections(invalid: object) -> None:
     item = record("guard/a", b"same")
@@ -770,6 +884,32 @@ def test_snapshot_output_rejects_relative_path_without_writing(tmp_path: Path) -
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize("operation", ("read", "write"))
+def test_snapshot_file_io_normalizes_missing_and_nul_paths(
+    tmp_path: Path, operation: str
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    missing = tmp_path / "missing" / "sensitive-name.json"
+    nul_path = f"{tmp_path}/sensitive-name.json\x00hidden"
+    action = (
+        (lambda path: read_snapshot(path))
+        if operation == "read"
+        else (lambda path: write_snapshot(path, snapshot()))
+    )
+    expected = (
+        "snapshot input could not be read"
+        if operation == "read"
+        else "snapshot output could not be written"
+    )
+
+    for path in (missing, nul_path):
+        with pytest.raises(BootstrapError) as failure:
+            action(path)
+        assert str(failure.value) == expected
+        assert "sensitive-name" not in str(failure.value)
+        assert str(tmp_path) not in str(failure.value)
+
+
 def test_cli_snapshot_prints_by_default_and_writes_only_with_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -787,6 +927,41 @@ def test_cli_snapshot_prints_by_default_and_writes_only_with_output(
     assert main(["snapshot", "--output", str(output)]) == 0
     assert capsys.readouterr().out == ""
     assert output.stat().st_mode & 0o777 == 0o600
+
+
+def test_cli_snapshot_failed_publication_is_controlled_and_nonidentifying(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    output = tmp_path / "missing" / "sensitive-output.json"
+    monkeypatch.setattr(cli_module, "_capture_current_snapshot", lambda: snapshot())
+
+    assert main(["snapshot", "--output", str(output)]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: snapshot output could not be written\n"
+    assert output.name not in captured.err
+    assert str(tmp_path) not in captured.err
+
+
+def test_cli_compare_missing_input_is_controlled_and_nonidentifying(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    before = tmp_path / "sensitive-before.json"
+    after = tmp_path / "sensitive-after.json"
+
+    assert main(["compare", "--before", str(before), "--after", str(after)]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: snapshot input could not be read\n"
+    assert before.name not in captured.err
+    assert after.name not in captured.err
+    assert str(tmp_path) not in captured.err
 
 
 def test_cli_compare_returns_zero_only_for_ok_comparison(tmp_path: Path) -> None:
