@@ -181,6 +181,8 @@ def _state_from_value(value: object, state_root: Path) -> BootstrapState:
     if backup is not None:
         backup = _require_patch_backup_manifest(backup)
     disposition = value["compatibility_tool_disposition"]
+    if disposition is not None and not isinstance(disposition, str):
+        raise BootstrapError("state compatibility_tool_disposition is invalid")
     if disposition not in {None, "created", "adopted"}:
         raise BootstrapError("state compatibility_tool_disposition is invalid")
     return BootstrapState(
@@ -287,13 +289,9 @@ def _load_transaction(root_fd: int, state_root: Path, transaction_id: str) -> Bo
     return state
 
 
-def load_unfinished_transaction(state_root: str | os.PathLike[str]) -> BootstrapState | None:
-    """Return the only unfinished private transaction, if state has been initialized."""
-    root = Path(state_root)
-    try:
-        root_fd = open_owned_root(root)
-    except FileNotFoundError:
-        return None
+def _load_unfinished_transaction_locked(root: Path) -> BootstrapState | None:
+    """Discover or recover state while the caller holds the root bootstrap lock."""
+    root_fd = open_owned_root(root)
     try:
         try:
             names = sorted(os.listdir(root_fd))
@@ -302,12 +300,14 @@ def load_unfinished_transaction(state_root: str | os.PathLike[str]) -> Bootstrap
         states: list[BootstrapState] = []
         transaction_ids: set[str] = set()
         for name in names:
+            durable_name = name
             if name == BOOTSTRAP_LOCK_NAME:
                 _validate_root_lock(root_fd)
                 continue
             staging = _PREPUBLICATION_DIRECTORY.fullmatch(name)
             if staging is not None:
-                state = _recover_prepublication_transaction(root_fd, root, name, staging.group(1))
+                durable_name = staging.group(1)
+                state = _recover_prepublication_transaction(root_fd, root, name, durable_name)
                 if state is None:
                     continue
             else:
@@ -317,7 +317,7 @@ def load_unfinished_transaction(state_root: str | os.PathLike[str]) -> Bootstrap
             if state.transaction_id in transaction_ids:
                 raise BootstrapError("duplicate transaction id in bootstrap state")
             transaction_ids.add(state.transaction_id)
-            if state.transaction_id != name:
+            if state.transaction_id != durable_name:
                 raise BootstrapError("transaction directory and state transaction id differ")
             if state.phase not in _TERMINAL_PHASES:
                 states.append(state)
@@ -328,6 +328,22 @@ def load_unfinished_transaction(state_root: str | os.PathLike[str]) -> Bootstrap
         os.close(root_fd)
 
 
+def load_unfinished_transaction(state_root: str | os.PathLike[str]) -> BootstrapState | None:
+    """Return the only unfinished private transaction, if state has been initialized."""
+    root = Path(state_root)
+    try:
+        root_fd = open_owned_root(root)
+    except FileNotFoundError:
+        return None
+    else:
+        os.close(root_fd)
+    lock_fd = acquire_bootstrap_lock(root)
+    try:
+        return _load_unfinished_transaction_locked(root)
+    finally:
+        os.close(lock_fd)
+
+
 def create_transaction(state_root: str | os.PathLike[str], manifest_sha256: str) -> BootstrapState:
     """Create the sole unfinished state directory and its initial durable record."""
     manifest_sha256 = _require_sha256(manifest_sha256, "manifest_sha256")
@@ -335,7 +351,7 @@ def create_transaction(state_root: str | os.PathLike[str], manifest_sha256: str)
     ensure_private_directory(root)
     lock_fd = acquire_bootstrap_lock(root)
     try:
-        if load_unfinished_transaction(root) is not None:
+        if _load_unfinished_transaction_locked(root) is not None:
             raise BootstrapError("unfinished bootstrap transaction already exists")
         root_fd = open_owned_root(root)
         try:

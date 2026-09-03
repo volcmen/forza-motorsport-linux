@@ -53,6 +53,14 @@ def write_transaction(root: Path, directory_name: str, value: dict[str, object])
     state.chmod(0o600)
 
 
+def write_prepublication_transaction(root: Path, transaction_id: str) -> None:
+    write_transaction(
+        root,
+        f".bootstrap-staging-{transaction_id}",
+        state_value(transaction_id),
+    )
+
+
 def test_new_transaction_is_private_and_single(tmp_path: Path) -> None:
     state = create_transaction(tmp_path, "1" * 64)
 
@@ -408,3 +416,95 @@ def test_open_transaction_rejects_invalid_id_before_filesystem_access(
 
     with pytest.raises(BootstrapError, match="transaction_id"):
         state_module._open_transaction(99, transaction_id)
+
+
+def test_prepublication_recovery_returns_the_final_transaction_on_first_and_later_load(
+    tmp_path: Path,
+) -> None:
+    transaction_id = "6" * 24
+    write_prepublication_transaction(tmp_path, transaction_id)
+
+    first = load_unfinished_transaction(tmp_path)
+
+    assert first is not None
+    assert first.transaction_id == transaction_id
+    assert load_unfinished_transaction(tmp_path) == first
+
+
+@pytest.mark.parametrize("when", ("before", "after"))
+def test_prepublication_recovery_resumes_after_crash_around_publish_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: str
+) -> None:
+    from forza_bootstrap import state as state_module
+
+    transaction_id = "7" * 24
+    write_prepublication_transaction(tmp_path, transaction_id)
+    real_rename = state_module.rename_noreplace
+
+    def interrupt_recovery_rename(*args: object, **kwargs: object) -> None:
+        if when == "before":
+            raise KeyboardInterrupt
+        real_rename(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(state_module, "rename_noreplace", interrupt_recovery_rename)
+        with pytest.raises(KeyboardInterrupt):
+            load_unfinished_transaction(tmp_path)
+
+    recovered = load_unfinished_transaction(tmp_path)
+    assert recovered is not None
+    assert recovered.transaction_id == transaction_id
+    assert load_unfinished_transaction(tmp_path) == recovered
+
+
+def test_concurrent_loader_cannot_recover_while_creator_holds_root_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forza_bootstrap import state as state_module
+
+    entered = threading.Event()
+    release = threading.Event()
+    result: list[object] = []
+    real_write = state_module.atomic_write_private_json
+
+    def pause_initial_write(*args: object, **kwargs: object) -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        real_write(*args, **kwargs)
+
+    monkeypatch.setattr(state_module, "atomic_write_private_json", pause_initial_write)
+
+    def creator() -> None:
+        try:
+            result.append(create_transaction(tmp_path, "8" * 64))
+        except BootstrapError as error:  # pragma: no cover - asserted below
+            result.append(error)
+
+    worker = threading.Thread(target=creator)
+    worker.start()
+    assert entered.wait(timeout=2)
+    try:
+        with pytest.raises(BootstrapError, match="bootstrap lock"):
+            load_unfinished_transaction(tmp_path)
+    finally:
+        release.set()
+        worker.join(timeout=2)
+
+    assert len(result) == 1
+    assert load_unfinished_transaction(tmp_path) == result[0]
+
+
+@pytest.mark.parametrize("disposition", ([], {}))
+def test_state_rejects_unhashable_compatibility_tool_disposition(
+    tmp_path: Path, disposition: object
+) -> None:
+    transaction_id = "9" * 24
+    write_transaction(
+        tmp_path,
+        transaction_id,
+        state_value(transaction_id, compatibility_tool_disposition=disposition),
+    )
+
+    with pytest.raises(BootstrapError, match="compatibility_tool_disposition"):
+        load_unfinished_transaction(tmp_path)
