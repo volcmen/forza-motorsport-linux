@@ -76,6 +76,7 @@ Before acceptance, `scripts/install-runtime-components rollback` restores every
 destination from the transaction journal. After acceptance,
 `scripts/install-runtime-components restore-runtime` restores only the legacy
 XGameRuntime pair while preserving the accepted user-local integration files.
-The exact commands and conflict-preserving uninstall behavior are documented in
-the README. Never delete transaction journals or recovery files before their
-recorded state has been verified.
+The reader-first entry point is the [README](../README.md); the exact manual
+commands and conflict-preserving uninstall boundary are documented in the
+[install guide](install.md). Never delete transaction journals or recovery files
+before their recorded state has been verified.

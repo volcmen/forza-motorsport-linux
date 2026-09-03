@@ -1,222 +1,282 @@
-# Forza Motorsport Linux tools
+# Forza Motorsport on Linux
+
+[![Verify](https://github.com/volcmen/forza-motorsport-linux/actions/workflows/verify.yml/badge.svg)](https://github.com/volcmen/forza-motorsport-linux/actions/workflows/verify.yml)
+[![Release](https://img.shields.io/github/v/release/volcmen/forza-motorsport-linux)](https://github.com/volcmen/forza-motorsport-linux/releases)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSES/GPL-3.0-or-later.txt)
+
+Guided, recoverable tools for running the **Steam edition of Forza Motorsport**
+(`AppID 2440510`) with the reviewed `GE-Proton11-3-FM` and Xodus stack.
+
+> [!IMPORTANT]
+> This is an **Experimental**, source-only integration for one documented
+> component set. It is not ordinary upstream Proton support, a binary bundle,
+> or a promise that Forza will work on another system.
+
+The friendly entry point is [`./setup`](#guided-setup). The detailed evidence,
+manual transaction controls, and source provenance remain available for anyone
+who wants to audit exactly what it does.
 
 ## Status and tested matrix
 
-**Experimental.** This source-only project targets the Steam edition of Forza
-Motorsport, **AppID 2440510**, with the reviewed `GE-Proton11-3-FM` layout. It
-is environment-specific integration work, not ordinary upstream Proton support.
+| State | Meaning |
+| --- | --- |
+| **VERIFIED — `legacy-v0.1`** | The exact reviewed component pair completed the live matrix below on one tested system. |
+| **NOT SUPPORTED** | Automatic incoming Xbox invite notifications. |
+| **REJECTED EXPERIMENT** | The newer WineGDK/Xodus protocol pair described below. Do not install it as an alternative. |
 
 The v0.1 installable profile is `legacy-v0.1`. It binds Xodus commit
 `7b236772297b3475ea4f3cb830feb5b224f3064a` to the matching legacy
-XGameRuntime generation and the repository's recoverable launcher and installer.
-The current evidence boundary is narrow:
+XGameRuntime generation and this repository's recoverable installation tools.
 
-- **Verified live matrix.** On 2026-09-02, the exact `legacy-v0.1` pair passed
-  two launches without a reboot, online profile/content, controller navigation,
-  driving and hotplug, AP702 absence, explicit Invite and Join actions,
+- **Verified live matrix.** On 2026-09-02, the exact pair passed two launches
+  without a reboot, online profile/content, controller navigation, driving and
+  hotplug, AP702 absence, explicit Invite and Join actions,
   keyboard/controller social-picker input, and clean per-session shutdown.
 - **Incoming invite notifications are not supported.** An explicitly opened
-  invite/join flow is a different capability.
+  invite/join picker is a different capability.
 
 **Rejected live experiment:** WineGDK
 `d96a768e25f632b04a457e4cb9f585e89ef5d095` with Xodus
-`ee9db0f68122a9731b9b66cc24767693d1737f5c` is **REJECTED LIVE**. Its hermetic
-source tests remain useful, but the pair produced protocol rejection, flicker,
-or exit after the logo and is neither a v0.1 dependency nor an installable
+`ee9db0f68122a9731b9b66cc24767693d1737f5c` is **REJECTED LIVE**. Although its
+hermetic source tests remain useful, the pair produced protocol rejection,
+flicker, or exit after the logo. It is not a v0.1 dependency or installable
 profile.
 
 | Area | Boundary |
 | --- | --- |
-| Launcher | Starts Xodus on demand for one game command and preserves its exit status. |
-| Diagnostics | Reports readiness without changing Steam, credentials, or systemd state. |
-| Patches | Only reviewed controller/mountmgr hashes, with backups and restoration. |
-| Install | User-local and runtime-component transactions are manifest-backed, recoverable, and never enable the service. |
+| Launch | Forza starts through Steam; Xodus exists only for that game session. |
+| Online | Profile and content worked in the dated live matrix, not as a general compatibility guarantee. |
+| Controller | Navigation, driving, and hotplug worked with the reviewed exact-build fallback. |
+| Storage | AP702 was absent with the reviewed `StorageDeviceTrimProperty` fallback. |
 | Social | Outgoing Microsoft/Xbox invite and join are **VERIFIED** through Xodus on the tested system. |
+| Recovery | Installation is manifest-backed, digest-bound, and conflict-preserving. |
+
+See the [v0.1.0 release evidence](docs/release-v0.1.0.md) and the complete
+[verification record](docs/verification.md) for the exact boundary behind those
+statements.
 
 ## What this project does
 
-The launcher writes a one-shot, mode-0600 pending ownership token in the user runtime directory. `xodus-forza.service` atomically consumes it into a matching active token before starting. Direct manual `systemctl --user start xodus-forza.service` has no reservation and fails closed. The launcher waits for the expected socket, runs the game command, and stops only the Xodus invocation whose token and systemd invocation identity it owns. A pre-existing service is left alone.
+The project coordinates four existing pieces without pretending they are one
+ordinary package:
 
-`forza-doctor` is read-only. It checks the AppID, compatibility-tool directory, Xodus service executable, user-supplied runtime file, Secret Service, disabled unit state, exact-build state, and disk-space threshold.
+1. a dedicated `GE-Proton11-3-FM` compatibility-tool layout;
+2. a locally built, reviewed Xodus service, CLI, and social overlay;
+3. the matching locally built legacy XGameRuntime bridge; and
+4. one Microsoft threading runtime supplied by the user from a licensed source.
 
-## Legal prerequisites
+The launcher starts Xodus on demand, waits for its Unix socket, runs Steam's
+actual game command, and stops only the service invocation it owns. Directly
+starting `xodus-forza.service` without a launcher reservation fails closed. The
+service is installed disabled and is never enabled as a permanent daemon.
 
-Use a licensed Steam copy of Forza Motorsport, the reviewed `GE-Proton11-3-FM` layout, and a user-built Xodus directory containing `xodus-service`, `xodus-cli`, and `xodus-overlay`. **Microsoft binaries are not distributed** by this repository. Supply only artifacts you are licensed to use, including any required runtime from your own licensed Windows installation. Do not obtain DLLs from download sites.
+`forza-doctor` is read-only. It reports whether the current environment is
+ready to attempt a launch; it does not prove gameplay compatibility. The exact
+ownership protocol is documented in [Architecture](docs/architecture.md).
 
-The repository does not download credentials, game assets, Microsoft binaries, or third-party binaries. Every command below is user-local; do not use `sudo`.
+## Before you start
 
-To place a runtime you are licensed to use, set the Steam root for the account whose prefix you are preparing and place its renamed file at the exact doctor-required path:
+You need all of the following:
+
+- a licensed Steam copy of Forza Motorsport;
+- the reviewed `GE-Proton11-3-FM` compatibility-tool directory;
+- a clean local build of the reviewed Xodus revision, with `xodus-service`,
+  `xodus-cli`, and `xodus-overlay` directly under `target/release` (see the
+  [exact source/build evidence](docs/evidence/v0.1-xodus.md));
+- a clean local build of the matching legacy XGameRuntime revision (see its
+  [out-of-tree build evidence](docs/evidence/v0.1-xgameruntime.md));
+- a licensed `xgameruntime.dll` from your own Windows installation, renamed as
+  described below; and
+- KDE Wallet exposing the standard Secret Service D-Bus API.
+
+Every installation command is user-local. Do not use `sudo`. **Microsoft binaries are not distributed** by this repository, and the tools do not
+download credentials, game assets, Microsoft binaries, or third-party binaries.
+Do not obtain DLLs from download sites.
+
+KDE Wallet is supported through `org.freedesktop.secrets`. **Do not install GNOME Keyring** for this workflow or add a second daemon competing for the same
+D-Bus service.
+
+## Guided setup
+
+Clone the current integration source and inspect the command before running it:
+
+```bash
+git clone https://github.com/volcmen/forza-motorsport-linux.git
+cd forza-motorsport-linux
+./setup --help
+./setup
+```
+
+`./setup` asks for the three reviewed local directories, runs a read-only user
+installation preflight, validates the exact source revisions, and prints the
+complete runtime transaction. Its first potentially persistent action is
+creating a private evidence manifest, and it asks before doing that. Installation
+then requires typing the complete printed `PLAN_SHA256`.
+
+The command is a thin conductor: existing tools still own every hash,
+destination, lock, backup, journal, mutation, and rollback decision.
+
+### What setup automates
+
+- path and prerequisite validation;
+- the read-only user-install preflight;
+- exact-source evidence locking and the digest-bound plan;
+- the reviewed runtime/user-local transaction after exact confirmation;
+- post-install transaction status and `forza-doctor`; and
+- generation of the Steam launch-options line.
+
+### What remains deliberate and manual
+
+- supplying all licensed or locally built inputs;
+- choosing whether to adopt any pre-existing unmanaged files;
+- applying the exact-build controller/AP702 fallback;
+- pasting launch options into Steam;
+- launching and validating the game;
+- accepting an installed transaction after live validation; and
+- deleting any retained recovery material.
+
+There is intentionally no `--yes`, smart repair, automatic patching, automatic
+rollback, Steam-file editing, binary download, or automatic game launch.
+
+Useful commands:
+
+```bash
+./setup check           # read-only current-environment check
+./setup status          # transaction state, then readiness diagnostics
+./setup rollback        # explicit pre-acceptance rollback
+./setup steam-options   # print; paste into Steam yourself
+./setup uninstall       # manifest-proven files; Forza/Xodus must be stopped
+```
+
+Rollback and uninstall fail closed unless the launcher lock is free and the
+tool can prove that both Forza and `xodus-forza.service` are inactive. Uninstall
+holds that same lock until the conflict-preserving user uninstaller exits.
+Rollback asks for the compatibility-tool directory used by the transaction;
+press Enter for the displayed standard Steam path.
+
+A fresh system can report expected missing installed components during
+`./setup check`; the guided flow performs its own source and destination
+preflight before asking to prepare a plan.
+
+## Supply the licensed threading runtime
+
+The separately supplied Microsoft file is outside repository transactions and
+public evidence. Place it at this exact path beneath the Steam root used for the
+game:
 
 ```bash
 steam_root="${XDG_DATA_HOME:-$HOME/.local/share}/Steam"
 prefix_root="$steam_root/steamapps/compatdata/2440510/pfx/drive_c"
 mkdir -p -- "$prefix_root/windows/system32"
-cp -- /absolute/path/to/your/licensed/xgameruntime.dll "$prefix_root/windows/system32/xgameruntime.dll.threading"
+cp -- /absolute/path/to/your/licensed/xgameruntime.dll \
+  "$prefix_root/windows/system32/xgameruntime.dll.threading"
 ```
 
-The required destination is `steamapps/compatdata/2440510/pfx/drive_c/windows/system32/xgameruntime.dll.threading` beneath the selected Steam root. This repository neither supplies nor hashes that Microsoft file in public output.
+The required destination is
+`steamapps/compatdata/2440510/pfx/drive_c/windows/system32/xgameruntime.dll.threading`.
+The project does not read, hash, publish, or download that file.
 
-## Read-only preflight
+## Steam and first launch
 
-From a checkout, run:
+After setup completes without a doctor failure, generate the one line Steam
+needs:
 
 ```bash
-bin/forza-doctor
-scripts/install-user --check --xodus-build-dir /absolute/path/to/xodus-build
+./setup steam-options
 ```
 
-Both commands are read-only. The install check validates every source artifact and destination, reports conflicts with corrective actions, and prints the exact install plan without creating directories, copying files, writing a journal, or invoking systemd. The doctor exits nonzero for missing prerequisites and prints `PASS`, `WARN`, and `FAIL`. It accepts only `disabled` and `static` unit states; mixed or unknown patch states fail. Before installation, a missing installed patcher or manifest is expected. KDE Wallet is checked through the D-Bus **Secret Service** interface (`org.freedesktop.secrets`): an existing owner or activatable KDE provider is accepted. **Do not install GNOME Keyring** or substitute it for this workflow.
+Paste it into **Forza Motorsport → Properties → General → Launch Options** and
+select `GE-Proton11-3-FM` under **Compatibility**. Keep Steam Input disabled for
+this exact tested controller path.
 
-## User-local install
+Do not add `PROTON_DISABLE_HIDRAW`, `PROTON_ENABLE_WAYLAND`,
+`-SkipTargetHardwareProfiler`, or unrelated Proton flags. The generated line is
+the approved baseline and includes the Xodus socket exposure required by
+Steam's pressure-vessel container.
 
-Pass an absolute path to your own Xodus build directory:
+If `forza-doctor` reports a known-build `WARN`, stop and review the
+[exact-build fallback](docs/install.md#exact-build-controller-and-ap702-fallback).
+It is not a generic fix: unknown, mixed, changed, missing, or partly patched
+targets fail closed. The storage fallback addresses Forza's **AP702 HDD/SSD launch rejection** by implementing the reviewed `StorageDeviceTrimProperty`
+response for this build.
 
-```bash
-scripts/install-user --xodus-build-dir /absolute/path/to/xodus-build
-```
+## Invite and join
 
-The installer prints every destination and action before its first mutation. It writes only the launcher and doctor under `~/.local/bin`, Xodus and the patcher under `~/.local/libexec`, the build manifest under `~/.local/share`, and the user unit under `~/.config/systemd/user`. It reloads the user systemd daemon but does not start or enable the service. Re-run `~/.local/bin/forza-doctor` afterwards.
+Explicit Microsoft/Xbox Invite and Join actions worked through the social
+picker in the live matrix. Forza must first publish a joinable multiplayer
+activity, which normally means entering a compatible multiplayer lobby before
+opening the picker.
 
-## Steam configuration
+Steam invites do not replace this flow. Automatic incoming Xbox invite toasts
+remain unsupported because the Windows Xbox Game Bar notification path is not
+available here.
 
-Generate the single Steam launch-options line from the checkout:
+## Recovery and Uninstall
 
-```bash
-scripts/print-steam-options
-```
+Do not delete transaction journals, backups, stages, or adjacent
+`.forza-recovery-*` files to force a clean-looking state. They are the evidence
+that makes interrupted work recoverable.
 
-Paste its output into Forza Motorsport's Steam launch options. It emits the approved ordered baseline: `WINEDLLOVERRIDES=xgameruntime=b`, `PROTON_VKD3D_HEAP=1`, `VKD3D_CONFIG=skip_application_workarounds,descriptor_heap,avoid_image_buffer_aliasing`, the current user's Xodus socket path, and the shell-quoted installed launcher before literal `%command%`. It does not edit Steam files. Do not add `PROTON_DISABLE_HIDRAW`, `PROTON_ENABLE_WAYLAND`, `-SkipTargetHardwareProfiler`, or unrelated Proton flags.
+| Situation | Command |
+| --- | --- |
+| Inspect current state | `./setup status` |
+| Undo an unaccepted runtime transaction | `./setup rollback` |
+| Keep a validated installation | Advanced `accept` command in the [install guide](docs/install.md#accept-or-restore) |
+| Restore runtime after acceptance | Advanced `restore-runtime` command in the [install guide](docs/install.md#accept-or-restore) |
+| Remove user-local integration | `./setup uninstall` |
 
-## Reviewed runtime-component transaction
+Uninstall removes only files proven by its install manifest. Modified,
+replaced, or unproven files are preserved with a warning; **already-missing paths are left absent**. It does not restore compatibility-tool runtime files,
+delete recovery evidence, or touch the separately supplied Microsoft DLL.
 
-The fail-closed installer has one installable runtime profile: `legacy-v0.1`, the candidate pair in `manifests/runtime-profiles.toml`. It accepts only the exact clean integration, legacy XGameRuntime, and legacy Xodus revisions; binds ten source artifacts into a private mode-0600, version-2 evidence manifest; and prints a digest-bound plan before installation. The newer WineGDK/Xodus pair is source-only experimental evidence, not an installable profile. Historical private version-1 journals may contain `winegdk_git_sha`; that is only their old schema field, not the v0.1 runtime identity. The installer stages every source before the first destination changes, holds the same exclusive lock as the game launcher, and refuses to mutate while Forza or `xodus-forza.service` is active. It never starts or stops either one.
+## Manual and technical documentation
 
-Set the four absolute roots for the reviewed local builds and compatibility tool:
+- [Installation and recovery](docs/install.md) — the full manual transaction,
+  patch, acceptance, restoration, and logging workflow.
+- [Architecture](docs/architecture.md) — launcher ownership, runtime
+  generations, fail-closed state, and exact-build boundaries.
+- [Troubleshooting](docs/troubleshooting.md) — known failure states and safe
+  recovery routing.
+- [Verification](docs/verification.md) — automated gates and dated live
+  evidence.
+- [v0.1.0 release evidence](docs/release-v0.1.0.md) — the shipped evidence
+  boundary.
+- [Upstream publication ledger](docs/upstream.md) — public branches, drafts,
+  issue comments, and immutable revisions.
 
-```bash
-user_root="$HOME"
-compat_tool="${XDG_DATA_HOME:-$HOME/.local/share}/Steam/compatibilitytools.d/GE-Proton11-3-FM"
-xgameruntime_build=/absolute/path/to/reviewed-xgameruntime-build
-xodus_build=/absolute/path/to/reviewed-xodus/target/release
-evidence="$user_root/.local/state/forza-motorsport-linux/runtime-transactions/artifact-evidence.json"
-runtime_args=(
-    --compat-tool-root "$compat_tool"
-    --user-root "$user_root"
-    --xgameruntime-build-dir "$xgameruntime_build"
-    --xodus-build-dir "$xodus_build"
-    --artifact-evidence-manifest "$evidence"
-)
-scripts/install-runtime-components lock-evidence "${runtime_args[@]}"
-scripts/install-runtime-components plan "${runtime_args[@]}"
-```
-
-Review all ten printed source roles, revisions, before hashes, fixed modes, ownership decision, and `PLAN_SHA256`. Installation requires that exact digest and recomputes every input:
-
-```bash
-scripts/install-runtime-components install "${runtime_args[@]}" --plan-sha256 EXACT_PRINTED_DIGEST
-scripts/install-runtime-components status "${runtime_args[@]}"
-```
-
-If the ownership manifest is absent but one or more of the eight user destinations already exist, the plan refuses them by default. Inspect those files first, then pass `--adopt-unmanaged` to both `plan` and `install`; the adoption decision is included in the plan digest. This is intended for an explicitly reviewed legacy installation, not as a conflict override.
-
-Before manual validation, `rollback` restores the prior launcher, doctor, patcher, build manifest, Xodus executables, systemd unit, ownership manifest, and both legacy XGameRuntime files. The launcher is published first: before that rename no functional component has changed, and after it every unfinished state is launch-blocking. Publishing or restoring the unit requires a successful user-manager `daemon-reload`; rollback keeps the recovery-aware launcher in place if that reload fails. After successful validation, `accept` retains the backups; a later `restore-runtime` restores only the legacy XGameRuntime pair and leaves all accepted user files owned by the normal user-install manifest:
-
-```bash
-scripts/install-runtime-components rollback "${runtime_args[@]}"
-# Or, only after the full manual matrix passes:
-scripts/install-runtime-components accept "${runtime_args[@]}"
-scripts/install-runtime-components restore-runtime "${runtime_args[@]}"
-```
-
-Do not delete transaction directories or adjacent backup/recovery files. The launcher allows the `installed` state for manual game validation but blocks `prepared`, `installing`, `rolling_back`, and `recovery_required`. This transaction changes only the eight allowlisted user payloads, their ownership manifest, and the legacy XGameRuntime pair inside the selected compatibility tool. It does not touch Steam launch options, the game prefix, credentials, or the separately supplied `xgameruntime.dll.threading` file.
-
-## Known-build patch fallback
-
-If `forza-doctor` reports `WARN` for controller and mountmgr known-build state, the reviewed fallback is available only for the exact hashes in `supported-builds.toml`. Unknown, mixed, changed, missing, or partly patched targets fail closed. The fallback covers `windows.gaming.input.dll` and `mountmgr.sys`; it is not a generic Proton flag.
-
-The `mountmgr.sys` fallback is for AP702, Forza's HDD/SSD launch rejection. On this dedicated compatibility build only, the reviewed exact-build patch reports the reviewed TRIM/storage capability through `StorageDeviceTrimProperty`. It is temporary evidence for a source fix, not a claim about other Wine, Proton, disks, or game builds.
-
-Choose a private backup directory, record the printed backup-manifest path, and run:
-
-```bash
-patcher="$HOME/.local/libexec/forza-motorsport-linux/patch-known-build"
-manifest="$HOME/.local/share/forza-motorsport-linux/supported-builds.toml"
-steam_root="${XDG_DATA_HOME:-$HOME/.local/share}/Steam"
-backup_root="$HOME/.local/state/forza-motorsport-linux/patch-backups"
-"$patcher" apply-forza --manifest "$manifest" --steam-root "$steam_root" --backup-root "$backup_root"
-```
-
-The patcher preflights all four in-scope targets before writing, creates verified user-owned backups outside every compatibility-tool directory, and records a backup manifest. Publication is bound to the validated inode and digest through held no-follow directory descriptors; after an exchange, a concurrent regular file, symlink, or directory is either restored atomically to the public path or preserved under an exact path named in the failure. The patcher does not unlink mutable post-exchange names. Successful recovery renames use a deterministic `.forza-recovery-*` name beside the target; even a following directory-sync failure reports that exact name. Successful apply and restore also retain the other exchange object under a reported recovery name. These hidden recovery objects intentionally consume additional disk space; keep the external backup manifest authoritative and remove retained objects manually only after verifying they are no longer needed. Restore only with that manifest:
-
-```bash
-"$patcher" restore-forza --manifest "$manifest" --steam-root "$steam_root" --backup-manifest /absolute/path/to/forza-patch-TIMESTAMP.json
-```
-
-Restore also verifies current and backup hashes before changing files.
-
-## Launch and logs
-
-Steam invokes the generated line, which runs `forza-linux` around Steam's game command. Xodus starts only after the launcher reserves its token. For investigation, use the normal user journal and redact account, authorization, proof-key, gamertag, XUID, and invite data before sharing. This repository does not collect or upload runtime logs.
-
-## Invite/join workflow
-
-Outgoing Microsoft/Xbox invite and join are **VERIFIED** through the exact
-legacy v0.1 pair on the tested system. They require a successful game session
-and an explicitly opened social picker; this is not a general compatibility
-promise. **Incoming invite notifications are not supported.** Steam invites
-are not a replacement for Microsoft/Xbox invites.
-
-The newer WineGDK/Xodus social bridge is source-only experimental evidence. Its
-local activation-delivery design does not make it part of v0.1, and its green
-hermetic source gate does not override the rejected live result.
+For the personal story behind the work, read
+[I Just Wanted to Drive the Nürburgring](https://blog.volc.men/blog/forza-motorsport-linux/).
+The repository, not the story, is authoritative for the current technical state.
 
 ## Known limitations
 
-- This is not ordinary upstream Proton support and cannot guarantee launch, sign-in, gameplay, networking, or social UI behavior.
-- Accepted patches are tied to exact hashes and the named compatibility-tool layout.
-- The unit deliberately fails when directly started without the launcher's token.
-- A passing doctor report is readiness evidence, not proof of a game session.
-
-## Restore and uninstall
-
-Restore patches with the recorded patch backup manifest before altering compatibility-tool files manually. To remove the user-local integration, run:
-
-```bash
-scripts/uninstall-user
-```
-
-Uninstall removes only files proven by its install manifest. Modified, replaced, or unproven files are preserved with a warning; already-missing paths are left absent. Interrupted-install and replaced owned material is moved into the private project recovery directory under `~/.local/state/forza-motorsport-linux/recovery` and retained rather than unlinked through a mutable name. This intentional recovery retention consumes disk space; inspect and purge it manually only after confirming it is no longer needed.
+- This cannot guarantee launch, sign-in, gameplay, networking, or social UI on
+  another machine or after an upstream update.
+- Accepted patches are tied to exact hashes and the named compatibility-tool
+  layout.
+- A passing doctor report means **ready to attempt**, not “working.”
+- Incoming invite notifications are not supported.
+- The unit deliberately rejects a direct start without the launcher's
+  one-shot ownership token.
 
 ## Upstream branches and provenance
 
-This repository contains only scripts, manifests, documentation, and synthetic test fixtures. It does not redistribute Wine, Proton, Xodus, Microsoft, Steam, or game binaries. The supported-build manifest records reviewed hashes and byte edits.
-
-### Component source status
-
-The v0.1 runtime is the legacy protocol generation: Xodus commit
-`7b236772297b3475ea4f3cb830feb5b224f3064a` and the legacy XGameRuntime source
-recorded in `docs/publication-manifest.toml`. The current installed-artifact
-hashes and reconstruction evidence are recorded there and in `docs/evidence`;
-the separately supplied licensed Microsoft runtime remains outside public
-evidence and repository transactions.
-
-The newer WineGDK commit `d96a768e25f632b04a457e4cb9f585e89ef5d095`
-and Xodus commit `ee9db0f68122a9731b9b66cc24767693d1737f5c` are a
-**REJECTED LIVE** source experiment. They are not the v0.1 runtime and must not
-be installed by the `legacy-v0.1` profile.
-
-The selected implementation bases are `xodus-gaming/wine` `bleeding-edge` for the standalone Wine fixes, `xodus-gaming/xodus` `main` for Xodus, and `Weather-OS/WineGDK` `b03ba49c4f326c36aa6930fbe6cf72841ef3738c` for the experimental XGameRuntime bridge. Fresh inspection found that xgameruntime PR 19 is an IDL template rather than a Unixlib transport, while `oot-cpp` cannot replace the Wine submodule layout. The reviewed source branches are now public at the immutable revisions:
+This repository contains scripts, manifests, documentation, and synthetic test
+fixtures only. It redistributes no Wine, Proton, Xodus, Microsoft, Steam, or
+game binary. The source branches are public at the immutable revisions recorded
+in the [publication ledger](docs/upstream.md):
 
 - legacy Xodus [`forza-social-invite-join-v0.1`](https://github.com/volcmen/xodus/tree/forza-social-invite-join-v0.1) at [`7b236772297b3475ea4f3cb830feb5b224f3064a`](https://github.com/volcmen/xodus/commit/7b236772297b3475ea4f3cb830feb5b224f3064a);
-- current-line Xodus [`xodus-social-invite-bridge`](https://github.com/volcmen/xodus/tree/xodus-social-invite-bridge) at [`ee9db0f68122a9731b9b66cc24767693d1737f5c`](https://github.com/volcmen/xodus/commit/ee9db0f68122a9731b9b66cc24767693d1737f5c);
 - legacy XGameRuntime [`forza-xgameui-invite-join-v0.1`](https://github.com/volcmen/wine-forza-motorsport/tree/forza-xgameui-invite-join-v0.1) at [`a1548b1cf57371715d10b608bc81a77a188e40d4`](https://github.com/volcmen/wine-forza-motorsport/commit/a1548b1cf57371715d10b608bc81a77a188e40d4);
 - Wine controller [`wgi-physical-nonroamable-id`](https://github.com/volcmen/wine-forza-motorsport/tree/wgi-physical-nonroamable-id) at [`ddd302d97c6008d79ea4f3e3ad56014cb548e514`](https://github.com/volcmen/wine-forza-motorsport/commit/ddd302d97c6008d79ea4f3e3ad56014cb548e514);
 - Wine storage [`storage-trim-property`](https://github.com/volcmen/wine-forza-motorsport/tree/storage-trim-property) at [`a7719bd8d0719e5ea6061387db020fa6a6b39d27`](https://github.com/volcmen/wine-forza-motorsport/commit/a7719bd8d0719e5ea6061387db020fa6a6b39d27); and
-- **REJECTED LIVE** WineGDK [`xodus-social-invite-bridge-experimental`](https://github.com/volcmen/WineGDK/tree/xodus-social-invite-bridge-experimental) at [`d96a768e25f632b04a457e4cb9f585e89ef5d095`](https://github.com/volcmen/WineGDK/commit/d96a768e25f632b04a457e4cb9f585e89ef5d095).
+- **REJECTED LIVE** WineGDK/Xodus [`xodus-social-invite-bridge-experimental`](https://github.com/volcmen/WineGDK/tree/xodus-social-invite-bridge-experimental) and [`xodus-social-invite-bridge`](https://github.com/volcmen/xodus/tree/xodus-social-invite-bridge).
 
-GitHub permits one fork per account in a fork network. Because the standalone Wine bases share a network with `AllanVester/wine-forza-motorsport`, the legacy, controller, and storage branches live together in [`volcmen/wine-forza-motorsport`](https://github.com/volcmen/wine-forza-motorsport). The XGameRuntime deliverable is an explicitly AI-assisted experimental WineGDK branch, not an upstream `xodus-gaming/xgameruntime` code PR.
+The selected implementation bases remain `xodus-gaming/wine` `bleeding-edge`,
+`xodus-gaming/xodus` `main`, and `Weather-OS/WineGDK` `b03ba49c4f326c36aa6930fbe6cf72841ef3738c`. The experimental XGameRuntime
+deliverable is not an upstream `xodus-gaming/xgameruntime` code PR.
 
-The canonical bases can be checked out for inspection with no claim that they build the complete integration:
+Canonical source checkouts for audit purposes:
 
 ```bash
 git clone https://github.com/xodus-gaming/wine.git wine
@@ -227,6 +287,5 @@ git clone https://github.com/Weather-OS/WineGDK.git winegdk
 git -C winegdk switch --detach b03ba49c4f326c36aa6930fbe6cf72841ef3738c
 ```
 
-The reviewed Xodus branch's workspace build command is `cargo build --release --workspace`. The installer requires `--xodus-build-dir` to be an absolute directory containing exactly these direct artifacts: `xodus-service`, `xodus-cli`, and `xodus-overlay` (for a conventional Cargo release build, evaluate the verified `target/release` output directory rather than the checkout root). The focused component build checks are `make -C dlls/mountmgr.sys` for Wine storage and an isolated out-of-tree `make -C <build>/dlls/xgameruntime` for the WineGDK bridge. The open-source source branches are public at the immutable revisions and their clean-build evidence is recorded here. This is still a source-only experimental workflow: it does not redistribute or replace the licensed Microsoft runtime, Steam, or game files required by the tested setup.
-
-See [architecture](docs/architecture.md), [troubleshooting](docs/troubleshooting.md), and [verification](docs/verification.md).
+These bases are provenance references, not a claim that cloning them alone
+builds or installs the complete integration.

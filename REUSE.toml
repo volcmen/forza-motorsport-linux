@@ -8,6 +8,7 @@ path = [
     ".github/**",
     ".gitignore",
     "README.md",
+    "setup",
     "bin/**",
     "config/**",
     "docs/**",

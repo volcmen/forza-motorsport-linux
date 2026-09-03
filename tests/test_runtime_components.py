@@ -969,6 +969,90 @@ def test_mutation_refuses_the_launcher_lock_and_active_service(tmp_path: Path):
     assert "service is active" in failed.stderr.lower()
 
 
+def test_uninstall_user_holds_the_launcher_lock_and_service_safety_gate(
+    tmp_path: Path,
+):
+    fixture = setup_fixture(tmp_path)
+    fake_uninstaller = tmp_path / "uninstall-user"
+    called = tmp_path / "uninstaller-called"
+    fake_uninstaller.write_text(
+        """#!/usr/bin/env python3
+import fcntl
+import os
+from pathlib import Path
+import sys
+
+Path(os.environ["FORZA_RUNTIME_UNINSTALL_CALLED"]).touch()
+lock_path = Path(os.environ["XDG_RUNTIME_DIR"]) / "forza-linux.lock"
+lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("uninstall-lock=held")
+    raise SystemExit(0)
+print("uninstall-lock=free", file=sys.stderr)
+raise SystemExit(42)
+""",
+        encoding="utf-8",
+    )
+    fake_uninstaller.chmod(0o755)
+    fixture["env"].update(  # type: ignore[union-attr]
+        {
+            "FORZA_RUNTIME_UNINSTALL_USER": str(fake_uninstaller),
+            "FORZA_RUNTIME_UNINSTALL_CALLED": str(called),
+        }
+    )
+
+    uninstalled = run_tool(fixture, "uninstall-user", check=False)
+    assert uninstalled.returncode == 0
+    assert uninstalled.stdout == "uninstall-lock=held\n"
+    assert called.exists()
+
+    called.unlink()
+    fixture["fake_systemctl"].write_text("#!/bin/sh\nexit 0\n", encoding="ascii")  # type: ignore[union-attr]
+    failed = run_tool(fixture, "uninstall-user", check=False)
+    assert failed.returncode != 0
+    assert "service is active" in failed.stderr.lower()
+    assert not called.exists()
+
+
+def test_uninstall_user_refuses_an_active_forza_process(tmp_path: Path):
+    fixture = setup_fixture(tmp_path)
+    fake_uninstaller = tmp_path / "uninstall-user"
+    called = tmp_path / "uninstaller-called"
+    fake_uninstaller.write_text(
+        '#!/bin/sh\ntouch "$FORZA_RUNTIME_UNINSTALL_CALLED"\n', encoding="utf-8"
+    )
+    fake_uninstaller.chmod(0o755)
+    fixture["env"].update(  # type: ignore[union-attr]
+        {
+            "FORZA_RUNTIME_UNINSTALL_USER": str(fake_uninstaller),
+            "FORZA_RUNTIME_UNINSTALL_CALLED": str(called),
+        }
+    )
+
+    game = subprocess.Popen(
+        ["bash", "-c", "exec -a forza_steamworks_release_final.exe sleep 10"]
+    )
+    try:
+        command_line = Path(f"/proc/{game.pid}/cmdline")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if b"forza_steamworks_release_final.exe" in command_line.read_bytes():
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("fixture Forza process did not become observable")
+
+        failed = run_tool(fixture, "uninstall-user", check=False)
+        assert failed.returncode != 0
+        assert "forza motorsport process is active" in failed.stderr.lower()
+        assert not called.exists()
+    finally:
+        game.terminate()
+        game.wait(timeout=2)
+
+
 @pytest.mark.parametrize(
     "boundary",
     [

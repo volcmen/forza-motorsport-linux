@@ -898,6 +898,27 @@ def require_service_and_game_inactive() -> None:
             raise RuntimeInstallError("Forza Motorsport process is active")
 
 
+def uninstall_user(arguments: argparse.Namespace) -> None:
+    lock_fd = acquire_launcher_lock()
+    try:
+        require_service_and_game_inactive()
+        uninstaller = Path(__file__).resolve().with_name("uninstall-user")
+        if os.environ.get("FORZA_RUNTIME_TESTING") == "1":
+            override = os.environ.get("FORZA_RUNTIME_UNINSTALL_USER")
+            if override:
+                uninstaller = Path(override)
+        result = subprocess.run(
+            [str(uninstaller), "--root", str(arguments.user_root)],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeInstallError(
+                f"user uninstaller exited with status {result.returncode}"
+            )
+    finally:
+        os.close(lock_fd)
+
+
 def reload_user_manager() -> None:
     systemctl = os.environ.get("FORZA_SYSTEMCTL", "systemctl")
     result = subprocess.run(
@@ -1715,6 +1736,7 @@ def parse_arguments() -> argparse.Namespace:
             "lock-evidence",
             "plan",
             "install",
+            "uninstall-user",
             "status",
             "rollback",
             "accept",
@@ -1778,6 +1800,8 @@ def main() -> int:
             print_plan(plan, plan_hash)
         elif arguments.operation == "install":
             install_components(arguments)
+        elif arguments.operation == "uninstall-user":
+            uninstall_user(arguments)
         elif arguments.operation == "status":
             return status(arguments)
         else:

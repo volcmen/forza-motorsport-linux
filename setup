@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+
+set -u
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+DOCTOR="$ROOT/bin/forza-doctor"
+INSTALL_USER="$ROOT/scripts/install-user"
+RUNTIME_INSTALLER="$ROOT/scripts/install-runtime-components"
+
+usage() {
+    printf '%s\n' "usage: $0 [check|status|rollback|steam-options|uninstall]" >&2
+    exit 64
+}
+
+print_help() {
+    printf '%s\n' \
+        'Guided setup for an experimental, source-only Forza Motorsport Linux integration.' \
+        '' \
+        '  ./setup                 Guided installation (shows a digest-bound plan first)' \
+        '  ./setup check           Read-only readiness check' \
+        '  ./setup status          Runtime transaction state and readiness report' \
+        '  ./setup rollback        Explicit transaction rollback' \
+        '  ./setup steam-options   Print launch options for manual pasting' \
+        '  ./setup uninstall       Remove manifest-proven files while Forza/Xodus are stopped' \
+        '' \
+        'This command does not download binaries, edit Steam, patch Wine, or launch the game.'
+}
+
+require_absolute() {
+    local label=$1 value=$2
+    [[ $value == /* ]] || {
+        printf 'error: %s must be an absolute path\n' "$label" >&2
+        exit 1
+    }
+}
+
+prompt_xodus_build() {
+    local value=${FORZA_SETUP_XODUS_BUILD_DIR:-}
+    if [[ -z $value ]]; then
+        printf 'Xodus build directory (the reviewed target/release): ' >&2
+        IFS= read -r value || exit 1
+    fi
+    require_absolute 'Xodus build directory' "$value"
+    printf '%s\n' "$value"
+}
+
+prompt_path() {
+    local label=$1 value=$2
+    if [[ -z $value ]]; then
+        printf '%s: ' "$label" >&2
+        IFS= read -r value || exit 1
+    fi
+    require_absolute "$label" "$value"
+    printf '%s\n' "$value"
+}
+
+runtime_arguments() {
+    local user_root=$1 compat_tool=$2 xgameruntime_build=$3 xodus_build=$4
+    local evidence="$user_root/.local/state/forza-motorsport-linux/runtime-transactions/artifact-evidence.json"
+    printf '%s\0' \
+        --compat-tool-root "$compat_tool" \
+        --user-root "$user_root" \
+        --xgameruntime-build-dir "$xgameruntime_build" \
+        --xodus-build-dir "$xodus_build" \
+        --artifact-evidence-manifest "$evidence"
+}
+
+extract_plan_digest() {
+    local plan=$1 line digest='' matches=0
+    while IFS= read -r line; do
+        case "$line" in
+            PLAN_SHA256=*)
+                digest=${line#PLAN_SHA256=}
+                ((matches += 1))
+                ;;
+        esac
+    done <<<"$plan"
+    [[ $matches == 1 && $digest =~ ^[0123456789abcdef]{64}$ ]] || return 1
+    printf '%s\n' "$digest"
+}
+
+run_check() {
+    local user_root xodus_build doctor_status=0 install_status=0
+    user_root=${FORZA_INSTALL_ROOT:-${HOME:?HOME is required}}
+    require_absolute 'user root' "$user_root"
+    xodus_build=$(prompt_xodus_build) || return
+
+    printf '%s\n' 'Read-only setup check'
+    "$DOCTOR" || doctor_status=$?
+    "$INSTALL_USER" --check --root "$user_root" --xodus-build-dir "$xodus_build" || install_status=$?
+
+    ((doctor_status == 0 && install_status == 0))
+}
+
+state_runtime_arguments() {
+    local user_root=$1 compat_tool xgameruntime_build xodus_build
+    compat_tool=${FORZA_SETUP_COMPAT_TOOL_ROOT:-${XDG_DATA_HOME:-$user_root/.local/share}/Steam/compatibilitytools.d/GE-Proton11-3-FM}
+    xgameruntime_build=${FORZA_SETUP_XGAMERUNTIME_BUILD_DIR:-$user_root}
+    xodus_build=${FORZA_SETUP_XODUS_BUILD_DIR:-$user_root}
+    runtime_arguments "$user_root" "$compat_tool" "$xgameruntime_build" "$xodus_build"
+}
+
+transaction_compat_tool() {
+    local user_root=$1 default value
+    default=${XDG_DATA_HOME:-$user_root/.local/share}/Steam/compatibilitytools.d/GE-Proton11-3-FM
+    value=${FORZA_SETUP_COMPAT_TOOL_ROOT:-}
+    if [[ -z $value ]]; then
+        printf 'Compatibility-tool directory used by the transaction [%s]: ' "$default" >&2
+        IFS= read -r value || exit 1
+        [[ -n $value ]] || value=$default
+    fi
+    require_absolute 'compatibility-tool directory' "$value"
+    printf '%s\n' "$value"
+}
+
+run_status() {
+    local user_root runtime_status=0 doctor_status=0
+    local -a runtime_args
+    user_root=${FORZA_INSTALL_ROOT:-${HOME:?HOME is required}}
+    require_absolute 'user root' "$user_root"
+    mapfile -d '' -t runtime_args < <(state_runtime_arguments "$user_root")
+
+    "$RUNTIME_INSTALLER" status "${runtime_args[@]}" || runtime_status=$?
+    [[ $runtime_status == 0 || $runtime_status == 3 ]] || return "$runtime_status"
+    "$DOCTOR" || doctor_status=$?
+    ((doctor_status == 0))
+}
+
+run_rollback() {
+    local user_root compat_tool confirmation
+    local -a runtime_args
+    user_root=${FORZA_INSTALL_ROOT:-${HOME:?HOME is required}}
+    require_absolute 'user root' "$user_root"
+    compat_tool=$(transaction_compat_tool "$user_root") || return
+    mapfile -d '' -t runtime_args < <(
+        runtime_arguments "$user_root" "$compat_tool" \
+            "${FORZA_SETUP_XGAMERUNTIME_BUILD_DIR:-$user_root}" \
+            "${FORZA_SETUP_XODUS_BUILD_DIR:-$user_root}"
+    )
+
+    printf '%s\n' 'Rollback restores the transaction recorded by the runtime installer.'
+    printf '%s\n' 'Keep every journal, backup, stage, and recovery file until rollback completes.'
+    printf 'Type ROLLBACK to continue: ' >&2
+    IFS= read -r confirmation || confirmation=
+    if [[ $confirmation != ROLLBACK ]]; then
+        printf '%s\n' 'No changes made.'
+        return 0
+    fi
+    "$RUNTIME_INSTALLER" rollback "${runtime_args[@]}"
+}
+
+run_uninstall() {
+    local user_root confirmation
+    local -a runtime_args
+    user_root=${FORZA_INSTALL_ROOT:-${HOME:?HOME is required}}
+    require_absolute 'user root' "$user_root"
+    mapfile -d '' -t runtime_args < <(state_runtime_arguments "$user_root")
+
+    printf '%s\n' 'This removes only manifest-proven user-local integration files.'
+    printf '%s\n' 'It does not restore compatibility-tool runtime components or delete recovery material.'
+    printf 'Type UNINSTALL to continue: ' >&2
+    IFS= read -r confirmation || confirmation=
+    if [[ $confirmation != UNINSTALL ]]; then
+        printf '%s\n' 'No changes made.'
+        return 0
+    fi
+    "$RUNTIME_INSTALLER" uninstall-user "${runtime_args[@]}"
+}
+
+run_install() {
+    local user_root xodus_build xgameruntime_build compat_tool answer plan_output plan_digest confirmation
+    local -a runtime_args
+    user_root=${FORZA_INSTALL_ROOT:-${HOME:?HOME is required}}
+    require_absolute 'user root' "$user_root"
+
+    printf '%s\n' 'Guided setup for an experimental, source-only Forza Motorsport Linux integration.'
+    xodus_build=$(prompt_xodus_build) || return
+    xgameruntime_build=$(prompt_path 'XGameRuntime build directory' \
+        "${FORZA_SETUP_XGAMERUNTIME_BUILD_DIR:-}") || return
+    compat_tool=$(prompt_path 'GE-Proton11-3-FM directory' \
+        "${FORZA_SETUP_COMPAT_TOOL_ROOT:-}") || return
+
+    "$INSTALL_USER" --check --root "$user_root" --xodus-build-dir "$xodus_build" || return
+    printf '%s\n' 'The next step writes a private evidence manifest, then prints the complete installation plan.'
+    printf 'Prepare evidence and plan? [y/N] ' >&2
+    IFS= read -r answer || answer=
+    case "$answer" in
+        y | Y | yes | YES) ;;
+        *)
+            printf '%s\n' 'No changes made.'
+            return 0
+            ;;
+    esac
+
+    mapfile -d '' -t runtime_args < <(
+        runtime_arguments "$user_root" "$compat_tool" "$xgameruntime_build" "$xodus_build"
+    )
+    "$RUNTIME_INSTALLER" lock-evidence "${runtime_args[@]}" || return
+    plan_output=$("$RUNTIME_INSTALLER" plan "${runtime_args[@]}") || return
+    printf '%s\n' "$plan_output"
+    if ! plan_digest=$(extract_plan_digest "$plan_output"); then
+        printf '%s\n' 'error: runtime planner returned no single valid PLAN_SHA256' >&2
+        return 1
+    fi
+    printf 'Type the complete PLAN_SHA256 to install: ' >&2
+    IFS= read -r confirmation || confirmation=
+    if [[ $confirmation != "$plan_digest" ]]; then
+        printf '%s\n' 'error: plan digest confirmation did not match; no installation was attempted' >&2
+        return 1
+    fi
+
+    "$RUNTIME_INSTALLER" install "${runtime_args[@]}" --plan-sha256 "$plan_digest" || return
+    "$RUNTIME_INSTALLER" status "${runtime_args[@]}" || return
+    if ! "$DOCTOR"; then
+        printf '%s\n' 'Installation transaction completed, but the doctor found blockers. Do not launch the game yet.' >&2
+        return 1
+    fi
+    printf '%s\n' 'Steam launch options:'
+    "$ROOT/scripts/print-steam-options"
+    printf '%s\n' 'READY TO ATTEMPT — not a gameplay guarantee.'
+    printf '%s\n' 'Paste the generated options into Steam. Launch Forza yourself from Steam.'
+    printf '%s\n' 'If the doctor reports a known-build WARN, review the documented controller/AP702 fallback before launching.'
+}
+
+(($# <= 1)) || usage
+case "${1:-}" in
+    '') run_install ;;
+    check) run_check ;;
+    status) run_status ;;
+    rollback) run_rollback ;;
+    steam-options) "$ROOT/scripts/print-steam-options" ;;
+    uninstall) run_uninstall ;;
+    help | --help | -h) print_help ;;
+    *) usage ;;
+esac
