@@ -87,6 +87,21 @@ def snapshot_value(**updates: object) -> dict[str, object]:
     return values
 
 
+def raw_record_value(
+    logical_path: object,
+    *,
+    private: object = False,
+) -> dict[str, object]:
+    return {
+        "logical_path": logical_path,
+        "state": "absent",
+        "mode": None,
+        "size": None,
+        "sha256": None,
+        "private": private,
+    }
+
+
 def test_compare_classifies_exact_expected_unchanged_and_unexpected() -> None:
     before = snapshot(
         record("managed/a", b"old"),
@@ -244,6 +259,28 @@ def test_after_private_path_redacts_extra_rule_error() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("before_private", "after_private"), ((False, True), (True, False))
+)
+def test_compare_rejects_privacy_only_drift_as_private_comparison_error(
+    before_private: bool, after_private: bool
+) -> None:
+    private_path = "private/sensitive-component"
+    before = record(private_path, b"same", private=before_private)
+    after = record(private_path, b"same", private=after_private)
+
+    with pytest.raises(BootstrapError) as failure:
+        compare_snapshots(
+            snapshot(before),
+            snapshot(after),
+            (ChangeRule(private_path, "expected", after.sha256, after.mode),),
+        )
+
+    assert str(failure.value) == "private snapshot comparison failed"
+    assert private_path not in str(failure.value)
+    assert before.sha256 not in str(failure.value)
+
+
 def test_private_digest_and_path_never_enter_human_report() -> None:
     digest = "f" * 64
     private_path = "private/local-component"
@@ -341,6 +378,64 @@ def test_private_comparison_scan_handles_late_private_in_malformed_list() -> Non
         (ChangeRule(private_path, "unchanged", public.sha256, public.mode),),
         private_path,
     )
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    ("top-level", "record-shape", "identity", "early-duplicate"),
+)
+def test_read_private_native_json_scan_precedes_all_schema_validation(
+    tmp_path: Path, malformation: str
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    private_path = "private/sensitive-persisted-component"
+    private_record = raw_record_value(private_path, private=True)
+    if malformation == "top-level":
+        value = snapshot_value(records=[private_record], unexpected=True)
+    elif malformation == "record-shape":
+        value = snapshot_value(records=[{"logical_path": private_path, "private": True}])
+    elif malformation == "identity":
+        value = snapshot_value(transaction_id=private_path, records=[private_record])
+    else:
+        duplicate = raw_record_value("guard/duplicate")
+        value = snapshot_value(records=[duplicate, duplicate, private_record])
+    source = tmp_path / "snapshot.json"
+    write_snapshot_value(source, value)
+
+    with pytest.raises(BootstrapError) as failure:
+        read_snapshot(source)
+
+    assert str(failure.value) == "private snapshot input is invalid"
+    assert private_path not in str(failure.value)
+
+
+def test_cli_redacts_malformed_private_native_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    private_path = "private/sensitive-persisted-component"
+    duplicate = raw_record_value("guard/duplicate")
+    before = tmp_path / "before.json"
+    after = tmp_path / "after.json"
+    write_snapshot_value(
+        before,
+        snapshot_value(
+            records=[
+                duplicate,
+                duplicate,
+                raw_record_value(private_path, private=True),
+            ]
+        ),
+    )
+    write_snapshot(after, snapshot())
+
+    assert main(["compare", "--before", str(before), "--after", str(after)]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: private snapshot input is invalid\n"
+    assert private_path not in captured.err
+    assert "guard/duplicate" not in captured.err
 
 
 def test_privacy_scan_does_not_iterate_arbitrary_record_object() -> None:
@@ -490,6 +585,60 @@ def test_scope_construction_rejects_noncanonical_logical_and_relative_paths(
         )
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    (
+        "managed/line\nbreak",
+        "managed/unit\x1fseparator",
+        "managed/delete\x7fcharacter",
+        "managed/c1\x85character",
+        "managed/high-surrogate\ud800",
+        "managed/low-surrogate\udc80",
+    ),
+)
+def test_scope_construction_rejects_controls_and_unpaired_surrogates(
+    invalid: str,
+) -> None:
+    with pytest.raises(BootstrapError, match="logical path"):
+        build_snapshot_scope(
+            TRANSACTION,
+            MANIFEST,
+            {"steam": (artifact(invalid, "valid"),)},
+        )
+    with pytest.raises(BootstrapError, match="relative path"):
+        build_snapshot_scope(
+            TRANSACTION,
+            MANIFEST,
+            {"steam": (artifact("valid", invalid),)},
+        )
+
+
+def test_scope_construction_normalizes_filesystem_encoding_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid = "managed/unencodable"
+    real_fsencode = os.fsencode
+
+    def fail_selected_value(
+        value: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+    ) -> bytes:
+        if value == invalid:
+            raise UnicodeEncodeError("utf-8", invalid, 0, 1, "injected failure")
+        return real_fsencode(value)
+
+    monkeypatch.setattr(snapshot_module.os, "fsencode", fail_selected_value)
+
+    with pytest.raises(BootstrapError) as failure:
+        build_snapshot_scope(
+            TRANSACTION,
+            MANIFEST,
+            {"steam": (artifact(invalid, "valid"),)},
+        )
+
+    assert str(failure.value) == "snapshot logical path is invalid"
+    assert invalid not in str(failure.value)
+
+
 @pytest.mark.parametrize("invalid", (".", "a//b"))
 def test_capture_rejects_noncanonical_path_without_indexerror(
     tmp_path: Path, invalid: str
@@ -543,6 +692,33 @@ def test_deserialize_rejects_noncanonical_or_nonstr_logical_path(
 
     with pytest.raises(BootstrapError, match="logical path"):
         read_snapshot(source)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ("managed/line\nbreak", "managed/c1\x85character", "managed/surrogate\ud800"),
+)
+@pytest.mark.parametrize("private", (False, True))
+def test_read_rejects_unsafe_record_identifier_without_leaking(
+    tmp_path: Path, invalid: str, private: bool
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    source = tmp_path / "snapshot.json"
+    write_snapshot_value(
+        source,
+        snapshot_value(records=[raw_record_value(invalid, private=private)]),
+    )
+
+    with pytest.raises(BootstrapError) as failure:
+        read_snapshot(source)
+
+    expected = (
+        "private snapshot input is invalid"
+        if private
+        else "snapshot logical path is invalid"
+    )
+    assert str(failure.value) == expected
+    assert invalid not in str(failure.value)
 
 
 @pytest.mark.parametrize(
@@ -715,6 +891,103 @@ def test_capture_rejects_parent_swap_during_streaming(
     assert len(os.listdir("/proc/self/fd")) == before_fds
 
 
+def test_capture_rejects_parent_swap_when_new_leaf_is_same_inode_hardlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steam_root = tmp_path / "steam"
+    parent = steam_root / "managed"
+    replacement = steam_root / "replacement-managed"
+    parent.mkdir(parents=True)
+    replacement.mkdir()
+    target = parent / "target"
+    target.write_bytes(b"same-inode")
+    os.link(target, replacement / "target")
+    scope = build_snapshot_scope(
+        TRANSACTION,
+        MANIFEST,
+        {"steam": (artifact("managed/target", "managed/target"),)},
+    )
+    real_read = os.read
+    swapped = False
+    before_fds = len(os.listdir("/proc/self/fd"))
+
+    def swap_parent_after_read(fd: int, size: int) -> bytes:
+        nonlocal swapped
+        block = real_read(fd, size)
+        if block and not swapped:
+            swapped = True
+            parent.rename(steam_root / "old-managed")
+            replacement.rename(parent)
+        return block
+
+    monkeypatch.setattr(snapshot_module.os, "read", swap_parent_after_read)
+
+    with pytest.raises(BootstrapError, match="changed while hashing"):
+        capture_snapshot(scope, {"steam": steam_root})
+
+    assert len(os.listdir("/proc/self/fd")) == before_fds
+
+
+def test_capture_rejects_absent_target_after_parent_chain_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steam_root = tmp_path / "steam"
+    parent = steam_root / "managed"
+    parent.mkdir(parents=True)
+    scope = build_snapshot_scope(
+        TRANSACTION,
+        MANIFEST,
+        {"steam": (artifact("managed/missing", "managed/missing"),)},
+    )
+    real_open = os.open
+    swapped = False
+    before_fds = len(os.listdir("/proc/self/fd"))
+
+    def swap_parent_after_absence(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        try:
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+        except FileNotFoundError:
+            if path == "missing" and not swapped:
+                swapped = True
+                parent.rename(steam_root / "old-managed")
+                parent.mkdir()
+            raise
+
+    monkeypatch.setattr(snapshot_module.os, "open", swap_parent_after_absence)
+
+    with pytest.raises(BootstrapError, match="changed while hashing"):
+        capture_snapshot(scope, {"steam": steam_root})
+
+    assert len(os.listdir("/proc/self/fd")) == before_fds
+
+
+def test_capture_rejects_symlink_in_absolute_root_ancestor(tmp_path: Path) -> None:
+    actual_parent = tmp_path / "actual-parent"
+    steam_root = actual_parent / "steam"
+    steam_root.mkdir(parents=True)
+    (steam_root / "target").write_bytes(b"must not be captured through link")
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(actual_parent, target_is_directory=True)
+    scope = build_snapshot_scope(
+        TRANSACTION,
+        MANIFEST,
+        {"steam": (artifact("managed/target", "target"),)},
+    )
+    before_fds = len(os.listdir("/proc/self/fd"))
+
+    with pytest.raises(BootstrapError, match="root is not a regular directory"):
+        capture_snapshot(scope, {"steam": linked_parent / "steam"})
+
+    assert len(os.listdir("/proc/self/fd")) == before_fds
+
+
 @pytest.mark.parametrize("failure_point", ("fstat", "validation"))
 def test_capture_closes_target_fd_when_post_open_validation_fails(
     tmp_path: Path,
@@ -805,6 +1078,35 @@ def test_capture_revalidates_scope_before_descriptor_access(tmp_path: Path) -> N
         capture_snapshot(scope, {"steam": steam_root})
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    ("managed/line\nbreak", "managed/c1\x85character", "managed/surrogate\ud800"),
+)
+@pytest.mark.parametrize("private", (False, True))
+def test_capture_rejects_unsafe_direct_relative_path_without_leaking(
+    tmp_path: Path, invalid: str, private: bool
+) -> None:
+    steam_root = tmp_path / "steam"
+    steam_root.mkdir()
+    scope = SnapshotScope(
+        1,
+        TRANSACTION,
+        MANIFEST,
+        (SnapshotTarget("managed/item", "steam", invalid, private),),
+    )
+
+    with pytest.raises(BootstrapError) as failure:
+        capture_snapshot(scope, {"steam": steam_root})
+
+    expected = (
+        "private snapshot capture failed"
+        if private
+        else "snapshot relative path is invalid"
+    )
+    assert str(failure.value) == expected
+    assert invalid not in str(failure.value)
+
+
 @pytest.mark.parametrize("invalid", (None, 1, "targets", [], {}))
 def test_capture_rejects_invalid_target_collections(tmp_path: Path, invalid: object) -> None:
     steam_root = tmp_path / "steam"
@@ -832,7 +1134,9 @@ def test_capture_normalizes_embedded_nul_root_without_path_leak(
     with pytest.raises(BootstrapError) as failure:
         capture_snapshot(scope, {"steam": root})
 
-    expected = "private snapshot capture failed" if private else "snapshot root is invalid"
+    expected = (
+        "private snapshot capture failed" if private else "snapshot root is invalid"
+    )
     assert str(failure.value) == expected
     assert root not in str(failure.value)
     assert logical_path not in str(failure.value)
@@ -908,6 +1212,93 @@ def test_snapshot_file_io_normalizes_missing_and_nul_paths(
         assert str(failure.value) == expected
         assert "sensitive-name" not in str(failure.value)
         assert str(tmp_path) not in str(failure.value)
+
+
+@pytest.mark.parametrize("operation", ("read", "write"))
+def test_snapshot_file_io_normalizes_unencodable_surrogate_path(
+    tmp_path: Path, operation: str
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    unsafe = f"{tmp_path}/sensitive-surrogate-\ud800.json"
+    action = (
+        (lambda: read_snapshot(unsafe))
+        if operation == "read"
+        else (lambda: write_snapshot(unsafe, snapshot()))
+    )
+
+    with pytest.raises(BootstrapError) as failure:
+        action()
+
+    expected = (
+        "snapshot input could not be read"
+        if operation == "read"
+        else "snapshot output could not be written"
+    )
+    assert str(failure.value) == expected
+    assert "sensitive-surrogate" not in str(failure.value)
+
+
+@pytest.mark.parametrize("private", (False, True))
+def test_capture_normalizes_unencodable_surrogate_root(
+    private: bool,
+) -> None:
+    logical_path = "private/item" if private else "managed/item"
+    scope = build_snapshot_scope(
+        TRANSACTION,
+        MANIFEST,
+        {"steam": (artifact(logical_path, "item", private=private),)},
+    )
+    root = "/sensitive-root-\ud800"
+
+    with pytest.raises(BootstrapError) as failure:
+        capture_snapshot(scope, {"steam": root})
+
+    expected = "private snapshot capture failed" if private else "snapshot root is invalid"
+    assert str(failure.value) == expected
+    assert "sensitive-root" not in str(failure.value)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ("managed/line\nbreak", "managed/c1\x85character", "managed/surrogate\ud800"),
+)
+@pytest.mark.parametrize("private", (False, True))
+def test_render_rejects_unsafe_identifier_without_leaking(
+    invalid: str, private: bool
+) -> None:
+    item = record(invalid, b"same", private=private)
+    comparison = Comparison(
+        expected_changes=(),
+        required_unchanged=(ComparedRecord(invalid, item, item, "unchanged"),),
+        unexpected_changes=(),
+    )
+
+    with pytest.raises(BootstrapError) as failure:
+        render_comparison(comparison)
+
+    expected = (
+        "private snapshot comparison failed"
+        if private
+        else "comparison report logical path is invalid"
+    )
+    assert str(failure.value) == expected
+    assert invalid not in str(failure.value)
+
+
+def test_render_escapes_non_ascii_quotes_backslashes_and_line_separator() -> None:
+    logical_path = 'managed/caf\u00e9"item\\tail\u2028next'
+    item = record(logical_path, b"same")
+    comparison = Comparison(
+        expected_changes=(),
+        required_unchanged=(ComparedRecord(logical_path, item, item, "unchanged"),),
+        unexpected_changes=(),
+    )
+
+    report = render_comparison(comparison)
+
+    assert '- managed/caf\\u00e9\\"item\\\\tail\\u2028next\n' in report
+    assert "caf\u00e9" not in report
+    assert "\u2028" not in report
 
 
 def test_cli_snapshot_prints_by_default_and_writes_only_with_output(
