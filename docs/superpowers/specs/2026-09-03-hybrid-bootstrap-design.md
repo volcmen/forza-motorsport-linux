@@ -1,7 +1,7 @@
 # Forza Motorsport Linux Hybrid Bootstrap Design
 
 Date: 2026-09-03
-Status: Proposed for implementation review
+Status: Approved
 
 ## Decision
 
@@ -90,6 +90,7 @@ The existing guided and expert commands remain available. The new surface is:
 ./setup bootstrap [--bundle /absolute/path/to/bundle.tar.zst]
                   [--build-from-source]
                   [--threading-dll /absolute/path/to/xgameruntime.dll]
+                  [--check | --rollback]
 ./setup snapshot [--output /absolute/path/to/snapshot.json]
 ./setup compare [--before /absolute/path/to/before.json]
                 [--after /absolute/path/to/after.json]
@@ -100,6 +101,12 @@ current user. It does not need a separate `--resume` flag. Supplying both
 `--bundle` and `--build-from-source` is an error. The default path downloads the
 bundle named by the repository manifest. `--bundle` permits offline use of the
 same exact bundle and never relaxes verification.
+
+`./setup bootstrap --check` performs host, transaction, cache, Steam, prefix,
+and managed-state inspection without creating state or changing a target.
+`./setup bootstrap --rollback` enters the explicit reverse-order bootstrap
+rollback; it is distinct from the existing `./setup rollback` runtime-only
+command.
 
 `--threading-dll` may be omitted during Prepare. It becomes mandatory during
 Finish. A rerun with the option continues the same transaction.
@@ -203,16 +210,19 @@ accepted as a new release.
 
 ## ProtonUp acquisition and dedicated compatibility tool
 
-Bootstrap uses an existing `protonup` command when its version matches the
-manifest. Otherwise it runs the manifest-pinned Python package through
-`uvx --from protonup==VERSION`. ProtonUp receives `--download`, the exact
-release, and a project-private cache output. It does not receive Steam's
-`compatibilitytools.d` as an install destination.
+Bootstrap runs ProtonUp `0.1.5` from a repository-owned, hash-locked `uv`
+project. It uses `uv run --frozen` and does not install ProtonUp globally or
+trust an unrelated command found on `PATH`. ProtonUp receives `--download`,
+the exact release, and a project-private cache output. It does not receive
+Steam's `compatibilitytools.d` as an install destination.
 
 Bootstrap then:
 
 1. verifies the downloaded archive's size and SHA-256;
-2. safely extracts it to a same-filesystem private staging directory;
+2. validates the complete archive member graph and safely extracts it to a
+   same-filesystem private staging directory; regular files and directories
+   are accepted, while a symlink or hard link is accepted only when its
+   normalized target is another declared member inside the extracted root;
 3. verifies the expected GE-Proton layout;
 4. creates a complete independent `GE-Proton11-3-FM` staging tree;
 5. rewrites only that staged tree's compatibility-tool identity to the
@@ -478,8 +488,10 @@ a verified complete cache entry may be reused on the next explicit invocation.
   launch.
 - Downloads have pinned size and SHA-256 and are published to cache only after
   verification.
-- Archives and state reject symlinks, hard links, special files, traversal,
-  ownership mismatches, and unsafe modes.
+- The open-source bundle and private state reject every link and special file.
+  The exact-digest GE-Proton archive may use only validated relative links
+  whose normalized targets remain declared inside its extracted root; special
+  files and traversal are always rejected.
 - Docker receives no home, Steam, runtime, D-Bus, keyring, credential, or
   proprietary-binary mount.
 - Logs and public reports redact home paths, gamertags, XUIDs, tokens, invite
