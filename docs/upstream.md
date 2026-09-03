@@ -4,7 +4,8 @@
 was checked against the recorded revision. `prepared` means that the local
 evidence and public text passed the repository policy gate but the external
 review action has not been performed. The coordination actions and their exact
-URLs are recorded below; the tag and release have not been published yet.
+URLs are recorded below. Every action in this ledger is now published at the
+returned URL shown in its row.
 
 | Action | State | Exact target | Result URL |
 | --- | --- | --- | --- |
@@ -17,7 +18,7 @@ URLs are recorded below; the tag and release have not been published yet.
 | Wine controller draft PR | `published` | `xodus-gaming/wine:bleeding-edge` | [draft PR](https://github.com/xodus-gaming/wine/pull/4) |
 | Wine storage draft RFC PR | `published` | `xodus-gaming/wine:bleeding-edge` | [draft RFC PR](https://github.com/xodus-gaming/wine/pull/5) |
 | Proton issue 7151 comment | `published` | `ValveSoftware/Proton#7151` | [comment](https://github.com/ValveSoftware/Proton/issues/7151#issuecomment-5526450265) |
-| v0.1.0 tag and source-only release | `prepared` | Integration repository | — |
+| v0.1.0 tag and source-only release | `published` | Integration repository | [release](https://github.com/volcmen/forza-motorsport-linux/releases/tag/v0.1.0) |
 
 ## Immutable public source identities
 

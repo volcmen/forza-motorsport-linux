@@ -481,8 +481,8 @@ def test_upstream_ledger_records_published_sources_and_review_urls():
         "Proton issue 7151 comment",
         "v0.1.0 tag and source-only release",
     ]
-    published = actions[:9]
-    prepared = actions[9:]
+    published = actions
+    prepared = []
     assert all(f"| {action} | `published` |" in ledger for action in published)
     assert all(f"| {action} | `prepared` |" in ledger for action in prepared)
     assert "No issue comment, issue, pull request" not in ledger
@@ -495,6 +495,7 @@ def test_upstream_ledger_records_published_sources_and_review_urls():
         "https://github.com/xodus-gaming/wine/pull/4",
         "https://github.com/xodus-gaming/wine/pull/5",
         "https://github.com/ValveSoftware/Proton/issues/7151#issuecomment-5526450265",
+        "https://github.com/volcmen/forza-motorsport-linux/releases/tag/v0.1.0",
     }
     assert all(url in ledger for url in review_urls)
 
