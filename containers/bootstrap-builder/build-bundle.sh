@@ -45,7 +45,10 @@ else
         --config /deps/cargo-config.toml --release --locked --offline \
         -p xodus-service -p xodus-cli -p xodus-overlay
 
-    cp -a /src/xgameruntime /tmp/xgameruntime
+    mkdir /tmp/xgameruntime
+    # Compile the source, not Git's owner-private partial-clone metadata.
+    tar -C /src/xgameruntime --exclude=./.git -cf - . |
+        tar -C /tmp/xgameruntime -xf -
     cd /tmp/xgameruntime
     autoreconf -f
     XDG_CACHE_HOME=/tmp/cache UV_CACHE_DIR=/tmp/uv-cache \
@@ -58,6 +61,7 @@ else
         x86_64_CXXFLAGS=-D_LIBCPP_NO_VCRUNTIME \
         LDFLAGS=-Wl,--build-id=none \
         ./configure --enable-win64 --without-ffmpeg --without-opencl
+    make include/hstring.h
     make -C dlls/xgameruntime -j2
 
     install -m 0755 /tmp/xodus-target/release/xodus-service "$bundle_root/bin/xodus-service"
@@ -109,10 +113,11 @@ printf '{"arch_snapshot":"%s","base_image":"%s","builder_image":"%s","llvm_mingw
 cat >"$bundle_root/provenance/build-commands.txt" <<'EOF'
 cargo build --release --locked --offline -p xodus-service -p xodus-cli -p xodus-overlay
 autoreconf -f
-uv run --offline ./dlls/winevulkan/make_vulkan
+uv run --offline ./dlls/winevulkan/make_vulkan --xml /opt/vulkan-registry/vk.xml --video-xml /opt/vulkan-registry/video.xml
 ./tools/make_specfiles
 ./tools/make_requests
 ./configure --enable-win64 --without-ffmpeg --without-opencl
+make include/hstring.h
 make -C dlls/xgameruntime -j2
 tar --sort=name --format=ustar --mtime=@0 --owner=0 --group=0 --numeric-owner
 zstd --threads=1 -19

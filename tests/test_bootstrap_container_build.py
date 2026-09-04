@@ -52,6 +52,14 @@ def test_builder_declares_native_xodus_build_dependencies() -> None:
     assert {"gtk4", "libadwaita", "protobuf", "sdl3", "webkit2gtk-4.1"} <= set(packages)
 
 
+def test_runtime_build_excludes_git_metadata_and_generates_wine_header() -> None:
+    script = (ROOT / "containers/bootstrap-builder/build-bundle.sh").read_text()
+    assert "--exclude=./.git" in script
+    assert script.index("make include/hstring.h") < script.index("make -C dlls/xgameruntime")
+    assert "--xml /opt/vulkan-registry/vk.xml" in script
+    assert "--video-xml /opt/vulkan-registry/video.xml" in script
+
+
 def run(*argv: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         argv,
