@@ -928,6 +928,44 @@ def test_capture_rejects_parent_swap_when_new_leaf_is_same_inode_hardlink(
     assert len(os.listdir("/proc/self/fd")) == before_fds
 
 
+def test_capture_rejects_same_inode_mode_mutation_during_final_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steam_root = tmp_path / "steam"
+    steam_root.mkdir()
+    target = steam_root / "target"
+    target.write_bytes(b"stable-bytes")
+    target.chmod(0o640)
+    original_inode = target.stat().st_ino
+    scope = build_snapshot_scope(
+        TRANSACTION,
+        MANIFEST,
+        {"steam": (artifact("managed/target", "target"),)},
+    )
+    real_reopen_root = snapshot_module._reopen_root
+    mutated = False
+    before_fds = len(os.listdir("/proc/self/fd"))
+
+    def mutate_mode_during_reopen(
+        root: snapshot_module._BoundRoot, name: str
+    ) -> int:
+        nonlocal mutated
+        reopened_fd = real_reopen_root(root, name)
+        if not mutated:
+            target.chmod(0o600)
+            mutated = True
+        return reopened_fd
+
+    monkeypatch.setattr(snapshot_module, "_reopen_root", mutate_mode_during_reopen)
+
+    with pytest.raises(BootstrapError, match="changed while hashing"):
+        capture_snapshot(scope, {"steam": steam_root})
+
+    assert mutated is True
+    assert target.stat().st_ino == original_inode
+    assert len(os.listdir("/proc/self/fd")) == before_fds
+
+
 def test_capture_rejects_absent_target_after_parent_chain_swap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

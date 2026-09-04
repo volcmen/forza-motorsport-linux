@@ -112,6 +112,21 @@ class _ResolvedTarget:
     missing_index: int | None
 
 
+_FileIdentity = tuple[int, int, int, int, int, int, int]
+
+
+def _file_identity(info: os.stat_result) -> _FileIdentity:
+    return (
+        stat.S_IFMT(info.st_mode),
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        stat.S_IMODE(info.st_mode),
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
 def _unsafe_character(value: str) -> bool:
     codepoint = ord(value)
     return (
@@ -364,7 +379,7 @@ def _verify_resolution(
     root: _BoundRoot,
     target: SnapshotTarget,
     original: _ResolvedTarget,
-    file_identity: tuple[int, int] | None,
+    file_identity: _FileIdentity | None,
 ) -> None:
     verification_root_fd: int | None = None
     verification: _ResolvedTarget | None = None
@@ -381,7 +396,7 @@ def _verify_resolution(
             if verification.fd is None:
                 raise BootstrapError(_CHANGED_WHILE_HASHING)
             info = os.fstat(verification.fd)
-            if (info.st_dev, info.st_ino) != file_identity:
+            if not stat.S_ISREG(info.st_mode) or _file_identity(info) != file_identity:
                 raise BootstrapError(_CHANGED_WHILE_HASHING)
     finally:
         if verification is not None and verification.fd is not None:
@@ -402,25 +417,11 @@ def _capture_target(root: _BoundRoot, target: SnapshotTarget) -> FileRecord:
         while block := os.read(fd, _READ_SIZE):
             digest.update(block)
         after = os.fstat(fd)
-        before_identity = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            stat.S_IMODE(before.st_mode),
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        after_identity = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            stat.S_IMODE(after.st_mode),
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
+        before_identity = _file_identity(before)
+        after_identity = _file_identity(after)
         if not stat.S_ISREG(after.st_mode) or before_identity != after_identity:
             raise BootstrapError(_CHANGED_WHILE_HASHING)
-        _verify_resolution(root, target, resolved, (after.st_dev, after.st_ino))
+        _verify_resolution(root, target, resolved, after_identity)
         return FileRecord(
             target.logical_path,
             "regular",
