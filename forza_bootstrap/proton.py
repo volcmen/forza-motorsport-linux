@@ -110,6 +110,13 @@ class PublishedToolRecord:
 
 
 @dataclass(frozen=True)
+class ToolInspection:
+    disposition: ToolDisposition
+    identity: ToolIdentity | None
+    tree_sha256: str | None
+
+
+@dataclass(frozen=True)
 class _VdfToken:
     kind: str
     value: str
@@ -974,6 +981,63 @@ def inspect_existing_fm(path: Path, manifest: BootstrapManifest) -> ToolDisposit
                 raise BootstrapError("existing compatibility tool conflicts")
             _read_identity(root_fd, require_recorded_targets=False)
         return ToolDisposition.ADOPTED
+    except BootstrapError as error:
+        if str(error) == "existing compatibility tool conflicts":
+            raise
+        raise BootstrapError("existing compatibility tool conflicts") from error
+    except Exception as error:
+        raise BootstrapError("existing compatibility tool conflicts") from error
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def inspect_fm(path: Path, manifest: BootstrapManifest) -> ToolInspection:
+    """Classify and bind the exact complete identity of a dedicated tool."""
+    disposition = inspect_existing_fm(path, manifest)
+    if disposition is ToolDisposition.ABSENT:
+        return ToolInspection(disposition, None, None)
+    destination = _absolute_path(path, "compatibility-tool destination")
+    parent_fd: int | None = None
+    root_fd: int | None = None
+    try:
+        parent_fd = _open_directory(destination.parent, "compatibility-tool parent")
+        root_fd = os.open(destination.name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+
+        def current_identity() -> ToolIdentity:
+            _validate_managed_targets(root_fd, manifest)
+            vdf, _vdf_info = _read_regular_at(
+                root_fd, _VDF, "compatibility-tool VDF", maximum_size=_MAX_VDF_SIZE
+            )
+            _vdf_identity(vdf, _FM_NAME)
+            try:
+                marker_info = os.stat(
+                    _MARKER, dir_fd=root_fd, follow_symlinks=False
+                )
+            except FileNotFoundError:
+                return ToolIdentity(
+                    _FM_NAME,
+                    _BASE_RELEASE,
+                    sha256_bytes(vdf),
+                    _tree_digest(root_fd, excludes=_TREE_EXCLUDES),
+                    None,
+                )
+            if not stat.S_ISREG(marker_info.st_mode):
+                raise BootstrapError("existing compatibility tool conflicts")
+            return _read_identity(root_fd, require_recorded_targets=False)
+
+        identity = current_identity()
+        tree_sha256 = _tree_digest(root_fd)
+        if (
+            not _name_matches_directory(parent_fd, destination.name, root_fd)
+            or current_identity() != identity
+            or _tree_digest(root_fd) != tree_sha256
+            or not _name_matches_directory(parent_fd, destination.name, root_fd)
+        ):
+            raise BootstrapError("existing compatibility tool conflicts")
+        return ToolInspection(disposition, identity, tree_sha256)
     except BootstrapError as error:
         if str(error) == "existing compatibility tool conflicts":
             raise

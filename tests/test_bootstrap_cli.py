@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+import forza_bootstrap.cli as cli_module
 from forza_bootstrap.cli import main, parse_args
 
 
@@ -38,3 +39,24 @@ def test_cli_does_not_report_an_unimplemented_command_as_success(capsys: pytest.
     assert main(["snapshot"]) == 1
 
     assert "command is unavailable in this build" in capsys.readouterr().err
+
+
+def test_cli_routes_bootstrap_prepare_and_preserves_full_digest_confirmation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    expected = "a" * 64
+    context = object()
+
+    monkeypatch.setattr(cli_module, "_prepare_context", lambda _arguments: context)
+    monkeypatch.setattr("builtins.input", lambda _prompt: expected)
+
+    def fake_prepare(actual: object, confirm: object) -> object:
+        assert actual is context
+        assert confirm(expected) == expected  # type: ignore[operator]
+        print("manual Steam handoff")
+        return object()
+
+    monkeypatch.setattr(cli_module, "prepare", fake_prepare)
+
+    assert main(["bootstrap"]) == 0
+    assert "manual Steam handoff" in capsys.readouterr().out

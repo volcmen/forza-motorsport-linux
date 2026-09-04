@@ -4,10 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
-from .model import BootstrapError
+from .coordinator import (
+    PrepareContext,
+    build_prepare_plan,
+    inspect_prepare,
+    prepare,
+    resolve_supported_host,
+)
+from .manifest import load_bootstrap_manifest
+from .model import BootstrapError, canonical_json, plan_digest
 from .snapshot import (
     ChangeRule,
     Snapshot,
@@ -51,6 +61,44 @@ def _capture_current_snapshot() -> Snapshot:
     raise BootstrapError("command is unavailable in this build")
 
 
+def _prepare_context(arguments: argparse.Namespace) -> PrepareContext:
+    repository = Path(__file__).resolve().parents[1]
+    manifest = load_bootstrap_manifest(repository / "manifests/bootstrap-v1.toml")
+    host = resolve_supported_host(os.environ)
+    mode = (
+        "source"
+        if arguments.build_from_source
+        else "local"
+        if arguments.bundle is not None
+        else "download"
+    )
+    return PrepareContext(
+        manifest=manifest,
+        host=host,
+        repository_root=repository,
+        acquisition_mode=mode,
+        bundle_path=Path(arguments.bundle) if arguments.bundle is not None else None,
+        output=sys.stdout,
+    )
+
+
+def _confirm_prepare(expected: str) -> str:
+    return input(f"Type the complete PLAN_SHA256 {expected} to prepare: ")
+
+
+def _run_bootstrap(arguments: argparse.Namespace) -> None:
+    if arguments.rollback:
+        raise BootstrapError("bootstrap rollback is unavailable in this build")
+    context = _prepare_context(arguments)
+    if arguments.check:
+        inspection = inspect_prepare(context)
+        plan = build_prepare_plan(context, inspection)
+        print(canonical_json(plan).decode("ascii"))
+        print(f"PLAN_SHA256={plan_digest(plan)}")
+        return
+    prepare(context, _confirm_prepare)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run a parsed command, without claiming an unavailable command succeeded."""
     arguments = parse_args(argv)
@@ -68,6 +116,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             comparison = compare_snapshots(before, after, rules)
             print(render_comparison(comparison), end="")
             return 0 if comparison.ok else 1
+        if arguments.command == "bootstrap":
+            _run_bootstrap(arguments)
+            return 0
         _unavailable(arguments)
     except BootstrapError as error:
         print(f"error: {error}", file=sys.stderr)

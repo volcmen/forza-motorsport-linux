@@ -30,6 +30,7 @@ from forza_bootstrap.proton import (
     ToolDisposition,
     acquire_ge,
     inspect_existing_fm,
+    inspect_fm,
     prepare_fm_tree,
     protonup_argv,
     publish_fm,
@@ -435,6 +436,53 @@ def test_exact_managed_state_is_adopted_without_marker(tmp_path: Path) -> None:
     assert disposition is ToolDisposition.ADOPTED
     assert tree_manifest(destination) == before
     assert not marker.exists()
+
+
+def test_exact_adopted_tool_inspection_binds_the_complete_tree(tmp_path: Path) -> None:
+    source = extracted_ge_fixture(tmp_path)
+    destination = tmp_path / FM_NAME
+    prepare_fm_tree(source, destination)
+    marker = destination / ".forza-bootstrap.json"
+    marker.unlink()
+
+    inspection = inspect_fm(destination, fixture_manifest(tmp_path))
+
+    assert inspection.disposition is ToolDisposition.ADOPTED
+    assert inspection.identity is not None
+    assert inspection.identity.name == FM_NAME
+    assert inspection.identity.marker_sha256 is None
+    assert inspection.tree_sha256 is not None
+    assert len(inspection.tree_sha256) == 64
+    assert inspection.tree_sha256 == inspection.tree_sha256.lower()
+
+    (destination / "proton").write_bytes(b"changed complete tree\n")
+    changed = inspect_fm(destination, fixture_manifest(tmp_path))
+    assert changed.tree_sha256 != inspection.tree_sha256
+
+
+def test_adopted_tool_inspection_rejects_identity_change_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = extracted_ge_fixture(tmp_path)
+    destination = tmp_path / FM_NAME
+    prepare_fm_tree(source, destination)
+    (destination / ".forza-bootstrap.json").unlink()
+    real_tree_digest = proton_module._tree_digest
+    calls = 0
+
+    def mutate_vdf(root_fd: int, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            (destination / "compatibilitytool.vdf").write_bytes(
+                source_vdf().replace(b"GE-Proton11-3-FM", b"GE-Proton11-3-XM")
+            )
+        return real_tree_digest(root_fd, **kwargs)
+
+    monkeypatch.setattr(proton_module, "_tree_digest", mutate_vdf)
+
+    with pytest.raises(BootstrapError, match="existing compatibility tool conflicts"):
+        inspect_fm(destination, fixture_manifest(tmp_path))
 
 
 def test_supported_installed_runtime_and_patched_targets_are_adopted(
