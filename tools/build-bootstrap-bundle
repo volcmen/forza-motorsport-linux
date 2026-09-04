@@ -25,6 +25,7 @@ from forza_bootstrap.container_build import (
     dependency_fetch_argv,
     fetch_source,
     offline_build_argv,
+    prepare_container_stage,
     publish_container_output,
     validate_offline_build_argv,
     verify_fixture_archive,
@@ -80,7 +81,7 @@ def run(argv: tuple[str, ...]) -> None:
     subprocess.run(argv, cwd=ROOT, check=True)
 
 
-def make_fixture_source(path: Path, revision_seed: str) -> Path:
+def make_fixture_source(path: Path, revision_seed: str) -> tuple[Path, str]:
     path.mkdir()
     subprocess.run(("git", "init", "-q", str(path)), check=True)
     subprocess.run(
@@ -99,7 +100,13 @@ def make_fixture_source(path: Path, revision_seed: str) -> Path:
     subprocess.run(
         ("git", "-C", str(path), "checkout", "-q", "--detach", "HEAD"), check=True
     )
-    return path
+    revision = subprocess.run(
+        ("git", "-C", str(path), "rev-parse", "--verify", "HEAD^{commit}"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return path, revision
 
 
 def local_builder_ref() -> str:
@@ -109,13 +116,6 @@ def local_builder_ref() -> str:
     except (OSError, IndexError):
         raise BootstrapError("builder image digest is required") from None
     return value
-
-
-def container_output_stage(private_root: Path) -> Path:
-    stage = private_root / "output"
-    stage.mkdir(mode=0o700)
-    stage.chmod(0o733)
-    return stage
 
 
 def require_declared_output(stage: Path) -> Path:
@@ -144,15 +144,21 @@ def fixture_build(output: Path) -> Path:
     image = result.stdout.strip()
     with tempfile.TemporaryDirectory(prefix="forza-container-fixture-") as temporary:
         root = Path(temporary)
-        dependencies = root / "dependencies"
-        dependencies.mkdir()
-        container_output = container_output_stage(root)
+        dependencies = prepare_container_stage(root, "dependencies")
+        container_output = prepare_container_stage(root, "output")
+        xodus_source, xodus_revision = make_fixture_source(root / "xodus", "xodus")
+        runtime_source, runtime_revision = make_fixture_source(
+            root / "xgameruntime", "xgameruntime"
+        )
         inputs = BuildInputs(
-            make_fixture_source(root / "xodus", "xodus"),
-            make_fixture_source(root / "xgameruntime", "xgameruntime"),
+            xodus_source,
+            runtime_source,
             dependencies,
             container_output,
             image,
+            xodus_revision,
+            runtime_revision,
+            root,
         )
         offline = validate_offline_build_argv(
             (*offline_build_argv(inputs, container_output), "--fixture"),
@@ -172,15 +178,17 @@ def clean_build(output: Path, builder_image: str) -> Path:
         root = Path(temporary)
         source_cache = root / "sources"
         source_cache.mkdir(mode=0o700)
-        dependencies = root / "dependencies"
-        dependencies.mkdir()
-        container_output = container_output_stage(root)
+        dependencies = prepare_container_stage(root, "dependencies")
+        container_output = prepare_container_stage(root, "output")
         inputs = BuildInputs(
             fetch_source(XODUS, source_cache),
             fetch_source(XGAMERUNTIME, source_cache),
             dependencies,
             container_output,
             builder_image,
+            XODUS.revision,
+            XGAMERUNTIME.revision,
+            root,
         )
         run(dependency_fetch_argv(inputs))
         offline = validate_offline_build_argv(

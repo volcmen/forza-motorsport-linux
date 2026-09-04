@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import subprocess
 import sys
 import uuid
@@ -18,6 +17,7 @@ from forza_bootstrap.container_build import (
     builder_build_argv,
     builder_manifest_argv,
     check_docker,
+    publish_builder_image,
 )
 from forza_bootstrap.model import BootstrapError
 
@@ -33,8 +33,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, cwd=ROOT, check=True, capture_output=True, text=True)
+def run(
+    argv: tuple[str, ...],
+    *,
+    check: bool = True,
+    capture_output: bool = True,
+    text: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv,
+        cwd=ROOT,
+        check=check,
+        capture_output=capture_output,
+        text=text,
+    )
 
 
 def image_id(tag: str) -> str:
@@ -65,24 +77,7 @@ def main() -> int:
         if declared_manifest(image_id(second_tag)) != first_manifest:
             raise BootstrapError("builder image rootfs is not reproducible")
     if args.push:
-        run(("docker", "tag", args.tag, args.push))
-        run(("docker", "push", args.push))
-        repository = args.push.rsplit(":", 1)[0]
-        result = run(
-            (
-                "docker",
-                "image",
-                "inspect",
-                "--format",
-                "{{json .RepoDigests}}",
-                args.push,
-            )
-        )
-        digests = json.loads(result.stdout)
-        matches = [item for item in digests if item.startswith(repository + "@sha256:")]
-        if len(matches) != 1:
-            raise BootstrapError("pushed builder has no unique immutable digest")
-        print(matches[0])
+        print(publish_builder_image(first_id, args.push, run))
     else:
         print(first_id)
     return 0

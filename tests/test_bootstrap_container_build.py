@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import forza_bootstrap.container_build as container_build_module
 from forza_bootstrap.container_build import (
     ARCH_SNAPSHOT,
     BASE_IMAGE,
@@ -27,6 +29,8 @@ from forza_bootstrap.container_build import (
     dependency_fetch_argv,
     fetch_source,
     offline_build_argv,
+    prepare_container_stage,
+    publish_builder_image,
     publish_container_output,
     validate_offline_build_argv,
     validate_source,
@@ -67,8 +71,10 @@ def git_source_fixture(root: Path) -> tuple[Path, str]:
 
 
 def build_inputs(tmp_path: Path, *, image: str | None = None) -> BuildInputs:
-    xodus, _revision = git_source_fixture(tmp_path / "xodus-fixture")
-    runtime, _revision = git_source_fixture(tmp_path / "runtime-fixture")
+    tmp_path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp_path.chmod(0o700)
+    xodus, xodus_revision = git_source_fixture(tmp_path / "xodus-fixture")
+    runtime, runtime_revision = git_source_fixture(tmp_path / "runtime-fixture")
     dependency_root = tmp_path / "dependencies"
     output_root = tmp_path / "output"
     dependency_root.mkdir()
@@ -83,6 +89,9 @@ def build_inputs(tmp_path: Path, *, image: str | None = None) -> BuildInputs:
             if image is not None
             else "registry.example.invalid/builder@sha256:" + "a" * 64
         ),
+        xodus_revision=xodus_revision,
+        xgameruntime_revision=runtime_revision,
+        build_root=tmp_path,
     )
 
 
@@ -99,6 +108,29 @@ class DockerRunner:
         return subprocess.CompletedProcess(argv, 0, self.stdout, "")
 
 
+class BuilderPublishRunner:
+    def __init__(self, verified_image: str, registry_digest: str) -> None:
+        self.verified_image = verified_image
+        self.registry_digest = registry_digest
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, argv: tuple[str, ...], **_kwargs: object) -> object:
+        self.calls.append(argv)
+        if argv[:2] in (("docker", "tag"), ("docker", "push")):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[-2:] == ("{{.Id}}", "registry.example.invalid/forza:release"):
+            return subprocess.CompletedProcess(argv, 0, self.verified_image + "\n", "")
+        if argv[-2:] == ("{{json .RepoDigests}}", self.verified_image):
+            payload = json.dumps(
+                ["registry.example.invalid/forza@" + self.registry_digest]
+            )
+            return subprocess.CompletedProcess(argv, 0, payload + "\n", "")
+        if argv[:3] == ("docker", "manifest", "inspect"):
+            payload = json.dumps({"config": {"digest": self.verified_image}})
+            return subprocess.CompletedProcess(argv, 0, payload + "\n", "")
+        raise AssertionError(f"unexpected Docker call: {argv!r}")
+
+
 def test_rootless_amd64_daemon_is_accepted() -> None:
     runner = DockerRunner(ROOTLESS_INFO.read_text(encoding="ascii"))
 
@@ -111,6 +143,82 @@ def test_rootless_amd64_daemon_is_accepted() -> None:
             {"check": True, "capture_output": True, "text": True},
         )
     ]
+
+
+def test_container_writable_stage_is_narrow_and_privately_anchored(
+    tmp_path: Path,
+) -> None:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+
+    stage = prepare_container_stage(private, "dependencies")
+
+    assert stage == private / "dependencies"
+    assert stat.S_IMODE(private.stat().st_mode) == 0o700
+    assert stat.S_IMODE(stage.stat().st_mode) == 0o733
+    assert stage.stat().st_uid == os.getuid()
+
+
+@pytest.mark.skipif(
+    os.environ.get("FORZA_RUN_ROOTLESS_DOCKER_TEST") != "1",
+    reason="requires explicit real rootless Docker opt-in",
+)
+def test_real_rootless_builder_uid_can_write_container_stage(tmp_path: Path) -> None:
+    check_docker()
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    stage = prepare_container_stage(private, "dependencies")
+    source = private / "xodus"
+    source.mkdir()
+    (source / "Cargo.lock").write_text("fixture\n", encoding="ascii")
+    fake_bin = private / "fake-bin"
+    fake_bin.mkdir()
+    fake_cargo = fake_bin / "cargo"
+    fake_cargo.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = vendor\n'
+        'mkdir -p "$4/nested" /deps/cargo-home/index\n'
+        "printf 'crate\\n' > \"$4/nested/file\"\n"
+        "printf 'cache\\n' > /deps/cargo-home/index/cache\n"
+        "printf '[source.crates-io]\\n'\n",
+        encoding="ascii",
+    )
+    fake_cargo.chmod(0o755)
+    fetch_script = private / "fetch-xodus-deps"
+    shutil.copyfile(
+        ROOT / "containers/bootstrap-builder/fetch-xodus-deps.sh", fetch_script
+    )
+    fetch_script.chmod(0o755)
+
+    subprocess.run(
+        (
+            "docker",
+            "run",
+            "--rm",
+            "--network=none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--user=1000",
+            "--env=PATH=/fake-bin:/usr/bin",
+            "--mount",
+            f"type=bind,src={source},dst=/src/xodus,readonly",
+            "--mount",
+            f"type=bind,src={stage},dst=/deps",
+            "--mount",
+            f"type=bind,src={fake_bin},dst=/fake-bin,readonly",
+            "--mount",
+            f"type=bind,src={fetch_script},dst=/usr/local/bin/fetch-xodus-deps,readonly",
+            BASE_IMAGE,
+            "/usr/local/bin/fetch-xodus-deps",
+        ),
+        check=True,
+    )
+
+    assert (stage / "vendor/nested/file").read_text(encoding="ascii") == "crate\n"
+    assert (stage / "cargo-home/index/cache").read_text(encoding="ascii") == "cache\n"
+    shutil.rmtree(stage)
+    assert not stage.exists()
 
 
 @pytest.mark.parametrize(
@@ -170,6 +278,32 @@ def test_source_mode_rejects_dirty_or_wrong_revision(tmp_path: Path) -> None:
         validate_source(source, "1" * 40)
 
 
+def test_offline_build_rechecks_the_declared_source_revisions(tmp_path: Path) -> None:
+    xodus, xodus_revision = git_source_fixture(tmp_path / "xodus")
+    runtime, runtime_revision = git_source_fixture(tmp_path / "runtime")
+    dependencies = tmp_path / "dependencies"
+    output = tmp_path / "output"
+    dependencies.mkdir()
+    output.mkdir()
+    inputs = BuildInputs(
+        xodus_source=xodus,
+        xgameruntime_source=runtime,
+        dependency_root=dependencies,
+        output_root=output,
+        builder_image="registry.example.invalid/builder@sha256:" + "a" * 64,
+        xodus_revision=xodus_revision,
+        xgameruntime_revision=runtime_revision,
+        build_root=tmp_path,
+    )
+    run("git", "checkout", "-q", "--detach", "HEAD^{}", cwd=xodus)
+    (xodus / "second.txt").write_text("second\n", encoding="ascii")
+    run("git", "add", "second.txt", cwd=xodus)
+    run("git", "commit", "-q", "-m", "second", cwd=xodus)
+
+    with pytest.raises(BootstrapError, match="source revision mismatch"):
+        offline_build_argv(inputs, output)
+
+
 def test_source_validation_requires_detached_regular_checkout(tmp_path: Path) -> None:
     source, revision = git_source_fixture(tmp_path)
     run("git", "switch", "-q", "-c", "mutable", cwd=source)
@@ -201,6 +335,38 @@ def test_fetch_source_checks_out_exact_clean_revision_and_reuses_only_exact_tree
     (fetched / "untracked").write_text("wrong", encoding="ascii")
     with pytest.raises(BootstrapError, match="source tree is not clean"):
         fetch_source(spec, cache)
+
+
+def test_fetch_source_never_publishes_or_removes_a_swapped_stage(
+    tmp_path: Path,
+) -> None:
+    origin, revision = git_source_fixture(tmp_path / "origin")
+    cache = tmp_path / "cache"
+    spec = SourceSpec("component", origin.as_uri(), revision)
+    swapped: Path | None = None
+    validated: Path | None = None
+
+    def swap_after_validation(
+        argv: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal swapped, validated
+        check = bool(kwargs.pop("check"))
+        result = subprocess.run(argv, check=check, **kwargs)
+        if "status" in argv and swapped is None:
+            stage = Path(argv[argv.index("-C") + 1])
+            validated = cache / "validated-tree"
+            stage.rename(validated)
+            stage.mkdir()
+            swapped = stage / "foreign"
+            swapped.write_text("preserve\n", encoding="ascii")
+        return result
+
+    with pytest.raises(BootstrapError, match="source tree changed before publication"):
+        fetch_source(spec, cache, swap_after_validation)
+
+    assert swapped is not None and swapped.read_text(encoding="ascii") == "preserve\n"
+    assert validated is not None and (validated / "tracked.txt").is_file()
+    assert not (cache / f"component-{revision}").exists()
 
 
 @pytest.mark.parametrize(
@@ -340,6 +506,9 @@ def test_mount_input_rejects_symlinks_and_overlapping_roots(tmp_path: Path) -> N
         clean.dependency_root,
         nested_output,
         clean.builder_image,
+        clean.xodus_revision,
+        clean.xgameruntime_revision,
+        clean.build_root,
     )
     with pytest.raises(BootstrapError, match="mount roots overlap"):
         offline_build_argv(overlapping, nested_output)
@@ -355,6 +524,23 @@ def test_mount_input_rejects_home_and_docker_mount_delimiters(tmp_path: Path) ->
                 inputs.dependency_root,
                 inputs.output_root,
                 inputs.builder_image,
+                inputs.xodus_revision,
+                inputs.xgameruntime_revision,
+                inputs.build_root,
+            )
+        )
+
+    with pytest.raises(BootstrapError, match="forbidden host root"):
+        dependency_fetch_argv(
+            BuildInputs(
+                inputs.xodus_source,
+                inputs.xgameruntime_source,
+                Path.home() / "Development",
+                inputs.output_root,
+                inputs.builder_image,
+                inputs.xodus_revision,
+                inputs.xgameruntime_revision,
+                inputs.build_root,
             )
         )
 
@@ -367,8 +553,34 @@ def test_mount_input_rejects_home_and_docker_mount_delimiters(tmp_path: Path) ->
                 inputs.dependency_root,
                 inputs.output_root,
                 inputs.builder_image,
+                inputs.xodus_revision,
+                inputs.xgameruntime_revision,
+                inputs.build_root,
             )
         )
+
+
+def test_argv_constructors_reject_roots_outside_declared_build_root(
+    tmp_path: Path,
+) -> None:
+    inputs = build_inputs(tmp_path / "inputs")
+    declared = tmp_path / "declared"
+    declared.mkdir(mode=0o700)
+    outside = BuildInputs(
+        inputs.xodus_source,
+        inputs.xgameruntime_source,
+        inputs.dependency_root,
+        inputs.output_root,
+        inputs.builder_image,
+        inputs.xodus_revision,
+        inputs.xgameruntime_revision,
+        declared,
+    )
+
+    with pytest.raises(BootstrapError, match="declared build root"):
+        dependency_fetch_argv(outside)
+    with pytest.raises(BootstrapError, match="declared build root"):
+        offline_build_argv(outside, outside.output_root)
 
 
 def test_builder_driver_binds_base_snapshot_and_llvm_digest() -> None:
@@ -391,6 +603,51 @@ def test_builder_driver_uses_options_supported_by_legacy_docker_builder() -> Non
     argv = builder_build_argv("forza-builder:test")
 
     assert "--provenance=false" not in argv
+
+
+def test_builder_publication_uses_captured_image_id_not_a_mutable_tag() -> None:
+    verified = "sha256:" + "b" * 64
+    registry_digest = "sha256:" + "d" * 64
+    runner = BuilderPublishRunner(verified, registry_digest)
+
+    published = publish_builder_image(
+        verified,
+        "registry.example.invalid/forza:release",
+        runner,
+    )
+
+    assert published == "registry.example.invalid/forza@" + registry_digest
+    assert runner.calls == [
+        (
+            "docker",
+            "tag",
+            verified,
+            "registry.example.invalid/forza:release",
+        ),
+        ("docker", "push", "registry.example.invalid/forza:release"),
+        (
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            "registry.example.invalid/forza:release",
+        ),
+        (
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "{{json .RepoDigests}}",
+            verified,
+        ),
+        (
+            "docker",
+            "manifest",
+            "inspect",
+            "registry.example.invalid/forza@" + registry_digest,
+        ),
+    ]
 
 
 def test_builder_reproducibility_uses_clean_builds_and_sandboxed_manifest() -> None:
@@ -563,6 +820,84 @@ def test_container_output_publication_never_adopts_or_replaces(tmp_path: Path) -
         publish_container_output(source, output)
 
 
+def test_container_output_rejects_concurrent_path_replacement_without_adoption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "private"
+    output = tmp_path / "output"
+    private.mkdir(mode=0o700)
+    output.mkdir(mode=0o700)
+    stage = private / "stage"
+    stage.mkdir(mode=0o733)
+    stage.chmod(0o733)
+    source = stage / BUNDLE_NAME
+    source.write_bytes(b"container bytes")
+    source.chmod(0o644)
+    destination = output / BUNDLE_NAME
+    held = output / "held-container-output"
+    real_fsync = container_build_module.os.fsync
+    replaced = False
+
+    def replace_after_destination_sync(fd: int) -> None:
+        nonlocal replaced
+        real_fsync(fd)
+        if not replaced and destination.exists() and stat.S_ISREG(os.fstat(fd).st_mode):
+            destination.rename(held)
+            destination.write_bytes(b"foreign current")
+            replaced = True
+
+    monkeypatch.setattr(
+        container_build_module.os, "fsync", replace_after_destination_sync
+    )
+
+    with pytest.raises(BootstrapError, match="destination changed during publication"):
+        publish_container_output(source, output)
+
+    assert replaced is True
+    assert destination.read_bytes() == b"foreign current"
+    assert held.read_bytes() == b"container bytes"
+
+
+def test_container_output_failure_cleanup_never_unlinks_foreign_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "private"
+    output = tmp_path / "output"
+    private.mkdir(mode=0o700)
+    output.mkdir(mode=0o700)
+    stage = private / "stage"
+    stage.mkdir(mode=0o733)
+    stage.chmod(0o733)
+    source = stage / BUNDLE_NAME
+    source.write_bytes(b"container bytes")
+    source.chmod(0o644)
+    destination = output / BUNDLE_NAME
+    held = output / "held-partial-output"
+    real_read = container_build_module.os.read
+    replaced = False
+
+    def mutate_source_and_replace_destination(fd: int, size: int) -> bytes:
+        nonlocal replaced
+        data = real_read(fd, size)
+        if data and not replaced:
+            destination.rename(held)
+            destination.write_bytes(b"foreign current")
+            source.write_bytes(b"changed source")
+            replaced = True
+        return data
+
+    monkeypatch.setattr(
+        container_build_module.os, "read", mutate_source_and_replace_destination
+    )
+
+    with pytest.raises(BootstrapError, match="container bundle output changed"):
+        publish_container_output(source, output)
+
+    assert replaced is True
+    assert destination.read_bytes() == b"foreign current"
+    assert held.read_bytes() == b"container bytes"
+
+
 def test_fixture_archive_files_have_declared_modes(tmp_path: Path) -> None:
     output = tmp_path / "output"
     output.mkdir()
@@ -617,3 +952,55 @@ def test_builder_driver_dry_run_prints_pinned_build_command() -> None:
     assert f"ARCH_SNAPSHOT={ARCH_SNAPSHOT}" in result.stdout
     assert f"LLVM_MINGW_SHA256={LLVM_MINGW_SHA256}" in result.stdout
     assert "--platform=linux/amd64" in result.stdout
+
+
+def test_builder_cli_publishes_with_its_checked_runner_contract(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "python3").symlink_to(sys.executable)
+    docker = fake_bin / "docker"
+    image = "sha256:" + "b" * 64
+    digest = "sha256:" + "d" * 64
+    docker.write_text(
+        f"#!{sys.executable}\n"
+        "import json\n"
+        "import sys\n"
+        f"image = {image!r}\n"
+        f"digest = {digest!r}\n"
+        "args = sys.argv[1:]\n"
+        "if args[:1] == ['info']:\n"
+        "    print(json.dumps({'ServerVersion': '29.7.2', "
+        "'Architecture': 'amd64', 'SecurityOptions': ['name=rootless']}))\n"
+        "elif args[:2] == ['image', 'inspect'] and args[-1] == "
+        "'registry.example.invalid/forza:release':\n"
+        "    print(image)\n"
+        "elif args[:2] == ['image', 'inspect'] and args[-1] == image and "
+        "'RepoDigests' in args[-2]:\n"
+        "    print(json.dumps(['registry.example.invalid/forza@' + digest]))\n"
+        "elif args[:2] == ['image', 'inspect']:\n"
+        "    print(image)\n"
+        "elif args[:2] == ['manifest', 'inspect']:\n"
+        "    print(json.dumps({'config': {'digest': image}}))\n"
+        "elif args[:1] == ['run']:\n"
+        "    print('schema=1')\n",
+        encoding="ascii",
+    )
+    docker.chmod(0o755)
+
+    result = subprocess.run(
+        (
+            str(BUILDER_TOOL),
+            "--tag",
+            "forza-builder:mutable",
+            "--push",
+            "registry.example.invalid/forza:release",
+        ),
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": str(fake_bin)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "registry.example.invalid/forza@" + digest

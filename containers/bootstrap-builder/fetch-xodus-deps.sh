@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 set -eu
+umask 000
 
 test -f /src/xodus/Cargo.lock
 test -d /deps

@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import re
-import shutil
+import secrets
 import stat
 import subprocess
 import tarfile
@@ -63,6 +63,9 @@ class BuildInputs:
     dependency_root: Path
     output_root: Path
     builder_image: str
+    xodus_revision: str
+    xgameruntime_revision: str
+    build_root: Path
 
 
 def _completed_stdout(result: object, label: str) -> str:
@@ -208,6 +211,37 @@ def _private_cache_root(cache: Path) -> Path:
     return candidate
 
 
+def prepare_container_stage(private_root: Path, name: str) -> Path:
+    """Create one container-writable stage below an owner-only anchor."""
+    root = _absolute_directory(Path(private_root), "container staging parent")
+    if stat.S_IMODE(root.stat().st_mode) != 0o700:
+        raise BootstrapError("container staging parent must have mode 0700")
+    if name not in {"dependencies", "output"}:
+        raise BootstrapError("container staging name is invalid")
+    stage = root / name
+    root_fd = open_owned_root(root)
+    stage_fd: int | None = None
+    try:
+        os.mkdir(name, mode=0o700, dir_fd=root_fd)
+        stage_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=root_fd,
+        )
+        os.fchmod(stage_fd, 0o733)
+        if not _directory_name_matches(root_fd, name, stage_fd):
+            raise BootstrapError("container staging path changed")
+    except FileExistsError:
+        raise BootstrapError("container staging path already exists") from None
+    except OSError:
+        raise BootstrapError("container staging path is unavailable") from None
+    finally:
+        if stage_fd is not None:
+            os.close(stage_fd)
+        os.close(root_fd)
+    return _absolute_directory(stage, "container staging path")
+
+
 def fetch_source(
     spec: SourceSpec,
     cache: Path,
@@ -229,7 +263,8 @@ def fetch_source(
     stage = Path(tempfile.mkdtemp(prefix=f".{spec.name}-", dir=cache_root))
     stage.rmdir()
     stage_name = stage.name
-    published = False
+    parent_fd: int | None = None
+    stage_fd: int | None = None
     try:
         _run_git(
             (
@@ -266,23 +301,64 @@ def fetch_source(
             ),
             runner=runner,
         )
-        validate_source(stage, spec.revision, runner)
         parent_fd = open_owned_root(cache_root)
         try:
-            try:
-                rename_noreplace(parent_fd, stage_name, parent_fd, destination.name)
-            except FileExistsError:
-                raise BootstrapError(
-                    "source cache destination already exists"
-                ) from None
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
-        published = True
-        return validate_source(destination, spec.revision, runner)
+            stage_fd = os.open(
+                stage_name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+        except OSError:
+            raise BootstrapError("source tree changed before publication") from None
+        held = os.fstat(stage_fd)
+        validate_source(stage, spec.revision, runner)
+        if not _directory_name_matches(parent_fd, stage_name, stage_fd, held):
+            raise BootstrapError("source tree changed before publication")
+        try:
+            rename_noreplace(parent_fd, stage_name, parent_fd, destination.name)
+        except FileExistsError:
+            raise BootstrapError("source cache destination already exists") from None
+        if not _directory_name_matches(parent_fd, destination.name, stage_fd, held):
+            raise BootstrapError("source tree changed during publication")
+        os.fsync(parent_fd)
+        validate_source(destination, spec.revision, runner)
+        if not _directory_name_matches(parent_fd, destination.name, stage_fd, held):
+            raise BootstrapError("source tree changed during publication")
+        return destination
     finally:
-        if not published and stage.exists() and not stage.is_symlink():
-            shutil.rmtree(stage)
+        if stage_fd is not None:
+            os.close(stage_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def _directory_name_matches(
+    parent_fd: int,
+    name: str,
+    held_fd: int,
+    held: os.stat_result | None = None,
+) -> bool:
+    try:
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        current = os.fstat(held_fd)
+    except OSError:
+        return False
+    expected = current if held is None else held
+
+    def identity(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_mode,
+            info.st_uid,
+            info.st_gid,
+        )
+
+    return (
+        stat.S_ISDIR(named.st_mode)
+        and identity(named) == identity(current)
+        and identity(current) == identity(expected)
+    )
 
 
 def _validate_image(image: str) -> str:
@@ -307,9 +383,12 @@ def _mount_root(path: Path) -> Path:
         home / ".config/kwalletrc",
     )
     runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if candidate == home or any(
-        root != home and (candidate == root or candidate.is_relative_to(root))
-        for root in forbidden
+    if (
+        candidate == home
+        or candidate.is_relative_to(home)
+        or any(
+            candidate == root or candidate.is_relative_to(root) for root in forbidden
+        )
     ):
         raise BootstrapError("container mount uses a forbidden host root")
     if runtime:
@@ -319,6 +398,20 @@ def _mount_root(path: Path) -> Path:
         ):
             raise BootstrapError("container mount uses a forbidden host root")
     return candidate
+
+
+def _controlled_mount_roots(
+    inputs: BuildInputs, paths: Sequence[Path]
+) -> tuple[Path, ...]:
+    build_root = _mount_root(inputs.build_root)
+    if stat.S_IMODE(build_root.stat().st_mode) != 0o700:
+        raise BootstrapError("declared build root must have mode 0700")
+    controlled = tuple(_mount_root(path) for path in paths)
+    if any(
+        path == build_root or not path.is_relative_to(build_root) for path in controlled
+    ):
+        raise BootstrapError("mount is outside the declared build root")
+    return controlled
 
 
 def _reject_overlaps(paths: Sequence[Path]) -> None:
@@ -356,8 +449,10 @@ def _sandbox_prefix(network: str) -> tuple[str, ...]:
 def dependency_fetch_argv(inputs: BuildInputs) -> tuple[str, ...]:
     """Build the only network-enabled container invocation."""
     image = _validate_image(inputs.builder_image)
-    source = _mount_root(inputs.xodus_source)
-    dependency_root = _mount_root(inputs.dependency_root)
+    source, dependency_root = _controlled_mount_roots(
+        inputs, (inputs.xodus_source, inputs.dependency_root)
+    )
+    validate_source(source, inputs.xodus_revision)
     _reject_overlaps((source, dependency_root))
     return (
         *_sandbox_prefix("bridge"),
@@ -371,10 +466,15 @@ def dependency_fetch_argv(inputs: BuildInputs) -> tuple[str, ...]:
 def offline_build_argv(inputs: BuildInputs, output: Path) -> tuple[str, ...]:
     """Build a network-disabled compiler invocation with four fixed mounts."""
     image = _validate_image(inputs.builder_image)
-    xodus = _mount_root(inputs.xodus_source)
-    xgameruntime = _mount_root(inputs.xgameruntime_source)
-    dependencies = _mount_root(inputs.dependency_root)
-    output_root = _mount_root(inputs.output_root)
+    xodus, xgameruntime, dependencies, output_root = _controlled_mount_roots(
+        inputs,
+        (
+            inputs.xodus_source,
+            inputs.xgameruntime_source,
+            inputs.dependency_root,
+            inputs.output_root,
+        ),
+    )
     requested_output = Path(output)
     if requested_output != output_root:
         raise BootstrapError("output must equal the declared output root")
@@ -384,8 +484,8 @@ def offline_build_argv(inputs: BuildInputs, output: Path) -> tuple[str, ...]:
     except OSError:
         raise BootstrapError("output directory is unsafe") from None
     _reject_overlaps((xodus, xgameruntime, dependencies, output_root))
-    xodus_revision = validate_source(xodus, _source_head(xodus))
-    xgameruntime_revision = validate_source(xgameruntime, _source_head(xgameruntime))
+    validate_source(xodus, inputs.xodus_revision)
+    validate_source(xgameruntime, inputs.xgameruntime_revision)
     environment = (
         "--env",
         f"SOURCE_DATE_EPOCH={SOURCE_DATE_EPOCH}",
@@ -396,9 +496,9 @@ def offline_build_argv(inputs: BuildInputs, output: Path) -> tuple[str, ...]:
         "--env",
         f"FORZA_BUILDER_IMAGE={image}",
         "--env",
-        f"FORZA_XODUS_REVISION={_source_head(xodus_revision)}",
+        f"FORZA_XODUS_REVISION={inputs.xodus_revision}",
         "--env",
-        f"FORZA_XGAMERUNTIME_REVISION={_source_head(xgameruntime_revision)}",
+        f"FORZA_XGAMERUNTIME_REVISION={inputs.xgameruntime_revision}",
     )
     return (
         *_sandbox_prefix("none"),
@@ -481,6 +581,93 @@ def builder_manifest_argv(image: str) -> tuple[str, ...]:
         "/usr/bin/cat",
         "/usr/local/share/forza-builder/rootfs-manifest.txt",
     )
+
+
+def _registry_repository(reference: str) -> str:
+    if (
+        not isinstance(reference, str)
+        or not reference
+        or reference.startswith("-")
+        or "@" in reference
+        or any(character.isspace() for character in reference)
+    ):
+        raise BootstrapError("registry tag is invalid")
+    final = reference.rsplit("/", 1)[-1]
+    if ":" not in final:
+        return reference
+    return reference[: -(len(final) - final.rfind(":"))]
+
+
+def publish_builder_image(
+    verified_image: str,
+    registry_tag: str,
+    runner: _RUNNER = subprocess.run,
+) -> str:
+    """Push only a captured local image ID and bind its registry manifest."""
+    image = _validate_image(verified_image)
+    repository = _registry_repository(registry_tag)
+
+    def docker(argv: tuple[str, ...]) -> object:
+        try:
+            return runner(argv, check=True, capture_output=True, text=True)
+        except (FileNotFoundError, subprocess.CalledProcessError, OSError) as error:
+            raise BootstrapError("builder image publication failed") from error
+
+    docker(("docker", "tag", image, registry_tag))
+    docker(("docker", "push", registry_tag))
+    tagged_id = _completed_stdout(
+        docker(
+            (
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{.Id}}",
+                registry_tag,
+            )
+        ),
+        "published image inspection",
+    ).strip()
+    if tagged_id != image:
+        raise BootstrapError("published builder tag changed identity")
+    raw_digests = _completed_stdout(
+        docker(
+            (
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{json .RepoDigests}}",
+                image,
+            )
+        ),
+        "published digest inspection",
+    )
+    try:
+        digests = json.loads(raw_digests)
+    except json.JSONDecodeError:
+        raise BootstrapError("published builder has invalid registry digests") from None
+    prefix = repository + "@sha256:"
+    matches = (
+        [item for item in digests if isinstance(item, str) and item.startswith(prefix)]
+        if isinstance(digests, list)
+        else []
+    )
+    if len(matches) != 1 or not _DIGEST_IMAGE.fullmatch(matches[0]):
+        raise BootstrapError("published builder has no unique immutable digest")
+    manifest = matches[0]
+    raw_manifest = _completed_stdout(
+        docker(("docker", "manifest", "inspect", manifest)),
+        "published manifest inspection",
+    )
+    try:
+        payload = json.loads(raw_manifest)
+    except json.JSONDecodeError:
+        raise BootstrapError("published builder manifest is invalid") from None
+    config = payload.get("config") if isinstance(payload, dict) else None
+    if not isinstance(config, dict) or config.get("digest") != image:
+        raise BootstrapError("published builder digest has the wrong image identity")
+    return manifest
 
 
 def _fixture_files() -> dict[str, tuple[bytes, int]]:
@@ -765,6 +952,65 @@ def _file_identity(info: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _regular_name_matches(parent_fd: int, name: str, held_fd: int) -> bool:
+    try:
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        held = os.fstat(held_fd)
+    except OSError:
+        return False
+    return stat.S_ISREG(named.st_mode) and (named.st_dev, named.st_ino) == (
+        held.st_dev,
+        held.st_ino,
+    )
+
+
+def _copy_open_file_to_recovery(
+    parent_fd: int, source_fd: int, destination_name: str
+) -> None:
+    token = secrets.token_hex(12)
+    stage_name = f".{destination_name}.{token}.recovery-stage"
+    recovery_name = f".{destination_name}.{token}.recovery"
+    recovery_fd = os.open(
+        stage_name,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=parent_fd,
+    )
+    try:
+        os.lseek(source_fd, 0, os.SEEK_SET)
+        while data := os.read(source_fd, 1024 * 1024):
+            view = memoryview(data)
+            while view:
+                written = os.write(recovery_fd, view)
+                if written <= 0:
+                    raise OSError("short recovery write")
+                view = view[written:]
+        os.fchmod(recovery_fd, 0o644)
+        os.fsync(recovery_fd)
+        rename_noreplace(parent_fd, stage_name, parent_fd, recovery_name)
+        if not _regular_name_matches(parent_fd, recovery_name, recovery_fd):
+            raise BootstrapError("container output recovery changed")
+        os.fsync(parent_fd)
+    finally:
+        os.close(recovery_fd)
+
+
+def _preserve_failed_destination(
+    parent_fd: int, destination_name: str, destination_fd: int
+) -> None:
+    if _regular_name_matches(parent_fd, destination_name, destination_fd):
+        recovery_name = f".{destination_name}.{secrets.token_hex(12)}.failed-recovery"
+        try:
+            rename_noreplace(parent_fd, destination_name, parent_fd, recovery_name)
+        except (FileNotFoundError, FileExistsError):
+            pass
+        else:
+            if _regular_name_matches(parent_fd, recovery_name, destination_fd):
+                os.fsync(parent_fd)
+                return
+    _copy_open_file_to_recovery(parent_fd, destination_fd, destination_name)
+
+
 def publish_container_output(source: Path, output_root: Path) -> Path:
     """Copy one container-owned archive through held no-follow descriptors."""
     output = _absolute_directory(Path(output_root), "output directory")
@@ -785,6 +1031,7 @@ def publish_container_output(source: Path, output_root: Path) -> Path:
     except OSError:
         raise BootstrapError("container bundle output is unsafe") from None
     destination = output / BUNDLE_ARCHIVE
+    output_fd = open_owned_root(output)
     destination_fd: int | None = None
     destination_created = False
     published = False
@@ -800,9 +1047,10 @@ def publish_container_output(source: Path, output_root: Path) -> Path:
             raise BootstrapError("container bundle output is unsafe")
         try:
             destination_fd = os.open(
-                destination,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                destination.name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                 0o600,
+                dir_fd=output_fd,
             )
             destination_created = True
         except FileExistsError:
@@ -819,11 +1067,11 @@ def publish_container_output(source: Path, output_root: Path) -> Path:
             raise BootstrapError("container bundle output changed during copy")
         os.fchmod(destination_fd, 0o644)
         os.fsync(destination_fd)
-        output_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(output_fd)
-        finally:
-            os.close(output_fd)
+        if not _regular_name_matches(output_fd, destination.name, destination_fd):
+            raise BootstrapError("destination changed during publication")
+        os.fsync(output_fd)
+        if not _regular_name_matches(output_fd, destination.name, destination_fd):
+            raise BootstrapError("destination changed during publication")
         published = True
         return destination
     except OSError:
@@ -831,9 +1079,12 @@ def publish_container_output(source: Path, output_root: Path) -> Path:
     finally:
         os.close(source_fd)
         if destination_fd is not None:
-            os.close(destination_fd)
-        if destination_created and not published:
             try:
-                destination.unlink()
-            except FileNotFoundError:
+                if destination_created and not published:
+                    _preserve_failed_destination(
+                        output_fd, destination.name, destination_fd
+                    )
+            except (BootstrapError, OSError):
                 pass
+            os.close(destination_fd)
+        os.close(output_fd)
