@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import io
 import json
@@ -183,11 +184,13 @@ class FinishFixture:
         self.runtime_hash = sha256(b"runtime after")
         self.patch_hash = sha256(b"patch after")
         self.guard_hash = sha256(b"guard")
+        steam_info = self.steam.stat()
+        steam_root_id = f"{steam_info.st_dev}:{steam_info.st_ino}"
         self.before = Snapshot(
             1,
             self.state.transaction_id,
             self.manifest.sha256,
-            "1:2",
+            steam_root_id,
             (
                 record("guard", b"guard"),
                 record("runtime", None),
@@ -200,7 +203,7 @@ class FinishFixture:
             1,
             self.state.transaction_id,
             self.manifest.sha256,
-            "1:2",
+            steam_root_id,
             (
                 record("guard", b"guard"),
                 record("runtime", b"runtime after", mode=0o755),
@@ -266,7 +269,7 @@ class FinishFixture:
             lock_runtime_evidence=lambda _context: "a" * 64,
             runtime_plan=lambda _context, _snapshot, _evidence: self.runtime_plan,
             inspect_patches=lambda _context, _snapshot: self.patch_plan,
-            command_versions=lambda _context: {
+            command_versions=lambda _context, _runtime: {
                 "runtime-installer": "c" * 64,
                 "patcher": "d" * 64,
                 "doctor": "e" * 64,
@@ -525,6 +528,153 @@ def test_finish_rejects_wrong_top_digest_before_coordinator_state_write(
     assert state is not None and state.phase is BootstrapPhase.AWAITING_STEAM_PREFIX
 
 
+def test_finish_refuses_a_held_launcher_lease_before_any_child_mutation(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    lock = fixture.runtime / "forza-linux.lock"
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    os.fchmod(descriptor, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    mutations: list[str] = []
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(
+            fixture.operations,
+            install_threading=lambda *_args: mutations.append("threading"),
+            install_runtime=lambda *_args: mutations.append("runtime"),
+            apply_patches=lambda *_args: mutations.append("patch"),
+        ),
+    )
+    try:
+        with pytest.raises(BootstrapError, match="launcher lock is held"):
+            fixture.run()
+    finally:
+        os.close(descriptor)
+
+    assert mutations == []
+    state = load_unfinished_transaction(fixture.state_root)
+    assert state is not None and state.phase is BootstrapPhase.AWAITING_STEAM_PREFIX
+
+
+def test_finish_holds_the_launcher_lease_through_every_execution_boundary(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    expected = {
+        "install-threading",
+        "runtime-install",
+        "runtime-status",
+        "patch-apply",
+        "doctor",
+        "write-after-snapshot",
+        "compare-snapshots",
+        "steam-options",
+    }
+    checked: list[str] = []
+
+    def prove_excluded(boundary: str) -> None:
+        if boundary not in expected:
+            return
+        contender = os.open(
+            fixture.runtime / "forza-linux.lock",
+            os.O_RDWR | os.O_NOFOLLOW,
+        )
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(contender)
+        checked.append(boundary)
+
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(fixture.operations, boundary=prove_excluded),
+    )
+
+    result = fixture.run()
+
+    assert result.phase is BootstrapPhase.READY_TO_ATTEMPT
+    assert set(checked) == expected
+    contender = os.open(
+        fixture.runtime / "forza-linux.lock",
+        os.O_RDWR | os.O_NOFOLLOW,
+    )
+    try:
+        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(contender)
+
+
+def test_finish_revalidates_the_bound_launcher_lease_before_next_child(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    runtime_calls: list[str] = []
+
+    def rebind_lock(boundary: str) -> None:
+        if boundary != "install-threading":
+            return
+        lock = fixture.runtime / "forza-linux.lock"
+        replacement = fixture.runtime / "replacement.lock"
+        replacement.write_bytes(b"")
+        replacement.chmod(0o600)
+        replacement.replace(lock)
+
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(
+            fixture.operations,
+            boundary=rebind_lock,
+            install_runtime=lambda *_args: runtime_calls.append("runtime"),
+        ),
+    )
+
+    with pytest.raises(BootstrapError, match="launcher lock changed"):
+        fixture.run()
+
+    assert runtime_calls == []
+    state = load_unfinished_transaction(fixture.state_root)
+    assert state is not None and state.phase is BootstrapPhase.INSTALLING_FINISH
+
+
+@pytest.mark.parametrize("source", ("before", "fresh"))
+def test_finish_rejects_wrong_steam_root_snapshot_before_child_mutation(
+    tmp_path: Path, source: str
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    wrong = replace(
+        fixture.before if source == "before" else fixture.pre_finish,
+        steam_root_id="9:9",
+    )
+    if source == "before":
+        from forza_bootstrap.snapshot import write_snapshot
+
+        write_snapshot(
+            fixture.state_root / fixture.state.transaction_id / "before.json",
+            wrong,
+        )
+    else:
+        fixture.pre_finish = wrong
+    mutations: list[str] = []
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(
+            fixture.operations,
+            install_threading=lambda *_args: mutations.append("threading"),
+            install_runtime=lambda *_args: mutations.append("runtime"),
+            apply_patches=lambda *_args: mutations.append("patch"),
+        ),
+    )
+
+    with pytest.raises(BootstrapError, match="Steam-root identity"):
+        fixture.run()
+
+    assert mutations == []
+    state = load_unfinished_transaction(fixture.state_root)
+    assert state is not None and state.phase is BootstrapPhase.AWAITING_STEAM_PREFIX
+
+
 def test_finish_reopens_before_snapshot_after_confirmation_before_mutation(
     tmp_path: Path,
 ) -> None:
@@ -729,6 +879,10 @@ def test_default_finish_children_use_argv_no_shell_and_minimal_environment(
     tmp_path: Path,
 ) -> None:
     fixture = FinishFixture(tmp_path)
+    runtime_installer = tmp_path / "scripts/install-runtime-components"
+    runtime_installer.parent.mkdir(parents=True)
+    runtime_installer.write_bytes(b"#!/usr/bin/env python3\n")
+    runtime_installer.chmod(0o755)
     calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
 
     def runner(argv: tuple[str, ...], **kwargs: object):
@@ -792,10 +946,189 @@ def test_default_finish_children_use_argv_no_shell_and_minimal_environment(
             "XDG_DATA_HOME",
             "XDG_RUNTIME_DIR",
             "XDG_STATE_HOME",
+            "FORZA_RUNTIME_INTEGRATION_ROOT",
             "FORZA_RUNTIME_TESTING",
         }
         assert "LD_PRELOAD" not in environment
+        executable = kwargs["executable"]
+        assert isinstance(executable, str)
+        assert executable.startswith("/proc/self/fd/")
+        assert kwargs["pass_fds"]
     common = calls[0][0]
     assert common[0] == str(tmp_path / "scripts/install-runtime-components")
     assert "--artifact-bundle-root" in common
     assert str(fixture.steam) not in str(fixture.bundle)
+
+
+def command_fixture(fixture: FinishFixture, payload: bytes) -> dict[str, Path]:
+    paths = {
+        "runtime-installer": fixture.context.repository_root
+        / "scripts/install-runtime-components",
+        "patcher": fixture.context.repository_root / "scripts/patch-known-build",
+        "doctor": fixture.user / ".local/bin/forza-doctor",
+        "steam-options": fixture.context.repository_root
+        / "scripts/print-steam-options",
+    }
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        path.chmod(0o755)
+    return paths
+
+
+def test_default_command_plan_binds_the_runtime_planned_installed_doctor(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    command_fixture(fixture, b"#!/bin/sh\nexit 0\n")
+    planned_doctor = PlannedTarget(
+        "user/.local/bin/forza-doctor", "7" * 64, 0o755
+    )
+    runtime = replace(fixture.runtime_plan, targets=(planned_doctor,))
+
+    versions = default_finish_operations().command_versions(
+        fixture.context, runtime
+    )
+
+    assert versions["doctor"] == planned_doctor.sha256
+
+
+@pytest.mark.parametrize(
+    ("command", "boundary"),
+    (
+        ("runtime-installer", "install-threading"),
+        ("patcher", "runtime-status"),
+        ("doctor", "patch-apply"),
+        ("steam-options", "compare-snapshots"),
+    ),
+)
+def test_finish_rejects_each_rebound_command_before_spawning_it(
+    tmp_path: Path, command: str, boundary: str
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    original = b"#!/bin/sh\nexit 0\n"
+    paths = command_fixture(fixture, original)
+    versions = {name: sha256(original) for name in paths}
+    calls: list[tuple[str, ...]] = []
+    swapped = False
+
+    def rebind(name: str) -> None:
+        nonlocal swapped
+        if name != boundary or swapped:
+            return
+        replacement = paths[command].with_name(paths[command].name + ".replacement")
+        replacement.write_bytes(b"#!/bin/sh\nexit 42\n")
+        replacement.chmod(0o755)
+        replacement.replace(paths[command])
+        swapped = True
+
+    def runner(
+        argv: tuple[str, ...], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if len(argv) > 1 and argv[1] == "install":
+            output = "TRANSACTION_ID=" + "b" * 24 + "\n"
+        elif "--backup-root" in argv:
+            root = Path(argv[argv.index("--backup-root") + 1])
+            root.mkdir(parents=True, exist_ok=True)
+            backup = root / "forza-patch-20260904T010203Z.json"
+            backup.write_text("{}", encoding="ascii")
+            backup.chmod(0o600)
+            output = f"{backup}\n"
+        elif Path(argv[0]).name == "forza-doctor":
+            output = "doctor: ok\n"
+        else:
+            output = "EXACT=1 launcher %command%\n"
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    defaults = default_finish_operations()
+    operations = replace(
+        fixture.operations,
+        command_versions=lambda _context, *_args: versions,
+        boundary=rebind,
+        **{
+            {
+                "runtime-installer": "install_runtime",
+                "patcher": "apply_patches",
+                "doctor": "doctor",
+                "steam-options": "steam_options",
+            }[command]: {
+                "runtime-installer": defaults.install_runtime,
+                "patcher": defaults.apply_patches,
+                "doctor": defaults.doctor,
+                "steam-options": defaults.steam_options,
+            }[command]
+        },
+    )
+    fixture.context = replace(
+        fixture.context,
+        operations=operations,
+        runner=runner,
+    )
+
+    with pytest.raises(BootstrapError, match="executable changed after Finish plan"):
+        fixture.run()
+
+    assert swapped is True
+    assert calls == []
+
+
+def test_command_spawn_executes_the_held_object_if_its_path_is_rebound(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    original = b"#!/bin/sh\nexit 0\n"
+    path = command_fixture(fixture, original)["steam-options"]
+    observed: list[bytes] = []
+
+    def runner(
+        argv: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        replacement = path.with_name(path.name + ".replacement")
+        replacement.write_bytes(b"#!/bin/sh\nexit 42\n")
+        replacement.chmod(0o755)
+        replacement.replace(path)
+        executable = kwargs["executable"]
+        assert isinstance(executable, str)
+        observed.append(Path(executable).read_bytes())
+        pass_fds = kwargs["pass_fds"]
+        assert isinstance(pass_fds, tuple) and pass_fds
+        return subprocess.CompletedProcess(argv, 0, "EXACT=1 launcher %command%\n", "")
+
+    fixture.context = replace(
+        fixture.context,
+        runner=runner,
+        command_sha256={
+            "runtime-installer": sha256(original),
+            "patcher": sha256(original),
+            "doctor": sha256(original),
+            "steam-options": sha256(original),
+        },
+    )
+
+    output = default_finish_operations().steam_options(fixture.context)
+
+    assert output == "EXACT=1 launcher %command%\n"
+    assert observed == [original]
+
+
+def test_held_script_descriptor_executes_without_a_shell_string(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    payload = b"#!/bin/sh\nprintf '%s\\n' 'EXACT=1 launcher %command%'\n"
+    path = command_fixture(fixture, payload)["steam-options"]
+    fixture.context = replace(
+        fixture.context,
+        command_sha256={
+            "runtime-installer": "1" * 64,
+            "patcher": "2" * 64,
+            "doctor": "3" * 64,
+            "steam-options": sha256(payload),
+        },
+    )
+
+    output = default_finish_operations().steam_options(fixture.context)
+
+    assert path.exists()
+    assert output == "EXACT=1 launcher %command%\n"

@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, TextIO
 
@@ -192,7 +192,7 @@ class FinishOperations:
     lock_runtime_evidence: Callable[[FinishContext], str]
     runtime_plan: Callable[[FinishContext, Snapshot, str], RuntimePlan]
     inspect_patches: Callable[[FinishContext, Snapshot], PatchInspection]
-    command_versions: Callable[[FinishContext], Mapping[str, str]]
+    command_versions: Callable[[FinishContext, RuntimePlan], Mapping[str, str]]
     install_threading: Callable[[FinishContext, LicensedAction, Path], None]
     install_runtime: Callable[[FinishContext, RuntimePlan], str | None]
     runtime_status: Callable[[FinishContext, RuntimePlan, str | None], None]
@@ -218,6 +218,8 @@ class FinishContext:
     probe: HostProbe = field(default_factory=HostProbe)
     runner: _Runner = subprocess.run
     child_environment: Mapping[str, str] = field(default_factory=dict)
+    command_sha256: Mapping[str, str] = field(default_factory=dict)
+    launcher_lease_fd: int | None = None
 
 
 def _read_os_id(path: Path) -> str:
@@ -605,13 +607,14 @@ def _validate_held_launcher_lock(host: ResolvedHost, lease_fd: int) -> None:
             not stat.S_ISREG(lease_info.st_mode)
             or lease_info.st_uid != os.getuid()
             or stat.S_IMODE(lease_info.st_mode) != 0o600
+            or lease_info.st_nlink != 1
             or (lease_info.st_dev, lease_info.st_ino)
             != (linked_info.st_dev, linked_info.st_ino)
         ):
             raise OSError
         fcntl.flock(lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (OSError, BlockingIOError):
-        raise BootstrapError("launcher lock changed while Prepare held it") from None
+        raise BootstrapError("launcher lock changed while coordinator held it") from None
     finally:
         if linked_fd is not None:
             os.close(linked_fd)
@@ -1339,6 +1342,7 @@ def _acquire_launcher_lease(host: ResolvedHost) -> int:
             not stat.S_ISREG(info.st_mode)
             or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
         ):
             raise BootstrapError("launcher lock is unsafe")
         try:
@@ -1712,11 +1716,60 @@ def _minimal_finish_environment(context: FinishContext) -> dict[str, str]:
     return environment
 
 
+def _open_finish_executable(path: Path, label: str) -> tuple[int, str]:
+    if not path.is_absolute():
+        raise BootstrapError(f"{label} executable path is invalid")
+    parent_fd: int | None = None
+    executable_fd: int | None = None
+    try:
+        parent_fd = _open_owned_directory(path.parent, f"{label} executable")
+        executable_fd = os.open(
+            path.name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent_fd,
+        )
+        before = os.fstat(executable_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or not stat.S_IMODE(before.st_mode) & 0o111
+            or before.st_size > 16 * 1024 * 1024
+        ):
+            raise OSError
+        digest = hashlib.sha256()
+        remaining = 16 * 1024 * 1024 + 1
+        while remaining:
+            block = os.read(executable_fd, min(64 * 1024, remaining))
+            if not block:
+                break
+            digest.update(block)
+            remaining -= len(block)
+        after = os.fstat(executable_fd)
+        bound = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            remaining == 0
+            or _stat_generation(before) != _stat_generation(after)
+            or _stat_generation(after) != _stat_generation(bound)
+        ):
+            raise OSError
+        os.lseek(executable_fd, 0, os.SEEK_SET)
+        return executable_fd, digest.hexdigest()
+    except (OSError, BootstrapError):
+        if executable_fd is not None:
+            os.close(executable_fd)
+        raise BootstrapError(f"{label} executable is unsafe") from None
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
 def _run_finish_child(
     context: FinishContext,
     argv: tuple[str, ...],
     label: str,
     *,
+    command: str,
     accepted: frozenset[int] = frozenset({0}),
 ) -> subprocess.CompletedProcess[str]:
     if (
@@ -1724,6 +1777,36 @@ def _run_finish_child(
         or any(not isinstance(argument, str) or "\x00" in argument for argument in argv)
     ):
         raise BootstrapError(f"{label} command is invalid")
+    required = {"runtime-installer", "patcher", "doctor", "steam-options"}
+    if command not in required:
+        raise BootstrapError(f"{label} command identity is invalid")
+    expected = context.command_sha256.get(command)
+    if context.command_sha256 and (
+        set(context.command_sha256) != required
+        or not isinstance(expected, str)
+        or _SHA256.fullmatch(expected) is None
+    ):
+        raise BootstrapError(f"{label} command identity is invalid")
+    executable_fd, actual = _open_finish_executable(Path(argv[0]), label)
+    if expected is not None and actual != expected:
+        os.close(executable_fd)
+        raise BootstrapError(f"{label} executable changed after Finish plan")
+    pass_fds = [executable_fd]
+    environment = _minimal_finish_environment(context)
+    if command == "runtime-installer":
+        environment.setdefault(
+            "FORZA_RUNTIME_INTEGRATION_ROOT", str(context.repository_root)
+        )
+    if (
+        command == "runtime-installer"
+        and len(argv) > 1
+        and argv[1] == "install"
+        and context.launcher_lease_fd is not None
+    ):
+        pass_fds.append(context.launcher_lease_fd)
+        environment["FORZA_LAUNCHER_LEASE_FD"] = str(
+            context.launcher_lease_fd
+        )
     try:
         result = context.runner(
             argv,
@@ -1732,10 +1815,14 @@ def _run_finish_child(
             capture_output=True,
             text=True,
             shell=False,
-            env=_minimal_finish_environment(context),
+            env=environment,
+            executable=f"/proc/self/fd/{executable_fd}",
+            pass_fds=tuple(pass_fds),
         )
     except (FileNotFoundError, OSError):
         raise BootstrapError(f"{label} could not be executed") from None
+    finally:
+        os.close(executable_fd)
     if (
         not isinstance(result, subprocess.CompletedProcess)
         or type(result.returncode) is not int
@@ -1777,6 +1864,7 @@ def _default_lock_runtime_evidence(context: FinishContext) -> str:
         context,
         _runtime_argv(context, "lock-evidence"),
         "runtime evidence lock",
+        command="runtime-installer",
     )
     match = re.fullmatch(r"EVIDENCE_SHA256=([0-9a-f]{64})\n?", result.stdout)
     if match is None:
@@ -1823,6 +1911,7 @@ def _default_runtime_plan(
         context,
         _runtime_argv(context, "plan"),
         "runtime child plan",
+        command="runtime-installer",
     )
     records: dict[str, PlannedTarget] = {}
     digest: str | None = None
@@ -1917,6 +2006,7 @@ def _default_inspect_patches(
                 str(context.host.steam_root / relative),
             ),
             "patch inspection",
+            command="patcher",
         )
         state = result.stdout.rstrip("\n")
         if state not in {"original", "patched"}:
@@ -1936,12 +2026,21 @@ def _default_inspect_patches(
 
 
 def _command_sha256(path: Path) -> str:
-    data = _read_owned_regular(path, "Finish command", 16 * 1024 * 1024)
-    assert data is not None
-    return hashlib.sha256(data).hexdigest()
+    descriptor, digest = _open_finish_executable(path, "Finish command")
+    os.close(descriptor)
+    return digest
 
 
-def _default_command_versions(context: FinishContext) -> Mapping[str, str]:
+def _default_command_versions(
+    context: FinishContext, runtime: RuntimePlan
+) -> Mapping[str, str]:
+    doctor_targets = tuple(
+        target
+        for target in runtime.targets
+        if target.logical_path == "user/.local/bin/forza-doctor"
+    )
+    if len(doctor_targets) != 1 or not doctor_targets[0].mode & 0o111:
+        raise BootstrapError("runtime child plan has no executable doctor")
     return {
         "runtime-installer": _command_sha256(
             context.repository_root / "scripts/install-runtime-components"
@@ -1949,7 +2048,7 @@ def _default_command_versions(context: FinishContext) -> Mapping[str, str]:
         "patcher": _command_sha256(
             context.repository_root / "scripts/patch-known-build"
         ),
-        "doctor": _command_sha256(context.repository_root / "bin/forza-doctor"),
+        "doctor": doctor_targets[0].sha256,
         "steam-options": _command_sha256(
             context.repository_root / "scripts/print-steam-options"
         ),
@@ -1968,6 +2067,7 @@ def _default_install_runtime(
             runtime.sha256,
         ),
         "runtime child install",
+        command="runtime-installer",
     )
     match = re.fullmatch(r"TRANSACTION_ID=([0-9a-f]{24})\n?", result.stdout)
     if match is None:
@@ -1988,6 +2088,7 @@ def _default_runtime_status(
         context,
         _runtime_argv(context, "status"),
         "runtime child status",
+        command="runtime-installer",
     )
     lines = result.stdout.splitlines()
     if f"transaction={transaction} state=installed" not in lines or any(
@@ -2014,6 +2115,7 @@ def _default_apply_patches(
             str(backup_root),
         ),
         "patch apply",
+        command="patcher",
     )
     lines = result.stdout.splitlines()
     if len(lines) != 1:
@@ -2035,8 +2137,11 @@ def _default_doctor(context: FinishContext) -> str:
             context,
             (str(context.host.user_root / ".local/bin/forza-doctor"),),
             "doctor",
+            command="doctor",
         )
-    except BootstrapError:
+    except BootstrapError as error:
+        if "executable changed after Finish plan" in str(error):
+            raise
         raise BootstrapError("doctor found blockers") from None
     return result.stdout
 
@@ -2046,6 +2151,7 @@ def _default_steam_options(context: FinishContext) -> str:
         context,
         (str(context.repository_root / "scripts/print-steam-options"),),
         "Steam launch-options command",
+        command="steam-options",
     )
     return result.stdout
 
@@ -2133,6 +2239,10 @@ def _validate_finish_context(context: FinishContext) -> None:
             raise BootstrapError(f"Finish {label} digest is invalid")
     if not isinstance(context.child_environment, Mapping):
         raise BootstrapError("Finish child environment is invalid")
+    if not isinstance(context.command_sha256, Mapping):
+        raise BootstrapError("Finish command identities are invalid")
+    if context.launcher_lease_fd is not None and type(context.launcher_lease_fd) is not int:
+        raise BootstrapError("Finish launcher lease is invalid")
 
 
 def _finish_operations(context: FinishContext) -> FinishOperations:
@@ -2213,12 +2323,25 @@ def _validated_command_versions(value: Mapping[str, str]) -> tuple[tuple[str, st
 def _validate_finish_snapshot(
     snapshot: Snapshot, context: FinishContext, *, label: str
 ) -> Snapshot:
+    steam_fd: int | None = None
+    try:
+        steam_fd = _open_owned_directory(
+            context.host.steam_root, "Finish Steam root"
+        )
+        steam_info = os.fstat(steam_fd)
+    except (OSError, BootstrapError):
+        raise BootstrapError("Finish Steam root identity is invalid") from None
+    finally:
+        if steam_fd is not None:
+            os.close(steam_fd)
+    steam_root_id = f"{steam_info.st_dev}:{steam_info.st_ino}"
     if (
         not isinstance(snapshot, Snapshot)
         or snapshot.transaction_id != context.state.transaction_id
         or snapshot.manifest_sha256 != context.manifest.sha256
+        or snapshot.steam_root_id != steam_root_id
     ):
-        raise BootstrapError(f"{label} snapshot identity is invalid")
+        raise BootstrapError(f"{label} snapshot Steam-root identity is invalid")
     return snapshot
 
 
@@ -2257,7 +2380,9 @@ def _collect_finish_inputs(
         operations.inspect_patches(context, pre_finish)
     )
     event("patch-inspect")
-    versions = _validated_command_versions(operations.command_versions(context))
+    versions = _validated_command_versions(
+        operations.command_versions(context, runtime)
+    )
     return _FinishInputs(prefix, licensed, pre_finish, runtime, patches, versions)
 
 
@@ -2622,6 +2747,174 @@ def _comparison_value(comparison: Comparison) -> dict[str, object]:
     }
 
 
+def _require_finish_lease(context: FinishContext) -> None:
+    lease_fd = context.launcher_lease_fd
+    if type(lease_fd) is not int:
+        raise BootstrapError("Finish launcher lease is missing")
+    _validate_held_launcher_lock(context.host, lease_fd)
+
+
+def _finish_under_lease(
+    context: FinishContext,
+    operations: FinishOperations,
+    plan: FinishPlan,
+) -> BootstrapState:
+    _require_finish_lease(context)
+    revalidated_before = _read_before_snapshot(context)
+    revalidated = _collect_finish_inputs(context, operations, record_events=False)
+    if _finish_plan_from(context, revalidated, revalidated_before) != plan:
+        raise BootstrapError(
+            "Finish inputs changed after confirmation; no managed changes were made"
+        )
+    before = revalidated_before
+    inputs = revalidated
+    context = replace(
+        context,
+        command_sha256=dict(inputs.command_versions),
+    )
+    _require_finish_lease(context)
+
+    write_snapshot(
+        context.host.state_root / context.state.transaction_id / "pre-finish.json",
+        inputs.pre_finish,
+    )
+    _write_transaction_json(
+        context.state, "licensed-plan.json", inputs.licensed.private_json()
+    )
+    _write_transaction_json(context.state, "plan.json", plan.document)
+    state = transition(
+        context.state,
+        BootstrapPhase.AWAITING_STEAM_PREFIX,
+        BootstrapPhase.PLANNED_FINISH,
+        completed_boundaries=(
+            *context.state.completed_boundaries,
+            "finish-plan-confirmed",
+        ),
+    )
+    state = transition(
+        state,
+        BootstrapPhase.PLANNED_FINISH,
+        BootstrapPhase.INSTALLING_FINISH,
+        completed_boundaries=(*state.completed_boundaries, "installing-finish"),
+    )
+    transaction = context.host.state_root / state.transaction_id
+    recovery = transaction / "recovery"
+    ensure_private_directory(recovery)
+
+    _require_finish_lease(context)
+    operations.validate_prefix(context)
+    if inputs.licensed.disposition != "keep":
+        operations.install_threading(
+            context, inputs.licensed, recovery / "licensed"
+        )
+    state = _append_finish_boundary(state, "licensed-installed")
+    _record(operations, "install-threading")
+
+    _require_finish_lease(context)
+    operations.validate_prefix(context)
+    child = (
+        operations.install_runtime(context, inputs.runtime)
+        if inputs.runtime.disposition != "keep"
+        else None
+    )
+    if child is not None and (
+        not isinstance(child, str)
+        or re.fullmatch(r"[0-9a-f]{24}", child) is None
+    ):
+        raise BootstrapError("runtime child returned an invalid transaction id")
+    state = _append_finish_boundary(
+        state,
+        "runtime-installed",
+        **({"child_runtime_transaction": child} if child is not None else {}),
+    )
+    _record(operations, "runtime-install")
+    _require_finish_lease(context)
+    operations.runtime_status(context, inputs.runtime, child)
+    state = _append_finish_boundary(state, "runtime-status-verified")
+    _record(operations, "runtime-status")
+
+    _require_finish_lease(context)
+    operations.validate_prefix(context)
+    patch_root = recovery / "patches"
+    if inputs.patches.disposition != "keep":
+        ensure_private_directory(patch_root)
+        patch_backup = operations.apply_patches(
+            context, inputs.patches, patch_root
+        )
+    else:
+        patch_backup = None
+    if patch_backup is not None:
+        if not isinstance(patch_backup, Path) or not patch_backup.is_absolute():
+            raise BootstrapError("patcher returned an invalid backup manifest")
+        try:
+            relative_backup = patch_backup.relative_to(patch_root)
+        except ValueError:
+            raise BootstrapError(
+                "patcher returned an invalid backup manifest"
+            ) from None
+        if len(relative_backup.parts) != 1:
+            raise BootstrapError("patcher returned an invalid backup manifest")
+        _owned_regular(patch_backup, "patch backup manifest")
+        state = _append_finish_boundary(
+            state,
+            "patches-applied",
+            patch_backup_manifest=str(patch_backup),
+        )
+    else:
+        state = _append_finish_boundary(state, "patches-verified")
+    _record(operations, "patch-apply")
+
+    _require_finish_lease(context)
+    operations.validate_prefix(context)
+    doctor_output = operations.doctor(context)
+    if not isinstance(doctor_output, str):
+        raise BootstrapError("doctor returned invalid output")
+    state = _append_finish_boundary(state, "doctor-passed")
+    _record(operations, "doctor")
+
+    _require_finish_lease(context)
+    after = _validate_finish_snapshot(
+        operations.capture_current(context), context, label="after"
+    )
+    write_snapshot(transaction / "after.json", after)
+    state = _append_finish_boundary(state, "after-snapshot")
+    _record(operations, "write-after-snapshot")
+    _require_finish_lease(context)
+    comparison = compare_snapshots(before, after, plan.snapshot_rules)
+    _write_transaction_json(
+        state, "comparison.json", _comparison_value(comparison)
+    )
+    state = _append_finish_boundary(state, "snapshots-compared")
+    _record(operations, "compare-snapshots")
+    if not comparison.ok:
+        raise BootstrapError("snapshot comparison found unexpected changes")
+
+    _require_finish_lease(context)
+    options = operations.steam_options(context)
+    if (
+        not isinstance(options, str)
+        or not options.endswith("\n")
+        or options.count("\n") != 1
+    ):
+        raise BootstrapError("Steam launch-options command returned invalid output")
+    state = _append_finish_boundary(state, "steam-options-verified")
+    _record(operations, "steam-options")
+    _require_finish_lease(context)
+    state = transition(
+        state,
+        BootstrapPhase.INSTALLING_FINISH,
+        BootstrapPhase.READY_TO_ATTEMPT,
+        completed_boundaries=(*state.completed_boundaries, "ready-to-attempt"),
+    )
+    context.output.write(render_comparison(comparison))
+    context.output.write(options)
+    context.output.write(
+        "READY TO ATTEMPT. Paste the exact launch-options line into Steam and "
+        "launch Forza yourself.\n"
+    )
+    return state
+
+
 def finish(context: FinishContext, confirm: Callable[[str], str]) -> BootstrapState:
     """Execute one confirmed Finish plan without editing Steam or launching Forza."""
     _validate_finish_context(context)
@@ -2644,123 +2937,12 @@ def finish(context: FinishContext, confirm: Callable[[str], str]) -> BootstrapSt
             "Finish plan digest confirmation did not match; no managed changes were made"
         )
     _record(operations, "confirm-finish-plan")
-
-    revalidated_before = _read_before_snapshot(context)
-    revalidated = _collect_finish_inputs(context, operations, record_events=False)
-    if _finish_plan_from(context, revalidated, revalidated_before) != plan:
-        raise BootstrapError(
-            "Finish inputs changed after confirmation; no managed changes were made"
+    lease_fd = _acquire_launcher_lease(context.host)
+    try:
+        locked_context = replace(
+            context,
+            launcher_lease_fd=lease_fd,
         )
-    before = revalidated_before
-    inputs = revalidated
-
-    write_snapshot(
-        context.host.state_root / context.state.transaction_id / "pre-finish.json",
-        inputs.pre_finish,
-    )
-    _write_transaction_json(context.state, "licensed-plan.json", inputs.licensed.private_json())
-    _write_transaction_json(context.state, "plan.json", plan.document)
-    state = transition(
-        context.state,
-        BootstrapPhase.AWAITING_STEAM_PREFIX,
-        BootstrapPhase.PLANNED_FINISH,
-        completed_boundaries=(*context.state.completed_boundaries, "finish-plan-confirmed"),
-    )
-    state = transition(
-        state,
-        BootstrapPhase.PLANNED_FINISH,
-        BootstrapPhase.INSTALLING_FINISH,
-        completed_boundaries=(*state.completed_boundaries, "installing-finish"),
-    )
-    transaction = context.host.state_root / state.transaction_id
-    recovery = transaction / "recovery"
-    ensure_private_directory(recovery)
-
-    operations.validate_prefix(context)
-    if inputs.licensed.disposition != "keep":
-        operations.install_threading(context, inputs.licensed, recovery / "licensed")
-    state = _append_finish_boundary(state, "licensed-installed")
-    _record(operations, "install-threading")
-
-    operations.validate_prefix(context)
-    child = (
-        operations.install_runtime(context, inputs.runtime)
-        if inputs.runtime.disposition != "keep"
-        else None
-    )
-    if child is not None and (
-        not isinstance(child, str) or re.fullmatch(r"[0-9a-f]{24}", child) is None
-    ):
-        raise BootstrapError("runtime child returned an invalid transaction id")
-    state = _append_finish_boundary(
-        state,
-        "runtime-installed",
-        **({"child_runtime_transaction": child} if child is not None else {}),
-    )
-    _record(operations, "runtime-install")
-    operations.runtime_status(context, inputs.runtime, child)
-    state = _append_finish_boundary(state, "runtime-status-verified")
-    _record(operations, "runtime-status")
-
-    patch_root = recovery / "patches"
-    if inputs.patches.disposition != "keep":
-        ensure_private_directory(patch_root)
-        patch_backup = operations.apply_patches(context, inputs.patches, patch_root)
-    else:
-        patch_backup = None
-    if patch_backup is not None:
-        if not isinstance(patch_backup, Path) or not patch_backup.is_absolute():
-            raise BootstrapError("patcher returned an invalid backup manifest")
-        try:
-            relative_backup = patch_backup.relative_to(patch_root)
-        except ValueError:
-            raise BootstrapError("patcher returned an invalid backup manifest") from None
-        if len(relative_backup.parts) != 1:
-            raise BootstrapError("patcher returned an invalid backup manifest")
-        _owned_regular(patch_backup, "patch backup manifest")
-        state = _append_finish_boundary(
-            state,
-            "patches-applied",
-            patch_backup_manifest=str(patch_backup),
-        )
-    else:
-        state = _append_finish_boundary(state, "patches-verified")
-    _record(operations, "patch-apply")
-
-    doctor_output = operations.doctor(context)
-    if not isinstance(doctor_output, str):
-        raise BootstrapError("doctor returned invalid output")
-    state = _append_finish_boundary(state, "doctor-passed")
-    _record(operations, "doctor")
-
-    after = _validate_finish_snapshot(
-        operations.capture_current(context), context, label="after"
-    )
-    write_snapshot(transaction / "after.json", after)
-    state = _append_finish_boundary(state, "after-snapshot")
-    _record(operations, "write-after-snapshot")
-    comparison = compare_snapshots(before, after, plan.snapshot_rules)
-    _write_transaction_json(state, "comparison.json", _comparison_value(comparison))
-    state = _append_finish_boundary(state, "snapshots-compared")
-    _record(operations, "compare-snapshots")
-    if not comparison.ok:
-        raise BootstrapError("snapshot comparison found unexpected changes")
-
-    options = operations.steam_options(context)
-    if not isinstance(options, str) or not options.endswith("\n") or options.count("\n") != 1:
-        raise BootstrapError("Steam launch-options command returned invalid output")
-    state = _append_finish_boundary(state, "steam-options-verified")
-    _record(operations, "steam-options")
-    state = transition(
-        state,
-        BootstrapPhase.INSTALLING_FINISH,
-        BootstrapPhase.READY_TO_ATTEMPT,
-        completed_boundaries=(*state.completed_boundaries, "ready-to-attempt"),
-    )
-    context.output.write(render_comparison(comparison))
-    context.output.write(options)
-    context.output.write(
-        "READY TO ATTEMPT. Paste the exact launch-options line into Steam and "
-        "launch Forza yourself.\n"
-    )
-    return state
+        return _finish_under_lease(locked_context, operations, plan)
+    finally:
+        os.close(lease_fd)

@@ -615,6 +615,44 @@ def installer_module():
     return module
 
 
+def test_runtime_installer_reuses_a_bound_inherited_coordinator_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = installer_module()
+    runtime = tmp_path / "run"
+    runtime.mkdir()
+    lock = runtime / "forza-linux.lock"
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    os.fchmod(descriptor, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("FORZA_LAUNCHER_LEASE_FD", str(descriptor))
+    borrowed: int | None = None
+    try:
+        borrowed = module.acquire_launcher_lock()
+        assert borrowed != descriptor
+        assert (os.fstat(borrowed).st_dev, os.fstat(borrowed).st_ino) == (
+            os.fstat(descriptor).st_dev,
+            os.fstat(descriptor).st_ino,
+        )
+    finally:
+        if borrowed is not None:
+            os.close(borrowed)
+        os.close(descriptor)
+
+
+def test_runtime_installer_uses_an_explicit_bound_integration_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = installer_module()
+    root = tmp_path / "integration"
+    root.mkdir()
+    monkeypatch.delenv("FORZA_RUNTIME_TESTING", raising=False)
+    monkeypatch.setenv("FORZA_RUNTIME_INTEGRATION_ROOT", str(root))
+
+    assert module.integration_root() == root
+
+
 def valid_v2_journal(module, version: bool | float) -> dict[str, object]:
     transaction = "a" * 24
     artifacts = []
