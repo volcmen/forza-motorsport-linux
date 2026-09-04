@@ -491,6 +491,24 @@ def test_redirect_rejected_before_following(destination: str) -> None:
         handler.redirect_request(request, None, 302, "Found", {}, destination)
 
 
+def test_tree_walk_uses_fresh_directory_position(tmp_path, monkeypatch):
+    (tmp_path / "file").write_bytes(b"payload")
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    original = os.scandir
+
+    def independent_scan(fd):
+        assert fd != root_fd, "do not reuse an extraction descriptor's directory position"
+        return original(fd)
+
+    monkeypatch.setattr(os, "scandir", independent_scan)
+    try:
+        assert set(artifacts_module._walk_tree(root_fd)) == {"file"}
+        (tmp_path / "new-file").write_bytes(b"new")
+        assert set(artifacts_module._walk_tree(root_fd)) == {"file", "new-file"}
+    finally:
+        os.close(root_fd)
+
+
 def test_redirect_handler_allows_https_release_host() -> None:
     handler = artifacts_module._AllowedRedirectHandler(
         ("downloads.example.invalid", "cdn.example.invalid")

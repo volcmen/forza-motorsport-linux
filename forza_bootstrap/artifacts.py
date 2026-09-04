@@ -1518,22 +1518,30 @@ def _walk_tree(root_fd: int) -> dict[str, os.stat_result]:
     result: dict[str, os.stat_result] = {}
 
     def walk(directory_fd: int, prefix: str) -> None:
-        with os.scandir(directory_fd) as entries:
-            ordered = sorted(entries, key=lambda entry: entry.name)
-        for entry in ordered:
+        # scandir(fd) shares the descriptor's directory position. Use a new
+        # open description so earlier scans cannot leave us at a stale EOF
+        # after extraction adds entries (notably on Btrfs).
+        scan_fd = os.open(".", _DIRECTORY_FLAGS, dir_fd=directory_fd)
+        try:
+            with os.scandir(scan_fd) as entries:
+                ordered = sorted(entries, key=lambda entry: entry.name)
+                # Resolve stat while scandir's descriptor is still open.
+                records = [(entry.name, entry.stat(follow_symlinks=False)) for entry in ordered]
+        finally:
+            os.close(scan_fd)
+        for name, info in records:
             if (
-                entry.name in {"", ".", ".."}
-                or "/" in entry.name
-                or "\x00" in entry.name
+                name in {"", ".", ".."}
+                or "/" in name
+                or "\x00" in name
             ):
                 raise BootstrapError("extracted archive tree is unsafe")
-            relative = f"{prefix}/{entry.name}" if prefix else entry.name
-            info = entry.stat(follow_symlinks=False)
+            relative = f"{prefix}/{name}" if prefix else name
             result[relative] = info
             if stat.S_ISDIR(info.st_mode):
                 try:
                     child_fd = os.open(
-                        entry.name, _DIRECTORY_FLAGS, dir_fd=directory_fd
+                        name, _DIRECTORY_FLAGS, dir_fd=directory_fd
                     )
                 except OSError as error:
                     raise BootstrapError(
