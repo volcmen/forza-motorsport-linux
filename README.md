@@ -15,10 +15,10 @@ It's for the **Steam edition of Forza Motorsport** (`AppID 2440510`), using
 to follow—and possible to undo if something goes wrong.
 
 > [!IMPORTANT]
-> **Experimental:** the older v0.1 setup worked on my machine. The new v0.2.0
-> installer has passed build and recovery tests, but its rebuilt components
-> still need testing in the game. This is not ordinary upstream Proton support.
-> If you already have a working setup, there's no need to replace it yet.
+> **Tested in-game:** I've tested the v0.2.0 setup in Forza Motorsport on my
+> system, in addition to the build and recovery tests. This is a community
+> compatibility setup, not official upstream Proton support or a guarantee
+> for every system. Incoming invite notifications are not supported.
 
 Looking to try it? Start with the [bootstrap guide](https://github.com/volcmen/forza-motorsport-linux/blob/feature/hybrid-bootstrap/docs/bootstrap.md).
 Already have the required local builds? Use the [manual setup](#guided-setup).
@@ -41,7 +41,8 @@ cd forza-motorsport-linux-v0.2.0
 Run these without `sudo`, in a separate checkout. The tagged README was written
 before publication; the [release notes](https://github.com/volcmen/forza-motorsport-linux/releases/tag/v0.2.0)
 have the latest download information. Repeat builds produced identical bundles,
-and public downloads passed verification. Those checks don't prove gameplay.
+and public downloads passed verification. In-game testing was also confirmed
+on my system; build and download checks alone are not gameplay tests.
 
 You still need to let Steam create the game's Windows environment (its
 "prefix"), supply your own licensed Microsoft threading DLL, and paste the
@@ -54,7 +55,9 @@ checkpoints, acquisition choices, privacy boundary, and recovery commands.
 
 ## Status and tested matrix
 
-The results below belong to **v0.1**, not the rebuilt v0.2.0 bundle.
+The **v0.2.0 setup has now been tested in-game on my system**. The detailed,
+dated matrix below records the earlier **v0.1** validation; it remains here
+as the exact-build history, rather than a new test record for v0.2.0.
 
 On that setup, I could play online, drive with the controller, reconnect it,
 and invite or join a friend on Windows. The AP702 warning was gone.

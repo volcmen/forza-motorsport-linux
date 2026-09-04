@@ -159,7 +159,8 @@ def test_declared_licenses_exist():
 def test_readme_names_supported_and_unsupported_boundaries():
     readme = (ROOT / "README.md").read_text()
     required = {
-        "Experimental",
+        "Tested in-game",
+        "v0.2.0 setup has now been tested in-game on my system",
         "AppID 2440510",
         "legacy-v0.1",
         "7b236772297b3475ea4f3cb830feb5b224f3064a",
