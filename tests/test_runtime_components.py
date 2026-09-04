@@ -14,6 +14,7 @@ import subprocess
 import time
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -76,7 +77,8 @@ def test_locked_evidence_names_the_runtime_profile(tmp_path: Path):
     run_tool(fixture, "lock-evidence")
 
     evidence = json.loads(fixture["evidence"].read_text())  # type: ignore[union-attr]
-    assert evidence["version"] == 2
+    assert evidence["version"] == 3
+    assert evidence["input_kind"] == "source"
     assert evidence["runtime_profile"] == "fixture"
     assert set(evidence["source_revisions"]) == {
         "xgameruntime_git_sha",
@@ -85,10 +87,217 @@ def test_locked_evidence_names_the_runtime_profile(tmp_path: Path):
     }
 
 
+def test_bundle_input_locks_profile_and_artifacts_without_git_sources(
+    tmp_path: Path,
+):
+    fixture = setup_fixture(tmp_path, input_kind="bundle")
+
+    run_tool(fixture, "lock-evidence")
+
+    evidence = json.loads(fixture["evidence"].read_text())  # type: ignore[union-attr]
+    assert evidence["version"] == 3
+    assert evidence["input_kind"] == "bundle"
+    assert evidence["runtime_profile"] == "fixture"
+    assert evidence["source_revisions"] == {
+        "xgameruntime_git_sha": fixture["xgameruntime_revision"],
+        "xodus_git_sha": fixture["xodus_revision"],
+        "integration_git_sha": fixture["integration_sha"],
+    }
+    assert evidence["bundle_manifest_sha256"] == sha256(
+        fixture["bundle_manifest"].read_bytes()  # type: ignore[union-attr]
+    )
+
+
+def test_bundle_input_refuses_artifact_drift_before_plan(tmp_path: Path):
+    fixture = setup_fixture(tmp_path, input_kind="bundle")
+    bundle_artifact = fixture["bundle_root"] / "bin/xodus-service"  # type: ignore[operator]
+    bundle_artifact.write_bytes(b"drifted bundle artifact\n")
+    bundle_artifact.chmod(0o755)
+    before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
+    before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
+
+    failed = run_tool(fixture, "lock-evidence", check=False)
+
+    assert failed.returncode != 0
+    assert "bundle artifact digest mismatch" in failed.stderr.lower()
+    assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
+
+
+@pytest.mark.parametrize(
+    "selection", ("both", "neither", "partial-bundle", "partial-source")
+)
+def test_cli_requires_exactly_one_complete_artifact_input_mode(
+    tmp_path: Path, selection: str
+):
+    fixture = setup_fixture(tmp_path, input_kind="bundle")
+    common = list(fixture["common"])  # type: ignore[arg-type]
+    if selection == "both":
+        common.extend(
+            [
+                "--xgameruntime-build-dir",
+                str(fixture["wine_build"]),
+                "--xodus-build-dir",
+                str(fixture["xodus_build"]),
+            ]
+        )
+    elif selection == "neither":
+        common = remove_options(common, "--artifact-bundle-root", "--bundle-manifest")
+    elif selection == "partial-bundle":
+        common = remove_options(common, "--bundle-manifest")
+    else:
+        common = remove_options(common, "--artifact-bundle-root", "--bundle-manifest")
+        common.extend(["--xgameruntime-build-dir", str(fixture["wine_build"])])
+    fixture["common"] = common
+
+    failed = run_tool(fixture, "lock-evidence", check=False)
+
+    assert failed.returncode == 2
+    assert "artifact input mode" in failed.stderr.lower()
+    assert "traceback" not in failed.stderr.lower()
+
+
+def test_bundle_input_refuses_wrong_profile_before_destinations_change(
+    tmp_path: Path,
+):
+    fixture = setup_fixture(tmp_path, input_kind="bundle")
+    manifest: Path = fixture["bundle_manifest"]  # type: ignore[assignment]
+    value = json.loads(manifest.read_text())
+    value["profile"] = "unreviewed"
+    manifest.write_text(json.dumps(value) + "\n", encoding="ascii")
+    manifest.chmod(0o644)
+    before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
+    before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
+
+    failed = run_tool(fixture, "lock-evidence", check=False)
+
+    assert failed.returncode != 0
+    assert "bundle runtime profile mismatch" in failed.stderr.lower()
+    assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
+
+
+def test_bundle_manifest_change_after_evidence_lock_is_rejected_before_plan(
+    tmp_path: Path,
+):
+    fixture = setup_fixture(tmp_path, input_kind="bundle")
+    run_tool(fixture, "lock-evidence")
+    manifest: Path = fixture["bundle_manifest"]  # type: ignore[assignment]
+    value = json.loads(manifest.read_text())
+    value["artifacts"] = list(reversed(value["artifacts"]))
+    manifest.write_text(json.dumps(value) + "\n", encoding="ascii")
+    manifest.chmod(0o644)
+    before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
+    before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
+
+    failed = run_tool(fixture, "plan", check=False)
+
+    assert failed.returncode != 0
+    assert "bundle manifest changed after evidence lock" in failed.stderr.lower()
+    assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
+
+
+def test_bundle_input_binds_artifacts_to_one_manifest_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fixture = setup_fixture(tmp_path, input_kind="bundle")
+    for name in (
+        "FORZA_RUNTIME_TESTING",
+        "FORZA_RUNTIME_EXPECTED_XGAMERUNTIME_SHA",
+        "FORZA_RUNTIME_EXPECTED_XODUS_SHA",
+        "FORZA_RUNTIME_INTEGRATION_ROOT",
+    ):
+        monkeypatch.setenv(name, fixture["env"][name])  # type: ignore[index]
+    module = installer_module()
+    original_load = module.load_bundle_manifest
+    calls = 0
+
+    def swap_after_first_load(bundle_root: Path, manifest_path: Path):
+        nonlocal calls
+        loaded = original_load(bundle_root, manifest_path)
+        calls += 1
+        if calls == 1:
+            artifact = bundle_root / "bin/xodus-service"
+            replacement = b"replacement from a second manifest\n"
+            artifact.write_bytes(replacement)
+            artifact.chmod(0o755)
+            value = json.loads(manifest_path.read_text())
+            record = next(
+                item
+                for item in value["artifacts"]
+                if item["logical_name"] == "xodus-service"
+            )
+            record["size"] = len(replacement)
+            record["sha256"] = sha256(replacement)
+            manifest_path.write_text(json.dumps(value) + "\n", encoding="ascii")
+            manifest_path.chmod(0o644)
+        return loaded
+
+    monkeypatch.setattr(module, "load_bundle_manifest", swap_after_first_load)
+    arguments = SimpleNamespace(
+        artifact_bundle_root=fixture["bundle_root"],
+        bundle_manifest=fixture["bundle_manifest"],
+    )
+
+    with pytest.raises(RuntimeError, match="bundle artifact digest mismatch"):
+        module.bundle_input_context(arguments)
+
+
+def test_v2_source_evidence_remains_accepted_for_plan(tmp_path: Path):
+    fixture = setup_fixture(tmp_path)
+    run_tool(fixture, "lock-evidence")
+    evidence: Path = fixture["evidence"]  # type: ignore[assignment]
+    value = json.loads(evidence.read_text())
+    value["version"] = 2
+    value.pop("input_kind")
+    evidence.write_text(json.dumps(value) + "\n", encoding="ascii")
+    evidence.chmod(0o600)
+
+    planned = run_tool(fixture, "plan")
+
+    assert "PLAN_SHA256=" in planned.stdout
+
+
+def test_v3_evidence_rejects_unknown_keys_before_destinations_change(tmp_path: Path):
+    fixture = setup_fixture(tmp_path, input_kind="bundle")
+    run_tool(fixture, "lock-evidence")
+    evidence: Path = fixture["evidence"]  # type: ignore[assignment]
+    value = json.loads(evidence.read_text())
+    value["unexpected"] = "untrusted"
+    evidence.write_text(json.dumps(value) + "\n", encoding="ascii")
+    evidence.chmod(0o600)
+    before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
+    before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
+
+    failed = run_tool(fixture, "plan", check=False)
+
+    assert failed.returncode != 0
+    assert "evidence manifest keys are invalid" in failed.stderr.lower()
+    assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
+
+
+def test_bundle_plan_install_and_rollback_round_trip(tmp_path: Path):
+    fixture = setup_fixture(tmp_path, input_kind="bundle")
+
+    plan_digest = lock_and_plan(fixture)
+    run_tool(fixture, "install", "--plan-sha256", plan_digest)
+
+    for role, relative in fixture["bundle_paths"].items():  # type: ignore[union-attr]
+        source = fixture["bundle_root"] / relative  # type: ignore[operator]
+        if role.startswith("xgameruntime"):
+            destination = fixture["wine_destinations"][role]  # type: ignore[index]
+        else:
+            destination = fixture["user_root"] / USER_ROLE_PATHS[role]  # type: ignore[index,operator]
+        assert destination.read_bytes() == source.read_bytes()
+
+    run_tool(fixture, "rollback")
+
+    assert_original_install_restored(fixture)
+    assert "state=rolled_back" in run_tool(fixture, "status").stdout
+
+
 @pytest.mark.parametrize(
     ("manifest", "message"),
     (
-        ("version = 1\nactive = \"missing\"\n", "manifest is invalid"),
+        ('version = 1\nactive = "missing"\n', "manifest is invalid"),
         (
             (
                 "version = 1\n"
@@ -169,7 +378,9 @@ def test_changed_profile_after_evidence_lock_fails_before_destinations_change(
     run_tool(fixture, "lock-evidence")
     before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
     before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
-    profile.write_text(profile.read_text().replace('status = "candidate"', 'status = "experimental"'))
+    profile.write_text(
+        profile.read_text().replace('status = "candidate"', 'status = "experimental"')
+    )
 
     failed = run_tool(fixture, "plan", check=False)
 
@@ -328,8 +539,7 @@ def test_plan_prints_profile_and_reviewed_source_revisions(tmp_path: Path):
         + fixture["env"]["FORZA_RUNTIME_EXPECTED_XGAMERUNTIME_SHA"],  # type: ignore[index]
         "PLAN source revision xodus_git_sha="
         + fixture["env"]["FORZA_RUNTIME_EXPECTED_XODUS_SHA"],  # type: ignore[index]
-        "PLAN source revision integration_git_sha="
-        + fixture["integration_sha"],  # type: ignore[operator]
+        "PLAN source revision integration_git_sha=" + fixture["integration_sha"],  # type: ignore[operator]
         "PLAN user ownership: require managed or empty destinations",
     ]
 
@@ -443,7 +653,7 @@ def tree_snapshot(root: Path) -> list[tuple[str, str, int]]:
     return result
 
 
-def setup_fixture(tmp_path: Path) -> dict[str, object]:
+def setup_fixture(tmp_path: Path, *, input_kind: str = "source") -> dict[str, object]:
     user_root = tmp_path / "user"
     compat_root = tmp_path / "compat"
     wine_source = tmp_path / "wine-source"
@@ -515,6 +725,51 @@ def setup_fixture(tmp_path: Path) -> dict[str, object]:
         if path.name not in {"supported-builds.toml", "xodus-forza.service"}:
             path.chmod(0o755 if path.name != "xgameruntime.dll" else 0o644)
 
+    bundle_root = tmp_path / "bundle"
+    bundle_manifest = bundle_root / "bundle-manifest.json"
+    bundle_paths = {
+        "xodus-service": "bin/xodus-service",
+        "xodus-cli": "bin/xodus-cli",
+        "xodus-overlay": "bin/xodus-overlay",
+        "xgameruntime-pe64": "runtime/xgameruntime.dll",
+        "xgameruntime-unix64": "runtime/xgameruntime.so",
+    }
+    bundle_records = []
+    for role, relative in bundle_paths.items():
+        source, data = artifacts[role]
+        destination = bundle_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+        destination.chmod(stat.S_IMODE(source.stat().st_mode))
+        bundle_records.append(
+            {
+                "logical_name": role,
+                "relative_path": relative,
+                "size": len(data),
+                "sha256": sha256(data),
+                "mode": stat.S_IMODE(destination.stat().st_mode),
+                "private": False,
+            }
+        )
+    bundle_manifest.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "profile": "fixture",
+                "sources": {
+                    "xgameruntime": wine_sha,
+                    "xodus": xodus_sha,
+                },
+                "artifacts": bundle_records,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    bundle_manifest.chmod(0o644)
+
     old_wine = {
         "xgameruntime-pe64": b"old pe runtime\n",
         "xgameruntime-unix64": b"old unix runtime\n",
@@ -577,13 +832,29 @@ def setup_fixture(tmp_path: Path) -> dict[str, object]:
         str(compat_root),
         "--user-root",
         str(user_root),
-        "--xgameruntime-build-dir",
-        str(wine_build),
-        "--xodus-build-dir",
-        str(xodus_build),
         "--artifact-evidence-manifest",
         str(evidence),
     ]
+    if input_kind == "source":
+        common.extend(
+            [
+                "--xgameruntime-build-dir",
+                str(wine_build),
+                "--xodus-build-dir",
+                str(xodus_build),
+            ]
+        )
+    elif input_kind == "bundle":
+        common.extend(
+            [
+                "--artifact-bundle-root",
+                str(bundle_root),
+                "--bundle-manifest",
+                str(bundle_manifest),
+            ]
+        )
+    else:
+        raise ValueError(f"unknown fixture input kind: {input_kind}")
     return {
         "user_root": user_root,
         "compat_root": compat_root,
@@ -592,6 +863,11 @@ def setup_fixture(tmp_path: Path) -> dict[str, object]:
         "integration_source": integration_source,
         "wine_build": wine_build,
         "xodus_build": xodus_build,
+        "bundle_root": bundle_root,
+        "bundle_manifest": bundle_manifest,
+        "bundle_paths": bundle_paths,
+        "xgameruntime_revision": wine_sha,
+        "xodus_revision": xodus_sha,
         "runtime_dir": runtime_dir,
         "fake_systemctl": fake_systemctl,
         "evidence": evidence,
@@ -618,6 +894,18 @@ def run_tool(
     )
     if check and result.returncode:
         raise AssertionError(f"tool failed: {result.stderr}\n{result.stdout}")
+    return result
+
+
+def remove_options(arguments: list[str], *names: str) -> list[str]:
+    result: list[str] = []
+    index = 0
+    while index < len(arguments):
+        if arguments[index] in names:
+            index += 2
+        else:
+            result.append(arguments[index])
+            index += 1
     return result
 
 
@@ -653,7 +941,9 @@ def run_secure_user_files(
 
 
 def assert_runtime_destinations_unchanged(
-    fixture: dict[str, object], before_user: list[tuple[str, str, int]], before_compat: list[tuple[str, str, int]]
+    fixture: dict[str, object],
+    before_user: list[tuple[str, str, int]],
+    before_compat: list[tuple[str, str, int]],
 ) -> None:
     assert tree_snapshot(fixture["user_root"]) == before_user  # type: ignore[arg-type]
     assert tree_snapshot(fixture["compat_root"]) == before_compat  # type: ignore[arg-type]
@@ -691,7 +981,9 @@ def test_lock_evidence_binds_clean_revisions_and_ten_artifacts(tmp_path: Path):
 
     assert stat.S_IMODE(evidence_path.stat().st_mode) == 0o600
     assert evidence["source_revisions"] == {
-        "xgameruntime_git_sha": fixture["env"]["FORZA_RUNTIME_EXPECTED_XGAMERUNTIME_SHA"],  # type: ignore[index]
+        "xgameruntime_git_sha": fixture["env"][
+            "FORZA_RUNTIME_EXPECTED_XGAMERUNTIME_SHA"
+        ],  # type: ignore[index]
         "xodus_git_sha": fixture["env"]["FORZA_RUNTIME_EXPECTED_XODUS_SHA"],  # type: ignore[index]
         "integration_git_sha": fixture["integration_sha"],
     }
