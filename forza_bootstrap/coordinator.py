@@ -23,7 +23,12 @@ from typing import Any, Literal, TextIO
 
 from .artifacts import VerifiedBundle, download_once, extract_bundle, verify_bundle_root
 from .container_build import check_docker
-from .licensed import LicensedAction, install_threading_copy, plan_threading_copy
+from .licensed import (
+    LicensedAction,
+    install_threading_copy,
+    plan_threading_copy,
+    rollback_threading_copy,
+)
 from .model import (
     BootstrapError,
     BootstrapManifest,
@@ -39,6 +44,7 @@ from .proton import (
     inspect_fm,
     prepare_fm_tree,
     publish_fm,
+    rollback_published_fm,
 )
 from .safeio import (
     atomic_write_private_json,
@@ -64,6 +70,7 @@ from .state import (
     BootstrapPhase,
     BootstrapState,
     create_transaction,
+    load_transaction,
     load_unfinished_transaction,
     transition,
 )
@@ -220,6 +227,39 @@ class FinishContext:
     child_environment: Mapping[str, str] = field(default_factory=dict)
     command_sha256: Mapping[str, str] = field(default_factory=dict)
     launcher_lease_fd: int | None = None
+
+
+RecoveryStatus = Literal["pending", "rolled_back", "not_applicable"]
+
+
+@dataclass(frozen=True)
+class RecoveryOperations:
+    """Inspection and mutation boundaries owned by bootstrap recovery."""
+
+    resume_prepare: Callable[[RecoveryContext, BootstrapState], BootstrapState]
+    resume_finish: Callable[[RecoveryContext, BootstrapState], BootstrapState]
+    inspect_patches: Callable[[RecoveryContext, BootstrapState], RecoveryStatus]
+    restore_patches: Callable[[RecoveryContext, BootstrapState], None]
+    inspect_runtime: Callable[[RecoveryContext, BootstrapState], RecoveryStatus]
+    rollback_runtime: Callable[[RecoveryContext, BootstrapState], None]
+    inspect_threading: Callable[[RecoveryContext, BootstrapState], RecoveryStatus]
+    rollback_threading: Callable[[RecoveryContext, BootstrapState], None]
+    inspect_tool: Callable[[RecoveryContext, BootstrapState], RecoveryStatus]
+    rollback_tool: Callable[[RecoveryContext, BootstrapState], None]
+    event: Callable[[str], None] = lambda _event: None
+    boundary: Callable[[str], None] = lambda _boundary: None
+
+
+@dataclass(frozen=True)
+class RecoveryContext:
+    """Private durable state and exact owner operations for resume/rollback."""
+
+    state: BootstrapState
+    state_root: Path
+    output: TextIO = sys.stdout
+    operations: RecoveryOperations | None = None
+    prepare_context: PrepareContext | None = None
+    finish_context: FinishContext | None = None
 
 
 def _read_os_id(path: Path) -> str:
@@ -614,7 +654,9 @@ def _validate_held_launcher_lock(host: ResolvedHost, lease_fd: int) -> None:
             raise OSError
         fcntl.flock(lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (OSError, BlockingIOError):
-        raise BootstrapError("launcher lock changed while coordinator held it") from None
+        raise BootstrapError(
+            "launcher lock changed while coordinator held it"
+        ) from None
     finally:
         if linked_fd is not None:
             os.close(linked_fd)
@@ -899,6 +941,21 @@ def _identity_value(identity: ToolIdentity) -> dict[str, object]:
         "vdf_sha256": identity.vdf_sha256,
         "managed_tree_sha256": identity.managed_tree_sha256,
         "marker_sha256": identity.marker_sha256,
+    }
+
+
+def _published_tool_value(record: PublishedToolRecord) -> dict[str, object]:
+    return {
+        "schema": 1,
+        "destination": {
+            "root": "steam",
+            "relative": f"compatibilitytools.d/{_FM_NAME}",
+        },
+        "disposition": record.disposition.value,
+        "identity": _identity_value(record.identity),
+        "root_device": record.root_device,
+        "root_inode": record.root_inode,
+        "published_tree_sha256": record.published_tree_sha256,
     }
 
 
@@ -1259,6 +1316,15 @@ def _write_transaction_json(
         os.close(root_fd)
 
 
+def _transaction_json_if_present(
+    state: BootstrapState, name: str
+) -> dict[str, object] | None:
+    try:
+        return _read_transaction_json(state, name)
+    except FileNotFoundError:
+        return None
+
+
 def _append_boundary(state: BootstrapState, boundary: str) -> BootstrapState:
     return transition(
         state,
@@ -1381,6 +1447,7 @@ def _prepare_confirmed(
         completed_boundaries=("confirmed-plan",),
     )
     _write_transaction_json(state, "plan.json", plan)
+    _write_transaction_json(state, "prepare-plan.json", plan)
 
     before = operations.capture_before(context, state.transaction_id)
     _validate_before_snapshot(before, state, context, inspection)
@@ -1435,6 +1502,20 @@ def _prepare_confirmed(
             "root": "steam",
             "relative": f"compatibilitytools.d/{_FM_NAME}",
         }
+        _write_transaction_json(
+            state,
+            "compatibility-tool.json",
+            _published_tool_value(
+                PublishedToolRecord(
+                    context.host.compatibility_tools / _FM_NAME,
+                    ToolDisposition.ADOPTED,
+                    identity,
+                    0,
+                    0,
+                    tool_tree_sha256,
+                )
+            ),
+        )
     else:
         assert ge_root is not None
         published = operations.publish_fm(context, ge_root)
@@ -1450,6 +1531,9 @@ def _prepare_confirmed(
         disposition = "created"
         identity = published.identity
         tool_tree_sha256 = published.published_tree_sha256
+        _write_transaction_json(
+            state, "compatibility-tool.json", _published_tool_value(published)
+        )
         state = _append_boundary(state, "compatibility-tool-published")
         _record(operations, "publish-fm-tool")
 
@@ -1772,9 +1856,8 @@ def _run_finish_child(
     command: str,
     accepted: frozenset[int] = frozenset({0}),
 ) -> subprocess.CompletedProcess[str]:
-    if (
-        not argv
-        or any(not isinstance(argument, str) or "\x00" in argument for argument in argv)
+    if not argv or any(
+        not isinstance(argument, str) or "\x00" in argument for argument in argv
     ):
         raise BootstrapError(f"{label} command is invalid")
     required = {"runtime-installer", "patcher", "doctor", "steam-options"}
@@ -1800,13 +1883,11 @@ def _run_finish_child(
     if (
         command == "runtime-installer"
         and len(argv) > 1
-        and argv[1] == "install"
+        and argv[1] in {"install", "rollback", "restore-runtime", "accept"}
         and context.launcher_lease_fd is not None
     ):
         pass_fds.append(context.launcher_lease_fd)
-        environment["FORZA_LAUNCHER_LEASE_FD"] = str(
-            context.launcher_lease_fd
-        )
+        environment["FORZA_LAUNCHER_LEASE_FD"] = str(context.launcher_lease_fd)
     try:
         result = context.runner(
             argv,
@@ -1854,7 +1935,9 @@ def _runtime_common_argv(context: FinishContext) -> tuple[str, ...]:
     )
 
 
-def _runtime_argv(context: FinishContext, operation: str, *extra: str) -> tuple[str, ...]:
+def _runtime_argv(
+    context: FinishContext, operation: str, *extra: str
+) -> tuple[str, ...]:
     common = _runtime_common_argv(context)
     return (common[0], operation, *common[1:], *extra)
 
@@ -1888,7 +1971,9 @@ def _runtime_manifest_target(
         for relative in _USER_PAYLOADS
     )
     payload = ("\n".join(lines) + "\n").encode("ascii")
-    return PlannedTarget(_USER_MANIFEST_LOGICAL, hashlib.sha256(payload).hexdigest(), 0o600)
+    return PlannedTarget(
+        _USER_MANIFEST_LOGICAL, hashlib.sha256(payload).hexdigest(), 0o600
+    )
 
 
 def _snapshot_has_targets(
@@ -1925,7 +2010,10 @@ def _default_runtime_plan(
         ):
             continue
         if line.startswith("PLAN_SHA256="):
-            if digest is not None or re.fullmatch(r"PLAN_SHA256=[0-9a-f]{64}", line) is None:
+            if (
+                digest is not None
+                or re.fullmatch(r"PLAN_SHA256=[0-9a-f]{64}", line) is None
+            ):
                 raise BootstrapError("runtime child plan returned invalid output")
             digest = line.removeprefix("PLAN_SHA256=")
             continue
@@ -2229,7 +2317,10 @@ def _validate_finish_context(context: FinishContext) -> None:
             raise BootstrapError(f"Finish {label} is invalid")
     if context.threading_dll is None:
         raise BootstrapError("Finish requires --threading-dll")
-    if not isinstance(context.threading_dll, Path) or not context.threading_dll.is_absolute():
+    if (
+        not isinstance(context.threading_dll, Path)
+        or not context.threading_dll.is_absolute()
+    ):
         raise BootstrapError("Finish threading input must be an absolute path")
     for value, label in (
         (context.bundle_manifest_sha256, "bundle manifest"),
@@ -2241,7 +2332,10 @@ def _validate_finish_context(context: FinishContext) -> None:
         raise BootstrapError("Finish child environment is invalid")
     if not isinstance(context.command_sha256, Mapping):
         raise BootstrapError("Finish command identities are invalid")
-    if context.launcher_lease_fd is not None and type(context.launcher_lease_fd) is not int:
+    if (
+        context.launcher_lease_fd is not None
+        and type(context.launcher_lease_fd) is not int
+    ):
         raise BootstrapError("Finish launcher lease is invalid")
 
 
@@ -2310,7 +2404,9 @@ def _validate_patch_inspection(value: PatchInspection) -> PatchInspection:
     return value
 
 
-def _validated_command_versions(value: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+def _validated_command_versions(
+    value: Mapping[str, str],
+) -> tuple[tuple[str, str], ...]:
     required = {"runtime-installer", "patcher", "doctor", "steam-options"}
     if set(value) != required or any(
         not isinstance(item, str) or _SHA256.fullmatch(item) is None
@@ -2325,9 +2421,7 @@ def _validate_finish_snapshot(
 ) -> Snapshot:
     steam_fd: int | None = None
     try:
-        steam_fd = _open_owned_directory(
-            context.host.steam_root, "Finish Steam root"
-        )
+        steam_fd = _open_owned_directory(context.host.steam_root, "Finish Steam root")
         steam_info = os.fstat(steam_fd)
     except (OSError, BootstrapError):
         raise BootstrapError("Finish Steam root identity is invalid") from None
@@ -2397,9 +2491,7 @@ def _snapshot_records(snapshot: Snapshot, label: str) -> dict[str, FileRecord]:
     return result
 
 
-def _planned_rules(
-    before: Snapshot, inputs: _FinishInputs
-) -> tuple[ChangeRule, ...]:
+def _planned_rules(before: Snapshot, inputs: _FinishInputs) -> tuple[ChangeRule, ...]:
     before_records = _snapshot_records(before, "before")
     current_records = _snapshot_records(inputs.pre_finish, "pre-Finish")
     if set(before_records) != set(current_records):
@@ -2476,9 +2568,7 @@ def _finish_plan_from(
         canonical_json(_private_snapshot_value(inputs.pre_finish))
     ).hexdigest()
     private_paths = {
-        item.logical_path
-        for item in inputs.pre_finish.records
-        if item.private is True
+        item.logical_path for item in inputs.pre_finish.records if item.private is True
     }
     patch_hashes = tuple(target.sha256 for target in inputs.patches.targets)
     document: dict[str, object] = {
@@ -2534,18 +2624,12 @@ def _finish_plan_from(
 
 
 def _read_before_snapshot(context: FinishContext) -> Snapshot:
-    path = (
-        context.host.state_root
-        / context.state.transaction_id
-        / "before.json"
-    )
+    path = context.host.state_root / context.state.transaction_id / "before.json"
     before = read_snapshot(path)
     return _validate_finish_snapshot(before, context, label="before")
 
 
-def _read_transaction_json(
-    state: BootstrapState, name: str
-) -> dict[str, object]:
+def _read_transaction_json(state: BootstrapState, name: str) -> dict[str, object]:
     if state._state_root is None:
         raise BootstrapError("bootstrap state is not bound to storage")
     root_fd = open_owned_root(state._state_root)
@@ -2593,7 +2677,9 @@ def finish_context_from_prepare(
         or _SHA256.fullmatch(prepare_plan_sha256) is None
     ):
         raise BootstrapError("Prepare checkpoint is invalid")
-    prepare_plan = _read_transaction_json(state, "plan.json")
+    prepare_plan = _transaction_json_if_present(state, "prepare-plan.json")
+    if prepare_plan is None:
+        prepare_plan = _read_transaction_json(state, "plan.json")
     if (
         prepare_plan.get("schema") != 1
         or prepare_plan.get("phase") != "prepare"
@@ -2650,9 +2736,12 @@ def finish_context_from_prepare(
         if not isinstance(ge_relative, str):
             raise BootstrapError("Prepare checkpoint is invalid")
         ge_path = context.host.cache_root / Path(ge_relative)
-        if _validated_acquisition_reference(
-            context, ge_path, "recorded GE-Proton root"
-        ) != ge:
+        if (
+            _validated_acquisition_reference(
+                context, ge_path, "recorded GE-Proton root"
+            )
+            != ge
+        ):
             raise BootstrapError("Prepare checkpoint is invalid")
     elif ge != {
         "root": "steam",
@@ -2804,9 +2893,7 @@ def _finish_under_lease(
     _require_finish_lease(context)
     operations.validate_prefix(context)
     if inputs.licensed.disposition != "keep":
-        operations.install_threading(
-            context, inputs.licensed, recovery / "licensed"
-        )
+        operations.install_threading(context, inputs.licensed, recovery / "licensed")
     state = _append_finish_boundary(state, "licensed-installed")
     _record(operations, "install-threading")
 
@@ -2818,8 +2905,7 @@ def _finish_under_lease(
         else None
     )
     if child is not None and (
-        not isinstance(child, str)
-        or re.fullmatch(r"[0-9a-f]{24}", child) is None
+        not isinstance(child, str) or re.fullmatch(r"[0-9a-f]{24}", child) is None
     ):
         raise BootstrapError("runtime child returned an invalid transaction id")
     state = _append_finish_boundary(
@@ -2838,9 +2924,7 @@ def _finish_under_lease(
     patch_root = recovery / "patches"
     if inputs.patches.disposition != "keep":
         ensure_private_directory(patch_root)
-        patch_backup = operations.apply_patches(
-            context, inputs.patches, patch_root
-        )
+        patch_backup = operations.apply_patches(context, inputs.patches, patch_root)
     else:
         patch_backup = None
     if patch_backup is not None:
@@ -2881,9 +2965,7 @@ def _finish_under_lease(
     _record(operations, "write-after-snapshot")
     _require_finish_lease(context)
     comparison = compare_snapshots(before, after, plan.snapshot_rules)
-    _write_transaction_json(
-        state, "comparison.json", _comparison_value(comparison)
-    )
+    _write_transaction_json(state, "comparison.json", _comparison_value(comparison))
     state = _append_finish_boundary(state, "snapshots-compared")
     _record(operations, "compare-snapshots")
     if not comparison.ok:
@@ -2944,5 +3026,1009 @@ def finish(context: FinishContext, confirm: Callable[[str], str]) -> BootstrapSt
             launcher_lease_fd=lease_fd,
         )
         return _finish_under_lease(locked_context, operations, plan)
+    finally:
+        os.close(lease_fd)
+
+
+def _tool_record_from_state(state: BootstrapState) -> PublishedToolRecord:
+    value = _read_transaction_json(state, "compatibility-tool.json")
+    destination = value.get("destination")
+    identity = value.get("identity")
+    disposition = value.get("disposition")
+    if (
+        set(value)
+        != {
+            "schema",
+            "destination",
+            "disposition",
+            "identity",
+            "root_device",
+            "root_inode",
+            "published_tree_sha256",
+        }
+        or value.get("schema") != 1
+        or destination
+        != {
+            "root": "steam",
+            "relative": f"compatibilitytools.d/{_FM_NAME}",
+        }
+        or disposition not in {"created", "adopted"}
+        or not isinstance(identity, dict)
+        or set(identity)
+        != {
+            "name",
+            "base_release",
+            "vdf_sha256",
+            "managed_tree_sha256",
+            "marker_sha256",
+        }
+        or identity.get("name") != _FM_NAME
+        or identity.get("base_release") != "GE-Proton11-3"
+        or any(
+            not isinstance(identity.get(name), str)
+            or _SHA256.fullmatch(identity[name]) is None
+            for name in ("vdf_sha256", "managed_tree_sha256")
+        )
+        or (
+            identity.get("marker_sha256") is not None
+            and (
+                not isinstance(identity.get("marker_sha256"), str)
+                or _SHA256.fullmatch(identity["marker_sha256"]) is None
+            )
+        )
+        or type(value.get("root_device")) is not int
+        or value["root_device"] < 0
+        or type(value.get("root_inode")) is not int
+        or value["root_inode"] < 0
+        or not isinstance(value.get("published_tree_sha256"), str)
+        or _SHA256.fullmatch(value["published_tree_sha256"]) is None
+    ):
+        raise BootstrapError("compatibility-tool recovery record is invalid")
+    return PublishedToolRecord(
+        Path("/"),
+        ToolDisposition(disposition),
+        ToolIdentity(
+            identity["name"],
+            identity["base_release"],
+            identity["vdf_sha256"],
+            identity["managed_tree_sha256"],
+            identity["marker_sha256"],
+        ),
+        value["root_device"],
+        value["root_inode"],
+        value["published_tree_sha256"],
+    )
+
+
+def _resume_prepare_under_lease(
+    context: RecoveryContext, state: BootstrapState
+) -> BootstrapState:
+    prepare_context = context.prepare_context
+    if not isinstance(prepare_context, PrepareContext):
+        raise BootstrapError("Prepare recovery context is missing")
+    if state.phase is BootstrapPhase.NEW:
+        raise BootstrapError("unconfirmed Prepare transaction requires recovery")
+    operations = _operations(prepare_context)
+    plan = _transaction_json_if_present(state, "prepare-plan.json")
+    if plan is None:
+        plan = _read_transaction_json(state, "plan.json")
+    if (
+        plan.get("schema") != 1
+        or plan.get("phase") != "prepare"
+        or plan.get("manifest_sha256") != state.manifest_sha256
+    ):
+        raise BootstrapError("Prepare recovery plan is invalid")
+    try:
+        before = read_snapshot(
+            context.state_root / state.transaction_id / "before.json"
+        )
+    except (BootstrapError, OSError):
+        before = operations.capture_before(prepare_context, state.transaction_id)
+        write_snapshot(
+            context.state_root / state.transaction_id / "before.json", before
+        )
+    if (
+        before.transaction_id != state.transaction_id
+        or before.manifest_sha256 != state.manifest_sha256
+    ):
+        raise BootstrapError("Prepare recovery snapshot is invalid")
+
+    bundle = operations.acquire_bundle(prepare_context)
+    if not isinstance(bundle, VerifiedBundle):
+        raise BootstrapError("bundle recovery returned an invalid root")
+    bundle_reference = _validated_acquisition_reference(
+        prepare_context, bundle.root, "bundle root"
+    )
+    tool_record_value = _transaction_json_if_present(state, "compatibility-tool.json")
+    ge_reference: dict[str, str]
+    if tool_record_value is not None:
+        tool_record = _tool_record_from_state(state)
+        tool_record = replace(
+            tool_record,
+            destination=prepare_context.host.compatibility_tools / _FM_NAME,
+        )
+        current = inspect_fm(tool_record.destination, prepare_context.manifest)
+        if (
+            current.disposition is not ToolDisposition.ADOPTED
+            or current.identity != tool_record.identity
+            or current.tree_sha256 != tool_record.published_tree_sha256
+        ):
+            raise BootstrapError("compatibility tool changed during Prepare recovery")
+        if tool_record.disposition is ToolDisposition.CREATED:
+            try:
+                current_info = tool_record.destination.lstat()
+            except OSError:
+                raise BootstrapError(
+                    "compatibility tool changed during Prepare recovery"
+                ) from None
+            if (current_info.st_dev, current_info.st_ino) != (
+                tool_record.root_device,
+                tool_record.root_inode,
+            ):
+                raise BootstrapError(
+                    "compatibility tool changed during Prepare recovery"
+                )
+        disposition = tool_record.disposition.value
+        identity = tool_record.identity
+        tree_sha256 = tool_record.published_tree_sha256
+        ge_reference = {
+            "root": "steam",
+            "relative": f"compatibilitytools.d/{_FM_NAME}",
+        }
+    else:
+        destination = plan.get("destination")
+        before_tool = (
+            destination.get("before") if isinstance(destination, dict) else None
+        )
+        current = inspect_fm(
+            prepare_context.host.compatibility_tools / _FM_NAME,
+            prepare_context.manifest,
+        )
+        if current.disposition is ToolDisposition.ADOPTED:
+            assert current.identity is not None and current.tree_sha256 is not None
+            disposition = "adopted"
+            identity = current.identity
+            tree_sha256 = current.tree_sha256
+            record = PublishedToolRecord(
+                prepare_context.host.compatibility_tools / _FM_NAME,
+                ToolDisposition.ADOPTED,
+                identity,
+                0,
+                0,
+                tree_sha256,
+            )
+            ge_reference = {
+                "root": "steam",
+                "relative": f"compatibilitytools.d/{_FM_NAME}",
+            }
+        elif current.disposition is ToolDisposition.ABSENT and before_tool == {
+            "disposition": "absent"
+        }:
+            ge_root = operations.acquire_ge(prepare_context)
+            ge_reference = _validated_acquisition_reference(
+                prepare_context, ge_root, "GE-Proton root"
+            )
+            record = operations.publish_fm(prepare_context, ge_root)
+            if not isinstance(record, PublishedToolRecord):
+                raise BootstrapError(
+                    "compatibility-tool recovery publication is invalid"
+                )
+            disposition = record.disposition.value
+            identity = record.identity
+            tree_sha256 = record.published_tree_sha256
+        else:
+            raise BootstrapError("compatibility-tool recovery is ambiguous")
+        _write_transaction_json(
+            state, "compatibility-tool.json", _published_tool_value(record)
+        )
+
+    prepare_record: dict[str, object] = {
+        "schema": 1,
+        "plan_sha256": plan_digest(plan),
+        "ge_root": ge_reference,
+        "bundle_root": bundle_reference,
+        "bundle_manifest_sha256": bundle.manifest_sha256,
+        "compatibility_tool": {
+            "disposition": disposition,
+            "identity": _identity_value(identity),
+            "tree_sha256": tree_sha256,
+        },
+    }
+    _write_transaction_json(state, "prepare.json", prepare_record)
+    return transition(
+        state,
+        BootstrapPhase.PREPARING,
+        BootstrapPhase.AWAITING_STEAM_PREFIX,
+        completed_boundaries=(
+            *state.completed_boundaries,
+            *(
+                ()
+                if "awaiting-steam-prefix" in state.completed_boundaries
+                else ("awaiting-steam-prefix",)
+            ),
+        ),
+        compatibility_tool_disposition=disposition,
+    )
+
+
+def _resume_prepare_default(
+    context: RecoveryContext, state: BootstrapState
+) -> BootstrapState:
+    prepare_context = context.prepare_context
+    if not isinstance(prepare_context, PrepareContext):
+        raise BootstrapError("Prepare recovery context is missing")
+    lease_fd = _acquire_launcher_lease(prepare_context.host)
+    try:
+        _validate_held_launcher_lock(prepare_context.host, lease_fd)
+        return _resume_prepare_under_lease(context, state)
+    finally:
+        os.close(lease_fd)
+
+
+def _finish_plan_for_recovery(state: BootstrapState) -> FinishPlan:
+    document = _read_transaction_json(state, "plan.json")
+    licensed = _read_transaction_json(state, "licensed-plan.json")
+    if (
+        document.get("schema") != 1
+        or document.get("phase") != "finish"
+        or document.get("manifest_sha256") != state.manifest_sha256
+        or document.get("transaction_id") != state.transaction_id
+        or not isinstance(document.get("runtime_plan_sha256"), str)
+        or _SHA256.fullmatch(document["runtime_plan_sha256"]) is None
+        or not isinstance(document.get("snapshot_rules"), list)
+        or not isinstance(licensed.get("source_sha256"), str)
+        or _SHA256.fullmatch(licensed["source_sha256"]) is None
+    ):
+        raise BootstrapError("Finish recovery plan is invalid")
+    rules: list[ChangeRule] = []
+    for value in document["snapshot_rules"]:
+        if not isinstance(value, dict) or set(value) != {
+            "logical_path",
+            "policy",
+            "after_sha256",
+            "after_mode",
+        }:
+            raise BootstrapError("Finish recovery plan is invalid")
+        after = value["after_sha256"]
+        if after == "[private local digest verified]":
+            after = licensed["source_sha256"]
+        rules.append(
+            ChangeRule(
+                value["logical_path"],
+                value["policy"],
+                after,
+                value["after_mode"],
+            )
+        )
+    patch = document.get("patch")
+    patch_hashes = document.get("patch_after_sha256")
+    if not isinstance(patch, dict) or not isinstance(patch_hashes, list):
+        raise BootstrapError("Finish recovery plan is invalid")
+    return FinishPlan(
+        document,
+        plan_digest(document),
+        document["runtime_plan_sha256"],
+        tuple(patch_hashes),
+        tuple(rules),
+    )
+
+
+def _append_finish_recovery_boundary(
+    state: BootstrapState, boundary: str, **updates: object
+) -> BootstrapState:
+    if boundary in state.completed_boundaries and not updates:
+        return state
+    return transition(
+        state,
+        BootstrapPhase.INSTALLING_FINISH,
+        BootstrapPhase.INSTALLING_FINISH,
+        completed_boundaries=(
+            state.completed_boundaries
+            if boundary in state.completed_boundaries
+            else (*state.completed_boundaries, boundary)
+        ),
+        **updates,
+    )
+
+
+def _resume_finish_default(
+    context: RecoveryContext, state: BootstrapState
+) -> BootstrapState:
+    finish_context = _recovery_finish_context(context, state)
+    operations = _finish_operations(finish_context)
+    plan = _finish_plan_for_recovery(state)
+    if state.phase is BootstrapPhase.PLANNED_FINISH:
+        state = transition(
+            state,
+            BootstrapPhase.PLANNED_FINISH,
+            BootstrapPhase.INSTALLING_FINISH,
+            completed_boundaries=(
+                *state.completed_boundaries,
+                *(
+                    ()
+                    if "installing-finish" in state.completed_boundaries
+                    else ("installing-finish",)
+                ),
+            ),
+        )
+    lease_fd = _acquire_launcher_lease(finish_context.host)
+    try:
+        working = replace(
+            finish_context,
+            state=state,
+            launcher_lease_fd=lease_fd,
+        )
+        transaction = context.state_root / state.transaction_id
+        recovery = transaction / "recovery"
+        ensure_private_directory(recovery)
+        licensed_private = _read_transaction_json(state, "licensed-plan.json")
+        licensed_action = operations.plan_threading(working)
+        if licensed_action.private_json() != licensed_private:
+            raise BootstrapError("licensed input changed during Finish recovery")
+        if licensed_action.disposition != "keep":
+            operations.install_threading(
+                working, licensed_action, recovery / "licensed"
+            )
+        state = _append_finish_recovery_boundary(state, "licensed-installed")
+
+        runtime_document = plan.document.get("runtime")
+        if not isinstance(runtime_document, dict):
+            raise BootstrapError("Finish recovery plan is invalid")
+        runtime = RuntimePlan(
+            plan.runtime_plan_sha256,
+            runtime_document.get("evidence_sha256"),
+            (),
+            runtime_document.get("disposition"),
+        )
+        child = _runtime_transaction_id(context, state)
+        if runtime.disposition != "keep" and child is None:
+            child = operations.install_runtime(working, runtime)
+            if (
+                not isinstance(child, str)
+                or re.fullmatch(r"[0-9a-f]{24}", child) is None
+            ):
+                raise BootstrapError("runtime child returned an invalid transaction id")
+        if child is not None and state.child_runtime_transaction is None:
+            state = _append_finish_recovery_boundary(
+                state, "runtime-installed", child_runtime_transaction=child
+            )
+        else:
+            state = _append_finish_recovery_boundary(state, "runtime-installed")
+        working = replace(working, state=state)
+        operations.runtime_status(working, runtime, child)
+        state = _append_finish_recovery_boundary(state, "runtime-status-verified")
+
+        patch_document = plan.document.get("patch")
+        assert isinstance(patch_document, dict)
+        patches = PatchInspection(
+            tuple(patch_document.get("states", ())),
+            (),
+            patch_document.get("disposition"),
+        )
+        patch_boundary = next(
+            (
+                boundary
+                for boundary in ("patches-applied", "patches-verified")
+                if boundary in state.completed_boundaries
+            ),
+            None,
+        )
+        if patch_boundary is not None and finish_context.operations is None:
+            status = _default_patch_recovery_status(context, state)
+            expected = (
+                "pending" if patch_boundary == "patches-applied" else "rolled_back"
+            )
+            if status != expected:
+                raise BootstrapError("patch state changed during Finish recovery")
+        if patch_boundary is None:
+            patch_root = recovery / "patches"
+            if patches.disposition != "keep":
+                ensure_private_directory(patch_root)
+                backup = operations.apply_patches(working, patches, patch_root)
+            else:
+                backup = None
+            if backup is None:
+                state = _append_finish_recovery_boundary(state, "patches-verified")
+            else:
+                state = _append_finish_recovery_boundary(
+                    state, "patches-applied", patch_backup_manifest=str(backup)
+                )
+
+        operations.doctor(working)
+        state = _append_finish_recovery_boundary(state, "doctor-passed")
+        after = _validate_finish_snapshot(
+            operations.capture_current(working), working, label="after"
+        )
+        write_snapshot(transaction / "after.json", after)
+        state = _append_finish_recovery_boundary(state, "after-snapshot")
+        before = _read_before_snapshot(working)
+        comparison = compare_snapshots(before, after, plan.snapshot_rules)
+        _write_transaction_json(state, "comparison.json", _comparison_value(comparison))
+        if not comparison.ok:
+            raise BootstrapError("snapshot comparison found unexpected changes")
+        state = _append_finish_recovery_boundary(state, "snapshots-compared")
+        options = operations.steam_options(working)
+        if (
+            not isinstance(options, str)
+            or not options.endswith("\n")
+            or options.count("\n") != 1
+        ):
+            raise BootstrapError("Steam launch-options command returned invalid output")
+        state = _append_finish_recovery_boundary(state, "steam-options-verified")
+        return transition(
+            state,
+            BootstrapPhase.INSTALLING_FINISH,
+            BootstrapPhase.READY_TO_ATTEMPT,
+            completed_boundaries=(*state.completed_boundaries, "ready-to-attempt"),
+        )
+    finally:
+        os.close(lease_fd)
+
+
+def _recovery_finish_context(
+    context: RecoveryContext, state: BootstrapState
+) -> FinishContext:
+    finish_context = context.finish_context
+    if not isinstance(finish_context, FinishContext):
+        raise BootstrapError("Finish recovery context is missing")
+    plan = _read_transaction_json(state, "plan.json")
+    commands = plan.get("commands")
+    if (
+        not isinstance(commands, dict)
+        or set(commands) != {"runtime-installer", "patcher", "doctor", "steam-options"}
+        or any(
+            not isinstance(value, str) or _SHA256.fullmatch(value) is None
+            for value in commands.values()
+        )
+    ):
+        raise BootstrapError("Finish recovery command identities are invalid")
+    return replace(
+        finish_context,
+        state=state,
+        command_sha256=commands,
+    )
+
+
+def _has_finish_plan(state: BootstrapState) -> bool:
+    plan = _transaction_json_if_present(state, "plan.json")
+    return plan is not None and plan.get("phase") == "finish"
+
+
+def _default_patch_recovery_status(
+    context: RecoveryContext, state: BootstrapState
+) -> RecoveryStatus:
+    if state.patch_backup_manifest is None and not _has_finish_plan(state):
+        return "not_applicable"
+    finish_context = _recovery_finish_context(context, state)
+    states: list[str] = []
+    for _logical, relative, _file in _PATCH_TARGETS:
+        result = _run_finish_child(
+            finish_context,
+            (
+                str(finish_context.repository_root / "scripts/patch-known-build"),
+                "inspect",
+                "--manifest",
+                str(finish_context.repository_root / "manifests/supported-builds.toml"),
+                "--target",
+                str(finish_context.host.steam_root / relative),
+            ),
+            "patch rollback inspection",
+            command="patcher",
+        )
+        value = result.stdout.rstrip("\n")
+        if value not in {"original", "patched"}:
+            raise BootstrapError("patch rollback inspection is ambiguous")
+        states.append(value)
+    if set(states) == {"original"}:
+        return "rolled_back"
+    if set(states) != {"patched"}:
+        raise BootstrapError("patch targets are mixed during rollback")
+    backup = _patch_backup_path(context, state)
+    if backup is None:
+        raise BootstrapError("patch backup is missing")
+    try:
+        expected_parent = context.state_root / state.transaction_id / "recovery/patches"
+        if backup.parent != expected_parent:
+            raise BootstrapError("patch backup escaped its recovery directory")
+        _owned_regular(backup, "patch backup manifest")
+    except (OSError, BootstrapError):
+        raise BootstrapError("patch backup is missing or unsafe") from None
+    return "pending"
+
+
+def _patch_backup_path(context: RecoveryContext, state: BootstrapState) -> Path | None:
+    if state.patch_backup_manifest is not None:
+        return Path(state.patch_backup_manifest)
+    root = context.state_root / state.transaction_id / "recovery/patches"
+    try:
+        descriptor = open_owned_root(root)
+    except FileNotFoundError:
+        return None
+    try:
+        names = sorted(os.listdir(descriptor))
+    except OSError:
+        raise BootstrapError("patch recovery directory is unsafe") from None
+    finally:
+        os.close(descriptor)
+    candidates = [
+        root / name
+        for name in names
+        if re.fullmatch(
+            r"forza-patch-[0-9]{8}T[0-9]{6}Z(?:\.[1-9][0-9]*)?\.json",
+            name,
+        )
+    ]
+    if len(candidates) > 1:
+        raise BootstrapError("multiple patch backups require recovery")
+    return candidates[0] if candidates else None
+
+
+def _default_restore_patches(context: RecoveryContext, state: BootstrapState) -> None:
+    backup = _patch_backup_path(context, state)
+    if backup is None:
+        raise BootstrapError("patch backup is missing")
+    finish_context = _recovery_finish_context(context, state)
+    _run_finish_child(
+        finish_context,
+        (
+            str(finish_context.repository_root / "scripts/patch-known-build"),
+            "restore-forza",
+            "--manifest",
+            str(finish_context.repository_root / "manifests/supported-builds.toml"),
+            "--steam-root",
+            str(finish_context.host.steam_root),
+            "--backup-manifest",
+            str(backup),
+        ),
+        "patch rollback",
+        command="patcher",
+    )
+
+
+def _runtime_transaction_id(
+    context: RecoveryContext, state: BootstrapState
+) -> str | None:
+    child = state.child_runtime_transaction
+    if child is None and not _has_finish_plan(state):
+        return None
+    finish_context = _recovery_finish_context(context, state)
+    if child is not None:
+        return child
+    plan = _read_transaction_json(state, "plan.json")
+    expected_plan = plan.get("runtime_plan_sha256")
+    root = (
+        finish_context.host.user_root
+        / ".local/state/forza-motorsport-linux/runtime-transactions"
+    )
+    try:
+        root_fd = _open_owned_directory(root, "runtime transaction root")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise BootstrapError("runtime transaction root is unsafe") from None
+    try:
+        names = sorted(os.listdir(root_fd))
+    except OSError:
+        os.close(root_fd)
+        raise BootstrapError("runtime transaction root is unsafe") from None
+    os.close(root_fd)
+    matches: list[str] = []
+    other_unfinished: list[str] = []
+    for name in names:
+        if re.fullmatch(r"[0-9a-f]{24}", name) is None:
+            continue
+        data = _read_owned_regular(
+            root / name / "journal.json", "runtime child journal", 1024 * 1024
+        )
+        if data is None:
+            continue
+        try:
+            value = json.loads(data)
+        except (json.JSONDecodeError, UnicodeError):
+            raise BootstrapError("runtime child journal is invalid") from None
+        if (
+            isinstance(value, dict)
+            and value.get("transaction_id") == name
+            and value.get("plan_sha256") == expected_plan
+        ):
+            matches.append(name)
+        elif isinstance(value, dict) and value.get("state") not in {
+            "accepted",
+            "rolled_back",
+            "runtime_restored",
+        }:
+            other_unfinished.append(name)
+    if len(matches) > 1:
+        raise BootstrapError("multiple matching runtime child transactions")
+    if other_unfinished:
+        raise BootstrapError("unrelated unfinished runtime child transaction exists")
+    return matches[0] if matches else None
+
+
+def _runtime_journal_value(
+    context: RecoveryContext, state: BootstrapState
+) -> dict[str, object] | None:
+    child = _runtime_transaction_id(context, state)
+    if child is None:
+        return None
+    finish_context = _recovery_finish_context(context, state)
+    path = (
+        finish_context.host.user_root
+        / ".local/state/forza-motorsport-linux/runtime-transactions"
+        / child
+        / "journal.json"
+    )
+    data = _read_owned_regular(path, "runtime child journal", 1024 * 1024)
+    if data is None:
+        raise BootstrapError("runtime child journal is missing")
+    try:
+        value = json.loads(data)
+    except (json.JSONDecodeError, UnicodeError):
+        raise BootstrapError("runtime child journal is invalid") from None
+    plan = _read_transaction_json(state, "plan.json")
+    if (
+        not isinstance(value, dict)
+        or value.get("transaction_id") != child
+        or value.get("plan_sha256") != plan.get("runtime_plan_sha256")
+        or not isinstance(value.get("state"), str)
+    ):
+        raise BootstrapError("runtime child journal is invalid")
+    return value
+
+
+def _default_runtime_recovery_status(
+    context: RecoveryContext, state: BootstrapState
+) -> RecoveryStatus:
+    journal = _runtime_journal_value(context, state)
+    if journal is None:
+        return "not_applicable"
+    status = journal["state"]
+    if status == "rolled_back":
+        return "rolled_back"
+    if status in {
+        "prepared",
+        "installing",
+        "installed",
+        "rolling_back",
+        "runtime_restored",
+    }:
+        return "pending"
+    if status == "recovery_required":
+        raise BootstrapError("runtime child requires recovery")
+    if status == "accepted":
+        raise BootstrapError("accepted runtime child refuses ordinary rollback")
+    raise BootstrapError("runtime child journal has an unknown state")
+
+
+def _default_rollback_runtime(context: RecoveryContext, state: BootstrapState) -> None:
+    finish_context = _recovery_finish_context(context, state)
+    _run_finish_child(
+        finish_context,
+        _runtime_argv(finish_context, "rollback"),
+        "runtime child rollback",
+        command="runtime-installer",
+    )
+
+
+def _licensed_journal_value(
+    context: RecoveryContext, state: BootstrapState
+) -> dict[str, object] | None:
+    journal_root = context.state_root / state.transaction_id / "recovery/licensed"
+    try:
+        root_fd = open_owned_root(journal_root)
+    except FileNotFoundError:
+        return None
+    try:
+        value = read_private_json(root_fd, "licensed.json")
+    finally:
+        os.close(root_fd)
+    if not isinstance(value, dict) or value.get("status") not in {
+        "planned",
+        "installed",
+        "rolled_back",
+        "recovery_required",
+    }:
+        raise BootstrapError("licensed recovery journal is invalid")
+    return value
+
+
+def _default_threading_recovery_status(
+    context: RecoveryContext, state: BootstrapState
+) -> RecoveryStatus:
+    journal = _licensed_journal_value(context, state)
+    if journal is None:
+        return "not_applicable"
+    status = journal["status"]
+    if status == "rolled_back":
+        return "rolled_back"
+    if status == "recovery_required":
+        raise BootstrapError("licensed destination requires recovery")
+    return "pending"
+
+
+def _default_rollback_threading(
+    context: RecoveryContext, state: BootstrapState
+) -> None:
+    rollback_threading_copy(
+        context.state_root / state.transaction_id / "recovery/licensed"
+    )
+
+
+def _default_tool_recovery_status(
+    context: RecoveryContext, state: BootstrapState
+) -> RecoveryStatus:
+    record_value = _transaction_json_if_present(state, "compatibility-tool.json")
+    if record_value is None and state.compatibility_tool_disposition is None:
+        return "not_applicable"
+    if record_value is None:
+        raise BootstrapError("compatibility-tool recovery record is missing")
+    record = _tool_record_from_state(state)
+    finish_context = context.finish_context
+    prepare_context = context.prepare_context
+    if isinstance(finish_context, FinishContext):
+        host = finish_context.host
+        manifest = finish_context.manifest
+    elif isinstance(prepare_context, PrepareContext) or (
+        prepare_context is not None
+        and hasattr(prepare_context, "host")
+        and hasattr(prepare_context, "manifest")
+    ):
+        host = prepare_context.host
+        manifest = prepare_context.manifest
+    else:
+        raise BootstrapError("compatibility-tool recovery context is missing")
+    destination = host.compatibility_tools / _FM_NAME
+    current = inspect_fm(destination, manifest)
+    if record.disposition is ToolDisposition.ADOPTED:
+        if (
+            current.disposition is ToolDisposition.ADOPTED
+            and current.identity == record.identity
+            and current.tree_sha256 == record.published_tree_sha256
+        ):
+            return "not_applicable"
+        raise BootstrapError("compatibility tool changed after publication")
+    if current.disposition is ToolDisposition.ABSENT:
+        return "rolled_back"
+    if (
+        current.disposition is not ToolDisposition.ADOPTED
+        or current.identity != record.identity
+        or current.tree_sha256 != record.published_tree_sha256
+    ):
+        raise BootstrapError("compatibility tool changed after publication")
+    try:
+        info = destination.lstat()
+    except OSError:
+        raise BootstrapError("compatibility tool changed after publication") from None
+    if (info.st_dev, info.st_ino) != (record.root_device, record.root_inode):
+        raise BootstrapError("compatibility tool changed after publication")
+    return "pending"
+
+
+def _default_rollback_tool(context: RecoveryContext, state: BootstrapState) -> None:
+    record = _tool_record_from_state(state)
+    finish_context = context.finish_context
+    prepare_context = context.prepare_context
+    host = (
+        finish_context.host
+        if isinstance(finish_context, FinishContext)
+        else prepare_context.host  # type: ignore[union-attr]
+    )
+    result = rollback_published_fm(
+        replace(record, destination=host.compatibility_tools / _FM_NAME)
+    )
+    if result not in {ToolDisposition.ABSENT, ToolDisposition.ADOPTED}:
+        raise BootstrapError("compatibility tool changed during rollback")
+
+
+def default_recovery_operations(context: RecoveryContext) -> RecoveryOperations:
+    """Compose real resume and reverse-order rollback owners."""
+    return RecoveryOperations(
+        resume_prepare=_resume_prepare_default,
+        resume_finish=_resume_finish_default,
+        inspect_patches=_default_patch_recovery_status,
+        restore_patches=_default_restore_patches,
+        inspect_runtime=_default_runtime_recovery_status,
+        rollback_runtime=_default_rollback_runtime,
+        inspect_threading=_default_threading_recovery_status,
+        rollback_threading=_default_rollback_threading,
+        inspect_tool=_default_tool_recovery_status,
+        rollback_tool=_default_rollback_tool,
+    )
+
+
+def _recovery_operations(context: RecoveryContext) -> RecoveryOperations:
+    operations = context.operations
+    if operations is None:
+        operations = default_recovery_operations(context)
+    if not isinstance(operations, RecoveryOperations):
+        raise BootstrapError("recovery operations are unavailable")
+    return operations
+
+
+def _durable_recovery_state(context: RecoveryContext) -> BootstrapState:
+    if not isinstance(context, RecoveryContext):
+        raise BootstrapError("recovery context is invalid")
+    if (
+        not isinstance(context.state, BootstrapState)
+        or not isinstance(context.state_root, Path)
+        or not context.state_root.is_absolute()
+        or context.state._state_root != context.state_root
+    ):
+        raise BootstrapError("recovery state is invalid")
+    durable = load_transaction(context.state_root, context.state.transaction_id)
+    if durable != context.state:
+        raise BootstrapError("recovery does not match the last durable state")
+    return durable
+
+
+def _validate_awaiting_plan_handoff(state: BootstrapState) -> None:
+    current = _transaction_json_if_present(state, "plan.json")
+    if current is None or current.get("phase") != "finish":
+        return
+    prepare = _transaction_json_if_present(state, "prepare-plan.json")
+    if (
+        prepare is None
+        or prepare.get("schema") != 1
+        or prepare.get("phase") != "prepare"
+        or prepare.get("manifest_sha256") != state.manifest_sha256
+    ):
+        raise BootstrapError(
+            "Finish plan was published before its state transition and the Prepare plan "
+            "cannot be reconstructed"
+        )
+
+
+def resume(context: RecoveryContext) -> BootstrapState:
+    """Resume the sole durable coordinator through identity-inspecting owners."""
+    state = _durable_recovery_state(context)
+    operations = _recovery_operations(context)
+    if state.phase in {
+        BootstrapPhase.READY_TO_ATTEMPT,
+        BootstrapPhase.ACCEPTED,
+        BootstrapPhase.ROLLED_BACK,
+    }:
+        return state
+    if state.phase is BootstrapPhase.AWAITING_STEAM_PREFIX:
+        try:
+            _validate_awaiting_plan_handoff(state)
+        except BootstrapError as error:
+            _recovery_required(context, state, error)
+        return state
+    try:
+        if state.phase in {BootstrapPhase.NEW, BootstrapPhase.PREPARING}:
+            result = operations.resume_prepare(context, state)
+            allowed = {BootstrapPhase.AWAITING_STEAM_PREFIX}
+        elif state.phase in {
+            BootstrapPhase.PLANNED_FINISH,
+            BootstrapPhase.INSTALLING_FINISH,
+        }:
+            result = operations.resume_finish(context, state)
+            allowed = {BootstrapPhase.READY_TO_ATTEMPT}
+        else:
+            raise BootstrapError(
+                f"bootstrap transaction requires rollback recovery from {state.phase.value}"
+            )
+    except BootstrapError as error:
+        _recovery_required(context, state, error)
+    if not isinstance(result, BootstrapState) or result.phase not in allowed:
+        _recovery_required(
+            context, state, BootstrapError("recovery owner returned an invalid state")
+        )
+    durable = load_transaction(context.state_root, state.transaction_id)
+    if durable != result:
+        _recovery_required(
+            context,
+            state,
+            BootstrapError("recovery owner did not persist its result"),
+        )
+    return result
+
+
+def _rollback_checkpoint(state: BootstrapState, boundary: str) -> BootstrapState:
+    if boundary in state.completed_boundaries:
+        return state
+    return transition(
+        state,
+        BootstrapPhase.ROLLING_BACK,
+        BootstrapPhase.ROLLING_BACK,
+        completed_boundaries=(*state.completed_boundaries, boundary),
+    )
+
+
+def _recovery_required(
+    context: RecoveryContext, state: BootstrapState, error: BootstrapError
+) -> None:
+    if state.phase is not BootstrapPhase.RECOVERY_REQUIRED:
+        state = transition(
+            state,
+            state.phase,
+            BootstrapPhase.RECOVERY_REQUIRED,
+        )
+    journal = context.state_root / state.transaction_id
+    context.output.write(f"RECOVERY_REQUIRED: inspect private journal {journal}\n")
+    raise error
+
+
+def _rollback_under_lease(context: RecoveryContext, confirm: str) -> BootstrapState:
+    state = _durable_recovery_state(context)
+    operations = _recovery_operations(context)
+    if state.phase is BootstrapPhase.ACCEPTED:
+        raise BootstrapError("accepted transaction refuses ordinary rollback")
+    if state.phase is BootstrapPhase.ROLLED_BACK:
+        return state
+    if confirm != "ROLLBACK":
+        return state
+    if state.phase is BootstrapPhase.RECOVERY_REQUIRED:
+        state = transition(
+            state,
+            BootstrapPhase.RECOVERY_REQUIRED,
+            BootstrapPhase.ROLLING_BACK,
+        )
+    elif state.phase is not BootstrapPhase.ROLLING_BACK:
+        state = transition(state, state.phase, BootstrapPhase.ROLLING_BACK)
+
+    steps = (
+        ("rollback-patches", operations.inspect_patches, operations.restore_patches),
+        ("rollback-runtime", operations.inspect_runtime, operations.rollback_runtime),
+        (
+            "rollback-threading",
+            operations.inspect_threading,
+            operations.rollback_threading,
+        ),
+        ("rollback-compat-tool", operations.inspect_tool, operations.rollback_tool),
+    )
+    for boundary, inspect, action in steps:
+        try:
+            status = inspect(context, state)
+            if status not in {"pending", "rolled_back", "not_applicable"}:
+                raise BootstrapError(f"{boundary} inspection is ambiguous")
+            if status == "pending":
+                action(context, state)
+                status = inspect(context, state)
+                if status not in {"rolled_back", "not_applicable"}:
+                    raise BootstrapError(f"{boundary} did not reach an exact state")
+            state = _rollback_checkpoint(state, boundary)
+            operations.boundary(boundary)
+        except KeyboardInterrupt:
+            raise
+        except BootstrapError as error:
+            _recovery_required(context, state, error)
+    return transition(
+        state,
+        BootstrapPhase.ROLLING_BACK,
+        BootstrapPhase.ROLLED_BACK,
+        completed_boundaries=(*state.completed_boundaries, "rolled-back"),
+    )
+
+
+def rollback(context: RecoveryContext, confirm: str) -> BootstrapState:
+    """Compose exact owner rollbacks in reverse order under the launcher lease."""
+    state = _durable_recovery_state(context)
+    if state.phase is BootstrapPhase.ACCEPTED:
+        raise BootstrapError("accepted transaction refuses ordinary rollback")
+    if state.phase is BootstrapPhase.ROLLED_BACK or confirm != "ROLLBACK":
+        return state
+    finish_context = context.finish_context
+    prepare_context = context.prepare_context
+    host = (
+        finish_context.host
+        if isinstance(finish_context, FinishContext)
+        else prepare_context.host
+        if isinstance(prepare_context, PrepareContext)
+        else None
+    )
+    if host is None:
+        return _rollback_under_lease(context, confirm)
+    lease_fd = _acquire_launcher_lease(host)
+    try:
+        _validate_held_launcher_lock(host, lease_fd)
+        locked_finish = (
+            replace(finish_context, launcher_lease_fd=lease_fd)
+            if isinstance(finish_context, FinishContext)
+            else None
+        )
+        return _rollback_under_lease(
+            replace(context, finish_context=locked_finish), confirm
+        )
     finally:
         os.close(lease_fd)

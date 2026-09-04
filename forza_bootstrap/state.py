@@ -34,7 +34,9 @@ from .safeio import (
 _STATE_VERSION = 1
 _TRANSACTION_ID = re.compile(r"[0-9a-f]{24}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-_PATCH_BACKUP_MANIFEST = re.compile(r"forza-patch-[0-9]{8}T[0-9]{6}Z(?:\.[1-9][0-9]*)?\.json\Z")
+_PATCH_BACKUP_MANIFEST = re.compile(
+    r"forza-patch-[0-9]{8}T[0-9]{6}Z(?:\.[1-9][0-9]*)?\.json\Z"
+)
 _PREPUBLICATION_DIRECTORY = re.compile(r"\.bootstrap-staging-([0-9a-f]{24})\Z")
 _STATE_KEYS = frozenset(
     {
@@ -236,7 +238,9 @@ def _open_private_child(root_fd: int, name: str, label: str) -> int:
 
 def _open_transaction(root_fd: int, transaction_id: str) -> int:
     _require_token(transaction_id, "transaction_id")
-    return _open_private_child(root_fd, transaction_id, "bootstrap transaction directory")
+    return _open_private_child(
+        root_fd, transaction_id, "bootstrap transaction directory"
+    )
 
 
 def _validate_root_lock(root_fd: int) -> None:
@@ -258,9 +262,13 @@ def _recover_prepublication_transaction(
             return None
         temporary = re.compile(r"\.state\.json\.[0-9a-f]{24}\.tmp\Z")
         if entries == ["state.json"]:
-            state = _state_from_value(read_private_json(transaction_fd, "state.json"), state_root)
+            state = _state_from_value(
+                read_private_json(transaction_fd, "state.json"), state_root
+            )
             if state.transaction_id != transaction_id:
-                raise BootstrapError("staging directory and state transaction id differ")
+                raise BootstrapError(
+                    "staging directory and state transaction id differ"
+                )
         elif len(entries) == 1 and temporary.fullmatch(entries[0]) is not None:
             temporary_fd = _open_private_regular(transaction_fd, entries[0])
             os.close(temporary_fd)
@@ -272,15 +280,21 @@ def _recover_prepublication_transaction(
     try:
         rename_noreplace(root_fd, name, root_fd, transaction_id)
     except FileExistsError as error:
-        raise BootstrapError("staging transaction conflicts with durable transaction") from error
+        raise BootstrapError(
+            "staging transaction conflicts with durable transaction"
+        ) from error
     os.fsync(root_fd)
     return state
 
 
-def _load_transaction(root_fd: int, state_root: Path, transaction_id: str) -> BootstrapState:
+def _load_transaction(
+    root_fd: int, state_root: Path, transaction_id: str
+) -> BootstrapState:
     transaction_fd = _open_transaction(root_fd, transaction_id)
     try:
-        state = _state_from_value(read_private_json(transaction_fd, "state.json"), state_root)
+        state = _state_from_value(
+            read_private_json(transaction_fd, "state.json"), state_root
+        )
     finally:
         os.close(transaction_fd)
     return state
@@ -308,18 +322,24 @@ def _load_unfinished_transaction_locked(root: Path) -> BootstrapState | None:
             staging = _PREPUBLICATION_DIRECTORY.fullmatch(name)
             if staging is not None:
                 durable_name = staging.group(1)
-                state = _recover_prepublication_transaction(root_fd, root, name, durable_name)
+                state = _recover_prepublication_transaction(
+                    root_fd, root, name, durable_name
+                )
                 if state is None:
                     continue
             else:
                 if _TRANSACTION_ID.fullmatch(name) is None:
-                    raise BootstrapError(f"unsafe entry in bootstrap state root: {name}")
+                    raise BootstrapError(
+                        f"unsafe entry in bootstrap state root: {name}"
+                    )
                 state = _load_transaction(root_fd, root, name)
             if state.transaction_id in transaction_ids:
                 raise BootstrapError("duplicate transaction id in bootstrap state")
             transaction_ids.add(state.transaction_id)
             if state.transaction_id != durable_name:
-                raise BootstrapError("transaction directory and state transaction id differ")
+                raise BootstrapError(
+                    "transaction directory and state transaction id differ"
+                )
             if state.phase not in _TERMINAL_PHASES:
                 states.append(state)
         if len(states) > 1:
@@ -329,7 +349,9 @@ def _load_unfinished_transaction_locked(root: Path) -> BootstrapState | None:
         os.close(root_fd)
 
 
-def load_unfinished_transaction(state_root: str | os.PathLike[str]) -> BootstrapState | None:
+def load_unfinished_transaction(
+    state_root: str | os.PathLike[str],
+) -> BootstrapState | None:
     """Return the only unfinished private transaction, if state has been initialized."""
     root = Path(state_root)
     try:
@@ -345,7 +367,26 @@ def load_unfinished_transaction(state_root: str | os.PathLike[str]) -> Bootstrap
         os.close(lock_fd)
 
 
-def create_transaction(state_root: str | os.PathLike[str], manifest_sha256: str) -> BootstrapState:
+def load_transaction(
+    state_root: str | os.PathLike[str], transaction_id: str
+) -> BootstrapState:
+    """Load one named transaction, including a terminal transaction."""
+    root = Path(state_root)
+    transaction_id = _require_token(transaction_id, "transaction_id")
+    lock_fd = acquire_bootstrap_lock(root)
+    try:
+        root_fd = open_owned_root(root)
+        try:
+            return _load_transaction(root_fd, root, transaction_id)
+        finally:
+            os.close(root_fd)
+    finally:
+        os.close(lock_fd)
+
+
+def create_transaction(
+    state_root: str | os.PathLike[str], manifest_sha256: str
+) -> BootstrapState:
     """Create the sole unfinished state directory and its initial durable record."""
     manifest_sha256 = _require_sha256(manifest_sha256, "manifest_sha256")
     root = Path(state_root)
@@ -379,13 +420,17 @@ def create_transaction(state_root: str | os.PathLike[str], manifest_sha256: str)
                         compatibility_tool_disposition=None,
                         _state_root=root,
                     )
-                    atomic_write_private_json(transaction_fd, "state.json", _state_value(state))
+                    atomic_write_private_json(
+                        transaction_fd, "state.json", _state_value(state)
+                    )
                 finally:
                     os.close(transaction_fd)
                 try:
                     rename_noreplace(root_fd, staging, root_fd, transaction_id)
                 except FileExistsError as error:
-                    raise BootstrapError("bootstrap transaction id collision") from error
+                    raise BootstrapError(
+                        "bootstrap transaction id collision"
+                    ) from error
                 os.fsync(root_fd)
                 return state
             raise BootstrapError("cannot reserve bootstrap transaction id")
@@ -401,14 +446,22 @@ def _validate_transition_request(
     target: BootstrapPhase,
     updates: dict[str, object],
 ) -> None:
-    if not isinstance(expected, BootstrapPhase) or not isinstance(target, BootstrapPhase):
+    if not isinstance(expected, BootstrapPhase) or not isinstance(
+        target, BootstrapPhase
+    ):
         raise BootstrapError("bootstrap transition phases are invalid")
     if state.phase != expected:
-        raise BootstrapError(f"transition expected {state.phase.value}, not {expected.value}")
+        raise BootstrapError(
+            f"transition expected {state.phase.value}, not {expected.value}"
+        )
     if target == expected and target in _TERMINAL_PHASES:
-        raise BootstrapError(f"transition from {expected.value} to {target.value} is not allowed")
+        raise BootstrapError(
+            f"transition from {expected.value} to {target.value} is not allowed"
+        )
     if target != expected and target not in _ALLOWED_TRANSITIONS[expected]:
-        raise BootstrapError(f"transition from {expected.value} to {target.value} is not allowed")
+        raise BootstrapError(
+            f"transition from {expected.value} to {target.value} is not allowed"
+        )
     invalid_updates = set(updates) - _UPDATABLE_FIELDS
     if invalid_updates:
         raise BootstrapError("bootstrap state update is not allowed")
@@ -430,7 +483,10 @@ def _updated_state(
             value[key] = update
     next_state = _state_from_value(value, state._state_root)  # type: ignore[arg-type]
     existing_boundaries = state.completed_boundaries
-    if next_state.completed_boundaries[: len(existing_boundaries)] != existing_boundaries:
+    if (
+        next_state.completed_boundaries[: len(existing_boundaries)]
+        != existing_boundaries
+    ):
         raise BootstrapError("state completed_boundaries may only append new entries")
     for field_name in _WRITE_ONCE_FIELDS:
         existing = getattr(state, field_name)
