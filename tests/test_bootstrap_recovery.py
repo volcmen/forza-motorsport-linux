@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import io
 import json
 import subprocess
@@ -11,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from test_bootstrap_finish import FinishFixture
+from test_bootstrap_finish import PATCH_LOGICAL_PATHS, FinishFixture
 from test_bootstrap_prepare import PrepareFixture
 
 import forza_bootstrap.coordinator as coordinator_module
@@ -24,7 +25,7 @@ from forza_bootstrap.coordinator import (
     resume,
     rollback,
 )
-from forza_bootstrap.model import BootstrapError
+from forza_bootstrap.model import BootstrapError, canonical_json, plan_digest
 from forza_bootstrap.proton import ToolDisposition
 from forza_bootstrap.state import (
     BootstrapPhase,
@@ -895,6 +896,199 @@ def test_resume_rejects_invalid_nested_finish_plan_before_any_owner(
     assert owner_calls == []
 
 
+def _crashed_finish_for_plan_validation(
+    fixture: FinishFixture,
+) -> BootstrapState:
+    crashed = False
+
+    def interrupt(boundary: str) -> None:
+        nonlocal crashed
+        if boundary == "runtime-status" and not crashed:
+            crashed = True
+            raise KeyboardInterrupt
+
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(fixture.operations, boundary=interrupt),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        fixture.run()
+    durable = load_unfinished_transaction(fixture.state_root)
+    assert durable is not None
+    return durable
+
+
+def _republish_validly_digested_finish_plan(
+    fixture: FinishFixture,
+    state: BootstrapState,
+    document: dict[str, object],
+) -> BootstrapState:
+    transaction = fixture.state_root / state.transaction_id
+    digest = plan_digest(document)
+    plan_path = transaction / "plan.json"
+    plan_path.write_bytes(canonical_json(document))
+    plan_path.chmod(0o600)
+    state_path = transaction / "state.json"
+    state_value = json.loads(state_path.read_text())
+    state_value["finish_plan_sha256"] = digest
+    state_path.write_bytes(canonical_json(state_value))
+    state_path.chmod(0o600)
+    return load_transaction(fixture.state_root, state.transaction_id)
+
+
+def _resume_rejecting_any_finish_owner(
+    fixture: FinishFixture,
+    state: BootstrapState,
+) -> list[str]:
+    owner_calls: list[str] = []
+
+    def forbidden_owner(*_args: object) -> PrefixInspection:
+        owner_calls.append("validate-prefix")
+        raise BootstrapError("Finish owner invoked before plan rejection")
+
+    operations = replace(
+        fixture.context.operations,
+        validate_prefix=forbidden_owner,
+        boundary=lambda _name: None,
+    )
+    context = RecoveryContext(
+        state,
+        fixture.state_root,
+        fixture.stdout,
+        finish_context=replace(
+            fixture.context,
+            state=state,
+            operations=operations,
+        ),
+    )
+    context = replace(context, operations=default_recovery_operations(context))
+
+    with pytest.raises(BootstrapError, match="Finish recovery plan is invalid"):
+        resume(context)
+    return owner_calls
+
+
+def test_resume_rejects_licensed_before_path_mismatch_before_any_owner(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    durable = _crashed_finish_for_plan_validation(fixture)
+    transaction = fixture.state_root / durable.transaction_id
+    document = json.loads((transaction / "plan.json").read_text())
+    licensed = json.loads((transaction / "licensed-plan.json").read_text())
+    licensed["before"]["logical_path"] = str(
+        fixture.system32 / "foreign-threading-target"
+    )
+    (transaction / "licensed-plan.json").write_bytes(canonical_json(licensed))
+    (transaction / "licensed-plan.json").chmod(0o600)
+    document["licensed"]["private_action_sha256"] = hashlib.sha256(
+        canonical_json(licensed)
+    ).hexdigest()
+    durable = _republish_validly_digested_finish_plan(
+        fixture, durable, document
+    )
+
+    owner_calls = _resume_rejecting_any_finish_owner(fixture, durable)
+
+    assert owner_calls == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing-state",
+        "extra-state",
+        "replaced-path",
+        "duplicate-path",
+        "wrong-after-hash",
+    ),
+)
+def test_resume_rejects_noncanonical_patch_coverage_before_any_owner(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    durable = _crashed_finish_for_plan_validation(fixture)
+    transaction = fixture.state_root / durable.transaction_id
+    document = json.loads((transaction / "plan.json").read_text())
+    if mutation == "missing-state":
+        document["patch"]["states"].pop()
+        document["patch_after_sha256"].pop()
+    elif mutation == "extra-state":
+        document["patch"]["states"].append("original")
+        document["patch_after_sha256"].append(fixture.patch_hash)
+    elif mutation == "wrong-after-hash":
+        document["patch_after_sha256"][0] = "7" * 64
+    else:
+        replacement = (
+            "prefix/controller"
+            if mutation == "duplicate-path"
+            else "compat/foreign-controller"
+        )
+        rule = next(
+            item
+            for item in document["snapshot_rules"]
+            if item["logical_path"] == "compat/controller"
+        )
+        rule["logical_path"] = replacement
+    durable = _republish_validly_digested_finish_plan(
+        fixture, durable, document
+    )
+
+    owner_calls = _resume_rejecting_any_finish_owner(fixture, durable)
+
+    assert owner_calls == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing", "duplicate", "extra", "threading-hash", "threading-mode"),
+)
+def test_resume_rejects_noncanonical_snapshot_rule_coverage_before_any_owner(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    durable = _crashed_finish_for_plan_validation(fixture)
+    transaction = fixture.state_root / durable.transaction_id
+    document = json.loads((transaction / "plan.json").read_text())
+    marker = next(
+        item
+        for item in document["snapshot_rules"]
+        if item["logical_path"] == "compat/tool-marker"
+    )
+    if mutation == "missing":
+        document["snapshot_rules"].remove(marker)
+    elif mutation == "duplicate":
+        document["snapshot_rules"].append(dict(marker))
+    elif mutation == "extra":
+        document["snapshot_rules"].append(
+            {
+                "logical_path": "user/.local/bin/unmanaged-extra",
+                "policy": "unchanged",
+                "after_sha256": None,
+                "after_mode": None,
+            }
+        )
+    else:
+        threading = next(
+            item
+            for item in document["snapshot_rules"]
+            if item["logical_path"] == "prefix/threading"
+        )
+        if mutation == "threading-hash":
+            threading["after_sha256"] = "7" * 64
+        else:
+            threading["after_mode"] = 0o600
+    durable = _republish_validly_digested_finish_plan(
+        fixture, durable, document
+    )
+
+    owner_calls = _resume_rejecting_any_finish_owner(fixture, durable)
+
+    assert owner_calls == []
+
+
 def test_resume_revalidates_recorded_prefix_identity_before_owner_mutation(
     tmp_path: Path,
 ) -> None:
@@ -1015,7 +1209,10 @@ def test_licensed_resume_uses_journal_owner_to_verify_durable_keep_action(
     )
     fixture.licensed_action = replace(
         fixture.licensed_action,
-        before=private_record,
+        before=replace(
+            private_record,
+            logical_path=fixture.licensed_action.destination_logical,
+        ),
         disposition="keep",
     )
     crashed = False
@@ -1122,18 +1319,20 @@ def test_default_patch_recovery_accepts_exact_adopted_patches_without_backup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = FinishFixture(tmp_path)
-    patched_record = next(
-        item for item in fixture.after.records if item.logical_path == "patch"
-    )
+    patched_records = {
+        item.logical_path: item
+        for item in fixture.after.records
+        if item.logical_path in PATCH_LOGICAL_PATHS
+    }
     fixture.pre_finish = replace(
         fixture.pre_finish,
         records=tuple(
-            patched_record if item.logical_path == "patch" else item
+            patched_records.get(item.logical_path, item)
             for item in fixture.pre_finish.records
         ),
     )
     fixture.patch_plan = PatchInspection(
-        states=("patched",),
+        states=("patched",) * len(PATCH_LOGICAL_PATHS),
         targets=fixture.patch_plan.targets,
         disposition="keep",
     )

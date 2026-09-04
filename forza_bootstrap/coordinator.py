@@ -1694,6 +1694,16 @@ _PATCH_TARGETS = (
         "mountmgr.sys",
     ),
 )
+_PATCH_LOGICAL_PATHS = tuple(target[0] for target in _PATCH_TARGETS)
+_SNAPSHOT_LOGICAL_PATHS = frozenset(
+    {
+        "compat/tool-marker",
+        "prefix/threading",
+        _USER_MANIFEST_LOGICAL,
+        *(target[2] for target in _RUNTIME_TARGETS.values()),
+        *_PATCH_LOGICAL_PATHS,
+    }
+)
 _RUNTIME_PLAN_LINE = re.compile(
     r"PLAN (?P<role>[a-z0-9-]+): "
     r"(?P<root>compat-tool|user)/(?P<relative>[^ ]+) "
@@ -3413,7 +3423,7 @@ def _finish_plan_for_recovery(state: BootstrapState) -> FinishPlan:
         or not isinstance(patch.get("disposition"), str)
         or patch.get("disposition") not in ("apply", "keep")
         or not isinstance(patch.get("states"), list)
-        or not patch["states"]
+        or len(patch["states"]) != len(_PATCH_LOGICAL_PATHS)
         or any(
             not isinstance(value, str) or value not in ("original", "patched")
             for value in patch["states"]
@@ -3421,7 +3431,7 @@ def _finish_plan_for_recovery(state: BootstrapState) -> FinishPlan:
         or (patch["disposition"] == "apply" and set(patch["states"]) != {"original"})
         or (patch["disposition"] == "keep" and set(patch["states"]) != {"patched"})
         or not isinstance(patch_hashes, list)
-        or len(patch_hashes) != len(patch["states"])
+        or len(patch_hashes) != len(_PATCH_LOGICAL_PATHS)
         or any(
             not isinstance(value, str) or _SHA256.fullmatch(value) is None
             for value in patch_hashes
@@ -3460,6 +3470,7 @@ def _finish_plan_for_recovery(state: BootstrapState) -> FinishPlan:
         or not isinstance(licensed.get("disposition"), str)
         or licensed.get("disposition") not in ("install", "replace", "keep")
         or public_licensed["disposition"] != licensed["disposition"]
+        or before.logical_path != licensed["destination_logical"]
     ):
         raise BootstrapError("Finish recovery plan is invalid")
     try:
@@ -3531,7 +3542,23 @@ def _finish_plan_for_recovery(state: BootstrapState) -> FinishPlan:
                 value["after_mode"],
             )
         )
-    if not rules:
+    if (
+        logical_paths != _SNAPSHOT_LOGICAL_PATHS
+        or tuple(rule.logical_path for rule in rules)
+        != tuple(sorted(_SNAPSHOT_LOGICAL_PATHS))
+    ):
+        raise BootstrapError("Finish recovery plan is invalid")
+    rules_by_logical = {rule.logical_path: rule for rule in rules}
+    for logical_path, expected_hash in zip(
+        _PATCH_LOGICAL_PATHS, patch_hashes, strict=True
+    ):
+        if rules_by_logical[logical_path].after_sha256 != expected_hash:
+            raise BootstrapError("Finish recovery plan is invalid")
+    threading_rule = rules_by_logical["prefix/threading"]
+    if (
+        threading_rule.after_sha256 != licensed["source_sha256"]
+        or threading_rule.after_mode != 0o644
+    ):
         raise BootstrapError("Finish recovery plan is invalid")
     return FinishPlan(
         document,

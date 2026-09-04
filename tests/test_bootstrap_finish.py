@@ -121,6 +121,28 @@ def record(
     )
 
 
+PATCH_LOGICAL_PATHS = (
+    "compat/controller",
+    "prefix/controller",
+    "compat/mountmgr",
+    "prefix/mountmgr",
+)
+
+RUNTIME_LOGICAL_TARGETS = (
+    ("user/.local/bin/forza-linux", 0o755),
+    ("user/.local/bin/forza-doctor", 0o755),
+    ("user/.local/libexec/forza-motorsport-linux/patch-known-build", 0o755),
+    ("user/.local/share/forza-motorsport-linux/supported-builds.toml", 0o644),
+    ("compat/xgameruntime-pe64", 0o755),
+    ("compat/xgameruntime-unix64", 0o755),
+    ("user/.local/libexec/xodus-forza/xodus-service", 0o755),
+    ("user/.local/libexec/xodus-forza/xodus-cli", 0o755),
+    ("user/.local/libexec/xodus-forza/xodus-overlay", 0o755),
+    ("user/.config/systemd/user/xodus-forza.service", 0o644),
+    ("user/.local/state/forza-motorsport-linux/install-manifest", 0o600),
+)
+
+
 class FinishFixture:
     def __init__(self, tmp_path: Path, *, doctor_failure: bool = False) -> None:
         self.user = tmp_path / "home"
@@ -176,7 +198,7 @@ class FinishFixture:
             str(threading_path),
             self.licensed_source.stat().st_size,
             self.licensed_hash,
-            record("prefix/threading", None, private=True),
+            record(str(threading_path), None, private=True),
             "install",
             self.licensed_source,
             threading_path,
@@ -186,34 +208,48 @@ class FinishFixture:
         self.guard_hash = sha256(b"guard")
         steam_info = self.steam.stat()
         steam_root_id = f"{steam_info.st_dev}:{steam_info.st_ino}"
+        before_records = [
+            record("compat/tool-marker", b"guard"),
+            record("prefix/threading", None, private=True),
+        ]
+        before_records.extend(
+            record(logical_path, b"patch before")
+            for logical_path in PATCH_LOGICAL_PATHS
+        )
+        before_records.extend(
+            record(logical_path, None)
+            for logical_path, _mode in RUNTIME_LOGICAL_TARGETS
+        )
         self.before = Snapshot(
             1,
             self.state.transaction_id,
             self.manifest.sha256,
             steam_root_id,
-            (
-                record("guard", b"guard"),
-                record("runtime", None),
-                record("patch", b"patch before"),
-                record("prefix/threading", None, private=True),
-            ),
+            tuple(sorted(before_records, key=lambda item: item.logical_path)),
         )
         self.pre_finish = self.before
+        after_records = [
+            record("compat/tool-marker", b"guard"),
+            record(
+                "prefix/threading",
+                self.licensed_source.read_bytes(),
+                private=True,
+            ),
+        ]
+        after_records.extend(
+            record(logical_path, b"patch after")
+            for logical_path in PATCH_LOGICAL_PATHS
+        )
+        after_records.extend(
+            record(logical_path, b"runtime after", mode=mode)
+            for logical_path, mode in RUNTIME_LOGICAL_TARGETS
+        )
         self.after = Snapshot(
             1,
             self.state.transaction_id,
             self.manifest.sha256,
             steam_root_id,
-            (
-                record("guard", b"guard"),
-                record("runtime", b"runtime after", mode=0o755),
-                record("patch", b"patch after"),
-                record(
-                    "prefix/threading",
-                    self.licensed_source.read_bytes(),
-                    private=True,
-                ),
-            ),
+            tuple(sorted(after_records, key=lambda item: item.logical_path)),
         )
         transaction = self.state_root / self.state.transaction_id
         from forza_bootstrap.snapshot import write_snapshot
@@ -222,12 +258,18 @@ class FinishFixture:
         self.runtime_plan = RuntimePlan(
             sha256="9" * 64,
             evidence_sha256="a" * 64,
-            targets=(PlannedTarget("runtime", self.runtime_hash, 0o755),),
+            targets=tuple(
+                PlannedTarget(logical_path, self.runtime_hash, mode)
+                for logical_path, mode in RUNTIME_LOGICAL_TARGETS
+            ),
             disposition="install",
         )
         self.patch_plan = PatchInspection(
-            states=("original",),
-            targets=(PlannedTarget("patch", self.patch_hash, 0o644),),
+            states=("original",) * len(PATCH_LOGICAL_PATHS),
+            targets=tuple(
+                PlannedTarget(logical_path, self.patch_hash, 0o644)
+                for logical_path in PATCH_LOGICAL_PATHS
+            ),
             disposition="apply",
         )
         self.patch_backup = transaction / "recovery/patches/forza-patch-20260904T010203Z.json"
@@ -333,7 +375,7 @@ def test_finish_binds_and_executes_all_children_in_order(tmp_path: Path) -> None
         (fixture.state_root / state.transaction_id / "plan.json").read_text()
     )
     assert document["runtime_plan_sha256"] == fixture.runtime_plan.sha256
-    assert document["patch_after_sha256"] == [fixture.patch_hash]
+    assert document["patch_after_sha256"] == [fixture.patch_hash] * 4
     assert fixture.licensed_hash not in fixture.stdout.getvalue()
     assert str(fixture.licensed_source) not in fixture.stdout.getvalue()
     assert "READY TO ATTEMPT" in fixture.stdout.getvalue()
@@ -684,7 +726,12 @@ def test_finish_reopens_before_snapshot_after_confirmation_before_mutation(
 
     def replace_before(_digest: str) -> str:
         value = json.loads((transaction / "before.json").read_text())
-        value["records"][0]["sha256"] = "f" * 64
+        marker = next(
+            item
+            for item in value["records"]
+            if item["logical_path"] == "compat/tool-marker"
+        )
+        marker["sha256"] = "f" * 64
         (transaction / "before.json").write_text(json.dumps(value), encoding="ascii")
         (transaction / "before.json").chmod(0o600)
         return expected
@@ -785,11 +832,8 @@ def test_finish_child_failure_keeps_installing_state_and_recovery(
 def test_finish_rejects_mixed_patch_state_before_confirmation(tmp_path: Path) -> None:
     fixture = FinishFixture(tmp_path)
     mixed = PatchInspection(
-        states=("original", "patched"),
-        targets=(
-            PlannedTarget("patch", fixture.patch_hash, 0o644),
-            PlannedTarget("guard", fixture.guard_hash, 0o644),
-        ),
+        states=("original", "patched", "original", "original"),
+        targets=fixture.patch_plan.targets,
         disposition="apply",
     )
     fixture.context = replace(
@@ -808,7 +852,9 @@ def test_finish_unexpected_snapshot_or_options_failure_never_claims_ready(
     unexpected.after = replace(
         unexpected.after,
         records=tuple(
-            record("guard", b"changed") if item.logical_path == "guard" else item
+            record("compat/tool-marker", b"changed")
+            if item.logical_path == "compat/tool-marker"
+            else item
             for item in unexpected.after.records
         ),
     )
@@ -830,15 +876,12 @@ def test_finish_exact_existing_state_is_adopted_without_child_or_patch_mutation(
     tmp_path: Path,
 ) -> None:
     fixture = FinishFixture(tmp_path)
-    threading = record(
-        "prefix/threading", fixture.licensed_source.read_bytes(), private=True
+    threading = next(
+        item
+        for item in fixture.after.records
+        if item.logical_path == "prefix/threading"
     )
-    runtime = record("runtime", b"runtime after", mode=0o755)
-    patch = record("patch", b"patch after")
-    fixture.before = replace(
-        fixture.before,
-        records=(record("guard", b"guard"), runtime, patch, threading),
-    )
+    fixture.before = fixture.after
     fixture.pre_finish = fixture.before
     fixture.after = fixture.before
     transaction = fixture.state_root / fixture.state.transaction_id
@@ -846,11 +889,13 @@ def test_finish_exact_existing_state_is_adopted_without_child_or_patch_mutation(
 
     write_snapshot(transaction / "before.json", fixture.before)
     fixture.licensed_action = replace(
-        fixture.licensed_action, before=threading, disposition="keep"
+        fixture.licensed_action,
+        before=replace(threading, logical_path=fixture.licensed_action.destination_logical),
+        disposition="keep",
     )
     fixture.runtime_plan = replace(fixture.runtime_plan, disposition="keep")
     fixture.patch_plan = PatchInspection(
-        states=("patched",),
+        states=("patched",) * len(PATCH_LOGICAL_PATHS),
         targets=fixture.patch_plan.targets,
         disposition="keep",
     )
