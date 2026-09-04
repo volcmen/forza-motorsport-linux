@@ -665,7 +665,15 @@ def publish_builder_image(
     except json.JSONDecodeError:
         raise BootstrapError("published builder manifest is invalid") from None
     config = payload.get("config") if isinstance(payload, dict) else None
-    if not isinstance(config, dict) or config.get("digest") != image:
+    # Classic Docker identifies an image by its configuration digest;
+    # containerd-backed Docker can instead return the OCI manifest digest.
+    # In either case the registry identity must equal the captured local ID.
+    if (
+        not isinstance(config, dict)
+        or not isinstance(config.get("digest"), str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", config["digest"]) is None
+        or (config["digest"] != image and manifest.rsplit("@", 1)[1] != image)
+    ):
         raise BootstrapError("published builder digest has the wrong image identity")
     return manifest
 

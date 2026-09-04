@@ -969,6 +969,38 @@ def test_builder_driver_dry_run_prints_pinned_build_command() -> None:
     assert "--platform=linux/amd64" in result.stdout
 
 
+def test_publication_accepts_containerd_manifest_identity() -> None:
+    image = "sha256:" + "b" * 64
+    base = BuilderPublishRunner(image, image)
+
+    def runner(argv: tuple[str, ...], **kwargs: object) -> object:
+        if argv[:3] == ("docker", "manifest", "inspect"):
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"config": {"digest": "sha256:" + "c" * 64}}), ""
+            )
+        return base(argv, **kwargs)
+
+    assert publish_builder_image(
+        image, "registry.example.invalid/forza:release", runner
+    ) == "registry.example.invalid/forza@" + image
+
+
+@pytest.mark.parametrize("config_digest", ["sha256:" + "c" * 64, None, "invalid"])
+def test_publication_rejects_unrelated_or_malformed_identity(config_digest: str | None) -> None:
+    image = "sha256:" + "b" * 64
+    base = BuilderPublishRunner(image, "sha256:" + "d" * 64)
+
+    def runner(argv: tuple[str, ...], **kwargs: object) -> object:
+        if argv[:3] == ("docker", "manifest", "inspect"):
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"config": {"digest": config_digest}}), ""
+            )
+        return base(argv, **kwargs)
+
+    with pytest.raises(BootstrapError, match="wrong image identity"):
+        publish_builder_image(image, "registry.example.invalid/forza:release", runner)
+
+
 def test_builder_cli_publishes_with_its_checked_runner_contract(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
