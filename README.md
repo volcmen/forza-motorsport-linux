@@ -20,7 +20,7 @@ to follow—and possible to undo if something goes wrong.
 > still need testing in the game. This is not ordinary upstream Proton support.
 > If you already have a working setup, there's no need to replace it yet.
 
-Looking to try it? Start with the [bootstrap guide](docs/bootstrap.md).
+Looking to try it? Start with the [bootstrap guide](https://github.com/volcmen/forza-motorsport-linux/blob/feature/hybrid-bootstrap/docs/bootstrap.md).
 Already have the required local builds? Use the [manual setup](#guided-setup).
 For problems, see [troubleshooting](docs/troubleshooting.md).
 
@@ -49,7 +49,7 @@ printed launch options into Steam. Setup never launches the game for you.
 Use `./setup bootstrap --rollback` to undo a bootstrap installation;
 `./setup rollback` is for the older runtime-only setup.
 
-See the [bootstrap prerelease guide](docs/bootstrap.md) for the manual
+See the [bootstrap prerelease guide](https://github.com/volcmen/forza-motorsport-linux/blob/feature/hybrid-bootstrap/docs/bootstrap.md) for the manual
 checkpoints, acquisition choices, privacy boundary, and recovery commands.
 
 ## Status and tested matrix
@@ -124,7 +124,7 @@ The service details are in [Architecture](docs/architecture.md).
 ## Before you start
 
 The bootstrap targets **Arch Linux x86_64 with native Steam**. Follow its
-[guide](docs/bootstrap.md) for downloads and prerequisites. The list below is
+[guide](https://github.com/volcmen/forza-motorsport-linux/blob/feature/hybrid-bootstrap/docs/bootstrap.md) for downloads and prerequisites. The list below is
 for the **v0.1 manual workflow**, where you provide the local builds yourself.
 
 You need all of the following:
