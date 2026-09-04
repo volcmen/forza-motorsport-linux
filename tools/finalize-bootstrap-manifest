@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from forza_bootstrap.manifest import load_bootstrap_manifest
+from forza_bootstrap.model import BootstrapError
+from forza_bootstrap.release import (
+    atomic_write_manifest,
+    inspect_release_bundle,
+    render_bootstrap_manifest,
+    require_clean_repository,
+)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Finalize the immutable v0.2.0 bootstrap trust manifest."
+    )
+    parser.add_argument("--bundle", required=True, type=Path)
+    parser.add_argument("--matching-bundle", required=True, type=Path)
+    parser.add_argument("--builder-image", required=True)
+    parser.add_argument("--output", required=True, type=Path)
+    arguments = parser.parse_args(argv)
+    try:
+        require_clean_repository(ROOT)
+        bundle = inspect_release_bundle(
+            arguments.bundle, arguments.matching_bundle, arguments.builder_image
+        )
+        output = arguments.output.resolve(strict=False)
+        atomic_write_manifest(
+            output, render_bootstrap_manifest(bundle, arguments.builder_image)
+        )
+        manifest = load_bootstrap_manifest(output)
+        if manifest.bundle.sha256 != bundle.sha256:
+            raise BootstrapError("published manifest failed its self-check")
+        print(
+            f"wrote {output} for bundle sha256 {bundle.sha256} "
+            f"and internal manifest sha256 {bundle.manifest_sha256}"
+        )
+        return 0
+    except BootstrapError as error:
+        print(f"manifest finalization failed: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

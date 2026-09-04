@@ -1,0 +1,851 @@
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Finite, descriptor-relative SHA-256 evidence for managed bootstrap paths."""
+
+from __future__ import annotations
+
+import errno
+import hashlib
+import os
+import re
+import stat
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal, TextIO
+
+from .model import ArtifactSpec, BootstrapError, canonical_json
+from .safeio import atomic_write_private_json, open_owned_root, read_private_json
+
+_SNAPSHOT_VERSION = 1
+_READ_SIZE = 1024 * 1024
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_TRANSACTION_ID = re.compile(r"[0-9a-f]{24}\Z")
+_ROOT_NAME = re.compile(r"[a-z][a-z0-9_-]*\Z")
+_ROOT_ID = re.compile(r"(?:0|[1-9][0-9]*):(?:0|[1-9][0-9]*)\Z")
+_NONREGULAR_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR, errno.ENXIO, errno.EISDIR})
+_PRIVATE_CAPTURE_ERROR = "private snapshot capture failed"
+_PRIVATE_COMPARISON_ERROR = "private snapshot comparison failed"
+_PRIVATE_INPUT_ERROR = "private snapshot input is invalid"
+_PRIVATE_OUTPUT_ERROR = "private snapshot requires explicit owner-only output"
+_FILESYSTEM_ERROR = "snapshot filesystem access failed"
+_SNAPSHOT_READ_ERROR = "snapshot input could not be read"
+_SNAPSHOT_WRITE_ERROR = "snapshot output could not be written"
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_CHANGED_WHILE_HASHING = "snapshot target changed while hashing"
+
+
+@dataclass(frozen=True)
+class FileRecord:
+    logical_path: str
+    state: Literal["absent", "regular"]
+    mode: int | None
+    size: int | None
+    sha256: str | None
+    private: bool = False
+
+
+@dataclass(frozen=True)
+class ChangeRule:
+    logical_path: str
+    policy: Literal["expected", "unchanged"]
+    after_sha256: str | None
+    after_mode: int | None
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    version: int
+    transaction_id: str
+    manifest_sha256: str
+    steam_root_id: str
+    records: tuple[FileRecord, ...]
+
+
+@dataclass(frozen=True)
+class ComparedRecord:
+    logical_path: str
+    before: FileRecord
+    after: FileRecord
+    policy: Literal["expected", "unchanged"]
+
+
+@dataclass(frozen=True)
+class Comparison:
+    expected_changes: tuple[ComparedRecord, ...]
+    required_unchanged: tuple[ComparedRecord, ...]
+    unexpected_changes: tuple[ComparedRecord, ...]
+
+    @property
+    def ok(self) -> bool:
+        return not self.unexpected_changes
+
+
+@dataclass(frozen=True)
+class SnapshotTarget:
+    logical_path: str
+    root_name: str
+    relative_path: str
+    private: bool = False
+
+
+@dataclass(frozen=True)
+class SnapshotScope:
+    version: int
+    transaction_id: str
+    manifest_sha256: str
+    targets: tuple[SnapshotTarget, ...]
+
+
+@dataclass(frozen=True)
+class _BoundRoot:
+    fd: int
+    parts: tuple[str, ...]
+    identities: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
+class _ResolvedTarget:
+    fd: int | None
+    directory_identities: tuple[tuple[int, int], ...]
+    missing_index: int | None
+
+
+_FileIdentity = tuple[int, int, int, int, int, int, int]
+
+
+def _file_identity(info: os.stat_result) -> _FileIdentity:
+    return (
+        stat.S_IFMT(info.st_mode),
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        stat.S_IMODE(info.st_mode),
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _unsafe_character(value: str) -> bool:
+    codepoint = ord(value)
+    return (
+        codepoint <= 0x1F
+        or 0x7F <= codepoint <= 0x9F
+        or 0xD800 <= codepoint <= 0xDFFF
+    )
+
+
+def _logical_path(value: str, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(_unsafe_character(character) for character in value)
+    ):
+        raise BootstrapError(f"{label} is invalid")
+    if value.startswith("/") or any(part in {"", ".", ".."} for part in value.split("/")):
+        raise BootstrapError(f"{label} is invalid")
+    try:
+        os.fsencode(value)
+    except (TypeError, ValueError):
+        raise BootstrapError(f"{label} is invalid") from None
+    return value
+
+
+def _sha256(value: str, label: str) -> str:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise BootstrapError(f"{label} must be a lowercase SHA-256")
+    return value
+
+
+def _validate_identity(snapshot: Snapshot) -> None:
+    if not isinstance(snapshot, Snapshot):
+        raise BootstrapError("snapshot schema is invalid")
+    if type(snapshot.version) is not int or snapshot.version != _SNAPSHOT_VERSION:
+        raise BootstrapError("snapshot version is invalid")
+    if (
+        not isinstance(snapshot.transaction_id, str)
+        or _TRANSACTION_ID.fullmatch(snapshot.transaction_id) is None
+    ):
+        raise BootstrapError("snapshot transaction_id is invalid")
+    _sha256(snapshot.manifest_sha256, "snapshot manifest_sha256")
+    if (
+        not isinstance(snapshot.steam_root_id, str)
+        or _ROOT_ID.fullmatch(snapshot.steam_root_id) is None
+    ):
+        raise BootstrapError("snapshot steam_root_id is invalid")
+
+
+def _validate_record(item: FileRecord) -> None:
+    if not isinstance(item, FileRecord):
+        raise BootstrapError("snapshot record schema is invalid")
+    _logical_path(item.logical_path, "snapshot logical path")
+    if type(item.private) is not bool:
+        raise BootstrapError("snapshot private flag is invalid")
+    if item.state == "absent":
+        if (item.mode, item.size, item.sha256) != (None, None, None):
+            raise BootstrapError("absent snapshot record has file metadata")
+        return
+    if item.state != "regular":
+        raise BootstrapError("snapshot record state is invalid")
+    if type(item.mode) is not int or not 0 <= item.mode <= 0o7777:
+        raise BootstrapError("snapshot record mode is invalid")
+    if type(item.size) is not int or item.size < 0:
+        raise BootstrapError("snapshot record size is invalid")
+    _sha256(item.sha256, "snapshot record sha256")  # type: ignore[arg-type]
+
+
+def _indexed_records(snapshot: Snapshot) -> dict[str, FileRecord]:
+    _validate_identity(snapshot)
+    if type(snapshot.records) is not tuple:
+        raise BootstrapError("snapshot records are invalid")
+    indexed: dict[str, FileRecord] = {}
+    for item in snapshot.records:
+        _validate_record(item)
+        if item.logical_path in indexed:
+            if item.private or indexed[item.logical_path].private:
+                raise BootstrapError(_PRIVATE_CAPTURE_ERROR)
+            raise BootstrapError(f"duplicate snapshot logical path: {item.logical_path}")
+        indexed[item.logical_path] = item
+    return indexed
+
+
+def build_snapshot_scope(
+    transaction_id: str,
+    manifest_sha256: str,
+    artifacts_by_root: Mapping[str, Sequence[ArtifactSpec]],
+) -> SnapshotScope:
+    """Bind an explicit set of artifact paths to named logical roots."""
+    if not isinstance(transaction_id, str) or _TRANSACTION_ID.fullmatch(transaction_id) is None:
+        raise BootstrapError("snapshot transaction_id is invalid")
+    _sha256(manifest_sha256, "snapshot manifest_sha256")
+    if not isinstance(artifacts_by_root, Mapping):
+        raise BootstrapError("snapshot artifact scope is invalid")
+    targets: list[SnapshotTarget] = []
+    seen: set[str] = set()
+    for root_name, artifacts in artifacts_by_root.items():
+        if not isinstance(root_name, str) or _ROOT_NAME.fullmatch(root_name) is None:
+            raise BootstrapError("snapshot root name is invalid")
+        if not isinstance(artifacts, Sequence) or isinstance(
+            artifacts, (str, bytes, bytearray)
+        ):
+            raise BootstrapError("snapshot artifact collection is invalid")
+        for artifact in artifacts:
+            if not isinstance(artifact, ArtifactSpec) or type(artifact.private) is not bool:
+                raise BootstrapError("snapshot artifact is invalid")
+            logical_path = _logical_path(artifact.logical_name, "snapshot logical path")
+            relative_path = _logical_path(artifact.relative_path, "snapshot relative path")
+            if logical_path in seen:
+                if artifact.private or any(
+                    target.logical_path == logical_path and target.private
+                    for target in targets
+                ):
+                    raise BootstrapError(_PRIVATE_CAPTURE_ERROR)
+                raise BootstrapError(f"duplicate snapshot logical path: {logical_path}")
+            seen.add(logical_path)
+            targets.append(
+                SnapshotTarget(logical_path, root_name, relative_path, artifact.private)
+            )
+    return SnapshotScope(
+        _SNAPSHOT_VERSION,
+        transaction_id,
+        manifest_sha256,
+        tuple(sorted(targets, key=lambda item: item.logical_path)),
+    )
+
+
+def _directory_identity(fd: int) -> tuple[int, int]:
+    info = os.fstat(fd)
+    return info.st_dev, info.st_ino
+
+
+def _absolute_root_parts(path: str, name: str) -> tuple[str, ...]:
+    if not path.startswith("/"):
+        raise BootstrapError(f"snapshot root must be absolute: {name}")
+    if path == "/":
+        return ()
+    parts = tuple(path.split("/")[1:])
+    if any(
+        part in {"", ".", ".."}
+        or any(_unsafe_character(character) for character in part)
+        for part in parts
+    ):
+        raise BootstrapError("snapshot root is invalid")
+    try:
+        os.fsencode(path)
+    except (TypeError, ValueError):
+        raise BootstrapError("snapshot root is invalid") from None
+    return parts
+
+
+def _open_absolute_directory(
+    parts: tuple[str, ...], name: str
+) -> tuple[int, tuple[tuple[int, int], ...]]:
+    fd: int | None = None
+    try:
+        fd = os.open("/", _DIRECTORY_FLAGS)
+        identities = [_directory_identity(fd)]
+        for part in parts:
+            try:
+                next_fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=fd)
+            except OSError as error:
+                if error.errno in _NONREGULAR_ERRNOS:
+                    raise BootstrapError(
+                        f"snapshot root is not a regular directory: {name}"
+                    ) from error
+                raise
+            try:
+                identity = _directory_identity(next_fd)
+            except Exception:
+                os.close(next_fd)
+                raise
+            os.close(fd)
+            fd = next_fd
+            identities.append(identity)
+        result = fd
+        fd = None
+        return result, tuple(identities)
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _open_root(path: str, name: str) -> _BoundRoot:
+    parts = _absolute_root_parts(path, name)
+    fd, identities = _open_absolute_directory(parts, name)
+    return _BoundRoot(fd, parts, identities)
+
+
+def _reopen_root(root: _BoundRoot, name: str) -> int:
+    fd, identities = _open_absolute_directory(root.parts, name)
+    if identities != root.identities:
+        os.close(fd)
+        raise BootstrapError(_CHANGED_WHILE_HASHING)
+    return fd
+
+
+def _resolve_target(root_fd: int, target: SnapshotTarget) -> _ResolvedTarget:
+    parts = tuple(target.relative_path.split("/"))
+    parent_fd = os.dup(root_fd)
+    target_fd: int | None = None
+    try:
+        identities = [_directory_identity(parent_fd)]
+        for index, part in enumerate(parts[:-1]):
+            try:
+                next_fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+            except FileNotFoundError:
+                return _ResolvedTarget(None, tuple(identities), index)
+            except OSError as error:
+                if error.errno in _NONREGULAR_ERRNOS:
+                    raise BootstrapError(
+                        f"snapshot target is not regular: {target.logical_path}"
+                    ) from error
+                raise
+            try:
+                identity = _directory_identity(next_fd)
+            except Exception:
+                os.close(next_fd)
+                raise
+            os.close(parent_fd)
+            parent_fd = next_fd
+            identities.append(identity)
+        try:
+            target_fd = os.open(
+                parts[-1],
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            return _ResolvedTarget(None, tuple(identities), len(parts) - 1)
+        except OSError as error:
+            if error.errno in _NONREGULAR_ERRNOS:
+                raise BootstrapError(
+                    f"snapshot target is not regular: {target.logical_path}"
+                ) from error
+            raise
+        info = os.fstat(target_fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise BootstrapError(f"snapshot target is not regular: {target.logical_path}")
+        result = _ResolvedTarget(target_fd, tuple(identities), None)
+        target_fd = None
+        return result
+    finally:
+        if target_fd is not None:
+            os.close(target_fd)
+        os.close(parent_fd)
+
+
+def _verify_resolution(
+    root: _BoundRoot,
+    target: SnapshotTarget,
+    original: _ResolvedTarget,
+    file_identity: _FileIdentity | None,
+) -> None:
+    verification_root_fd: int | None = None
+    verification: _ResolvedTarget | None = None
+    try:
+        verification_root_fd = _reopen_root(root, target.root_name)
+        verification = _resolve_target(verification_root_fd, target)
+        if (
+            verification.directory_identities != original.directory_identities
+            or verification.missing_index != original.missing_index
+            or (verification.fd is None) != (original.fd is None)
+        ):
+            raise BootstrapError(_CHANGED_WHILE_HASHING)
+        if file_identity is not None:
+            if verification.fd is None:
+                raise BootstrapError(_CHANGED_WHILE_HASHING)
+            info = os.fstat(verification.fd)
+            if not stat.S_ISREG(info.st_mode) or _file_identity(info) != file_identity:
+                raise BootstrapError(_CHANGED_WHILE_HASHING)
+    finally:
+        if verification is not None and verification.fd is not None:
+            os.close(verification.fd)
+        if verification_root_fd is not None:
+            os.close(verification_root_fd)
+
+
+def _capture_target(root: _BoundRoot, target: SnapshotTarget) -> FileRecord:
+    resolved = _resolve_target(root.fd, target)
+    if resolved.fd is None:
+        _verify_resolution(root, target, resolved, None)
+        return FileRecord(target.logical_path, "absent", None, None, None, target.private)
+    fd = resolved.fd
+    try:
+        before = os.fstat(fd)
+        digest = hashlib.sha256()
+        while block := os.read(fd, _READ_SIZE):
+            digest.update(block)
+        after = os.fstat(fd)
+        before_identity = _file_identity(before)
+        after_identity = _file_identity(after)
+        if not stat.S_ISREG(after.st_mode) or before_identity != after_identity:
+            raise BootstrapError(_CHANGED_WHILE_HASHING)
+        _verify_resolution(root, target, resolved, after_identity)
+        return FileRecord(
+            target.logical_path,
+            "regular",
+            stat.S_IMODE(after.st_mode),
+            after.st_size,
+            digest.hexdigest(),
+            target.private,
+        )
+    finally:
+        os.close(fd)
+
+
+def _validated_targets(scope: SnapshotScope) -> tuple[SnapshotTarget, ...]:
+    if not isinstance(scope, SnapshotScope):
+        raise BootstrapError("snapshot scope is invalid")
+    if type(scope.version) is not int or scope.version != _SNAPSHOT_VERSION:
+        raise BootstrapError("snapshot scope version is invalid")
+    if (
+        not isinstance(scope.transaction_id, str)
+        or _TRANSACTION_ID.fullmatch(scope.transaction_id) is None
+    ):
+        raise BootstrapError("snapshot transaction_id is invalid")
+    _sha256(scope.manifest_sha256, "snapshot manifest_sha256")
+    if type(scope.targets) is not tuple:
+        raise BootstrapError("snapshot targets are invalid")
+    seen: set[str] = set()
+    targets: list[SnapshotTarget] = []
+    for target in scope.targets:
+        if not isinstance(target, SnapshotTarget):
+            raise BootstrapError("snapshot target is invalid")
+        logical_path = _logical_path(target.logical_path, "snapshot logical path")
+        _logical_path(target.relative_path, "snapshot relative path")
+        if (
+            not isinstance(target.root_name, str)
+            or _ROOT_NAME.fullmatch(target.root_name) is None
+        ):
+            raise BootstrapError("snapshot root name is invalid")
+        if type(target.private) is not bool:
+            raise BootstrapError("snapshot private flag is invalid")
+        if logical_path in seen:
+            raise BootstrapError(f"duplicate snapshot logical path: {logical_path}")
+        seen.add(logical_path)
+        targets.append(target)
+    return tuple(sorted(targets, key=lambda item: item.logical_path))
+
+
+def capture_snapshot(
+    scope: SnapshotScope, roots: Mapping[str, str | os.PathLike[str]]
+) -> Snapshot:
+    """Capture exactly the files named by *scope*, without walking a tree."""
+    private = (
+        isinstance(scope, SnapshotScope)
+        and type(scope.targets) is tuple
+        and any(
+            isinstance(target, SnapshotTarget) and target.private is True
+            for target in scope.targets
+        )
+    )
+    descriptors: dict[str, _BoundRoot] = {}
+    try:
+        targets = _validated_targets(scope)
+        if not isinstance(roots, Mapping):
+            raise BootstrapError("snapshot roots are invalid")
+        if "steam" not in roots:
+            raise BootstrapError("snapshot steam root is missing")
+        required_roots = {target.root_name for target in targets} | {"steam"}
+        missing = required_roots - set(roots)
+        if missing:
+            raise BootstrapError(f"snapshot root is missing: {min(missing)}")
+        for name in sorted(required_roots):
+            try:
+                root_value = os.fspath(roots[name])
+                if not isinstance(root_value, str):
+                    raise TypeError("invalid snapshot root")
+            except (TypeError, ValueError):
+                raise BootstrapError("snapshot root is invalid") from None
+            descriptors[name] = _open_root(root_value, name)
+        root_info = os.fstat(descriptors["steam"].fd)
+        root_id = f"{root_info.st_dev}:{root_info.st_ino}"
+        records = tuple(
+            _capture_target(descriptors[target.root_name], target)
+            for target in targets
+        )
+    except (BootstrapError, OSError, ValueError) as error:
+        if private:
+            raise BootstrapError(_PRIVATE_CAPTURE_ERROR) from None
+        if isinstance(error, OSError):
+            raise BootstrapError(_FILESYSTEM_ERROR) from None
+        raise
+    finally:
+        for root in descriptors.values():
+            os.close(root.fd)
+    return Snapshot(
+        scope.version,
+        scope.transaction_id,
+        scope.manifest_sha256,
+        root_id,
+        records,
+    )
+
+
+def _record_value(item: FileRecord) -> dict[str, object]:
+    return {
+        "logical_path": item.logical_path,
+        "state": item.state,
+        "mode": item.mode,
+        "size": item.size,
+        "sha256": item.sha256,
+        "private": item.private,
+    }
+
+
+def _snapshot_value(snapshot: Snapshot) -> dict[str, object]:
+    records = _indexed_records(snapshot)
+    return {
+        "version": snapshot.version,
+        "transaction_id": snapshot.transaction_id,
+        "manifest_sha256": snapshot.manifest_sha256,
+        "steam_root_id": snapshot.steam_root_id,
+        "records": [_record_value(records[path]) for path in sorted(records)],
+    }
+
+
+def canonical_snapshot_bytes(snapshot: Snapshot) -> bytes:
+    """Serialize a validated snapshot in stable logical-path order."""
+    private, _ = _snapshot_privacy(snapshot)
+    if private:
+        raise BootstrapError(_PRIVATE_OUTPUT_ERROR)
+    return canonical_json(_snapshot_value(snapshot))
+
+
+def public_snapshot_bytes(snapshot: Snapshot) -> bytes:
+    """Serialize canonical stdout evidence while redacting private paths and digests."""
+    private, _ = _snapshot_privacy(snapshot)
+    try:
+        value = _snapshot_value(snapshot)
+    except BootstrapError:
+        if private:
+            raise BootstrapError(_PRIVATE_OUTPUT_ERROR) from None
+        raise
+    records = value["records"]
+    assert isinstance(records, list)
+    for record in records:
+        assert isinstance(record, dict)
+        if record["private"] is True:
+            record["logical_path"] = "[private local path]"
+            if record["sha256"] is not None:
+                record["sha256"] = "[private local digest verified]"
+    return canonical_json(value)
+
+
+def _native_snapshot_is_private(value: object) -> bool:
+    """Pre-scan only native JSON containers, without trusting their schema."""
+    if type(value) is not dict:
+        return False
+    records = value.get("records")
+    if type(records) is not list:
+        return False
+    return any(
+        type(raw) is dict and raw.get("private") is True
+        for raw in records
+    )
+
+
+def _snapshot_from_value(value: object) -> Snapshot:
+    private = _native_snapshot_is_private(value)
+    try:
+        keys = {"version", "transaction_id", "manifest_sha256", "steam_root_id", "records"}
+        if (
+            not isinstance(value, dict)
+            or set(value) != keys
+            or not isinstance(value["records"], list)
+        ):
+            raise BootstrapError("snapshot schema is invalid")
+        records: list[FileRecord] = []
+        record_keys = {"logical_path", "state", "mode", "size", "sha256", "private"}
+        for raw in value["records"]:
+            if not isinstance(raw, dict) or set(raw) != record_keys:
+                raise BootstrapError("snapshot record schema is invalid")
+            records.append(
+                FileRecord(
+                    raw["logical_path"],
+                    raw["state"],
+                    raw["mode"],
+                    raw["size"],
+                    raw["sha256"],
+                    raw["private"],
+                )
+            )
+        snapshot = Snapshot(
+            value["version"],
+            value["transaction_id"],
+            value["manifest_sha256"],
+            value["steam_root_id"],
+            tuple(records),
+        )
+        _indexed_records(snapshot)
+        return snapshot
+    except BootstrapError:
+        if private:
+            raise BootstrapError(_PRIVATE_INPUT_ERROR) from None
+        raise
+
+
+def write_snapshot(path: str | os.PathLike[str], snapshot: Snapshot) -> None:
+    """Atomically write one validated snapshot to an absolute private path."""
+    private, _ = _snapshot_privacy(snapshot)
+    try:
+        value = _snapshot_value(snapshot)
+    except BootstrapError:
+        if private:
+            raise BootstrapError(_PRIVATE_OUTPUT_ERROR) from None
+        raise
+    try:
+        output = Path(path)
+    except (TypeError, ValueError):
+        if private:
+            raise BootstrapError(_PRIVATE_OUTPUT_ERROR) from None
+        raise BootstrapError(_SNAPSHOT_WRITE_ERROR) from None
+    if not output.is_absolute():
+        if private:
+            raise BootstrapError(_PRIVATE_OUTPUT_ERROR) from None
+        raise BootstrapError("snapshot output path must be absolute")
+    parent_fd: int | None = None
+    try:
+        try:
+            parent_fd = open_owned_root(output.parent)
+            atomic_write_private_json(parent_fd, output.name, value)
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
+    except (BootstrapError, OSError, ValueError):
+        if private:
+            raise BootstrapError(_PRIVATE_OUTPUT_ERROR) from None
+        raise BootstrapError(_SNAPSHOT_WRITE_ERROR) from None
+
+
+def read_snapshot(path: str | os.PathLike[str]) -> Snapshot:
+    """Read one absolute owner-only snapshot without following links."""
+    try:
+        source = Path(path)
+    except (TypeError, ValueError):
+        raise BootstrapError(_SNAPSHOT_READ_ERROR) from None
+    if not source.is_absolute():
+        raise BootstrapError("snapshot input path must be absolute")
+    parent_fd: int | None = None
+    try:
+        try:
+            parent_fd = open_owned_root(source.parent)
+            value = read_private_json(parent_fd, source.name)
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
+    except (BootstrapError, OSError, ValueError):
+        raise BootstrapError(_SNAPSHOT_READ_ERROR) from None
+    return _snapshot_from_value(value)
+
+
+def output_snapshot(snapshot: Snapshot, path: str | os.PathLike[str] | None, stream: TextIO) -> None:
+    """Print a snapshot by default, writing only when explicitly requested."""
+    if path is None:
+        stream.write(public_snapshot_bytes(snapshot).decode("ascii") + "\n")
+        return
+    write_snapshot(path, snapshot)
+
+
+def _validate_rule(rule: ChangeRule) -> None:
+    if not isinstance(rule, ChangeRule):
+        raise BootstrapError("comparison rule is invalid")
+    _logical_path(rule.logical_path, "comparison rule logical path")
+    if not isinstance(rule.policy, str) or rule.policy not in {"expected", "unchanged"}:
+        raise BootstrapError("comparison rule policy is invalid")
+    if (rule.after_sha256 is None) != (rule.after_mode is None):
+        raise BootstrapError("comparison rule after state is invalid")
+    if rule.after_sha256 is not None:
+        _sha256(rule.after_sha256, "comparison rule after_sha256")
+        if type(rule.after_mode) is not int or not 0 <= rule.after_mode <= 0o7777:
+            raise BootstrapError("comparison rule after_mode is invalid")
+
+
+def _matches_rule(item: FileRecord, rule: ChangeRule) -> bool:
+    if rule.after_sha256 is None:
+        return item.state == "absent"
+    return (
+        item.state == "regular"
+        and item.sha256 == rule.after_sha256
+        and item.mode == rule.after_mode
+    )
+
+
+def _snapshot_privacy(snapshot: object) -> tuple[bool, set[str]]:
+    """Inspect only concrete record containers for declared private records."""
+    if not isinstance(snapshot, Snapshot) or type(snapshot.records) not in {list, tuple}:
+        return False, set()
+    private = False
+    paths: set[str] = set()
+    for item in snapshot.records:
+        if isinstance(item, FileRecord) and item.private is True:
+            private = True
+            if isinstance(item.logical_path, str):
+                paths.add(item.logical_path)
+    return private, paths
+
+
+def compare_snapshots(
+    before: Snapshot, after: Snapshot, rules: Sequence[ChangeRule]
+) -> Comparison:
+    """Classify a complete, identity-bound snapshot pair deterministically."""
+    before_private, before_private_paths = _snapshot_privacy(before)
+    after_private, after_private_paths = _snapshot_privacy(after)
+    private_paths = before_private_paths | after_private_paths
+    private = before_private or after_private or bool(private_paths)
+    try:
+        before_records = _indexed_records(before)
+        after_records = _indexed_records(after)
+        for field in ("transaction_id", "manifest_sha256", "steam_root_id"):
+            if getattr(before, field) != getattr(after, field):
+                raise BootstrapError(f"snapshot {field} does not match")
+        if before.version != after.version:
+            raise BootstrapError("snapshot version does not match")
+        if set(before_records) != set(after_records):
+            raise BootstrapError("snapshot record coverage does not match")
+        if not isinstance(rules, Sequence) or isinstance(rules, (str, bytes, bytearray)):
+            raise BootstrapError("comparison rules are invalid")
+        indexed_rules: dict[str, ChangeRule] = {}
+        for rule in rules:
+            _validate_rule(rule)
+            if rule.logical_path in indexed_rules:
+                raise BootstrapError(f"duplicate comparison rule: {rule.logical_path}")
+            indexed_rules[rule.logical_path] = rule
+        if set(indexed_rules) != set(before_records):
+            raise BootstrapError("comparison rule coverage does not match snapshot records")
+
+        expected: list[ComparedRecord] = []
+        unchanged: list[ComparedRecord] = []
+        unexpected: list[ComparedRecord] = []
+        for logical_path in sorted(before_records):
+            before_item = before_records[logical_path]
+            after_item = after_records[logical_path]
+            rule = indexed_rules[logical_path]
+            if before_item.private != after_item.private:
+                raise BootstrapError("snapshot privacy metadata does not match")
+            compared = ComparedRecord(logical_path, before_item, after_item, rule.policy)
+            exact_after = _matches_rule(after_item, rule)
+            if rule.policy == "expected" and before_item != after_item and exact_after:
+                expected.append(compared)
+            elif rule.policy == "unchanged" and before_item == after_item and exact_after:
+                unchanged.append(compared)
+            else:
+                unexpected.append(compared)
+        return Comparison(tuple(expected), tuple(unchanged), tuple(unexpected))
+    except BootstrapError:
+        if private:
+            raise BootstrapError(_PRIVATE_COMPARISON_ERROR) from None
+        raise
+
+
+def _comparison_report_is_private(comparison: object) -> bool:
+    if not isinstance(comparison, Comparison):
+        return False
+    for records in (
+        comparison.expected_changes,
+        comparison.required_unchanged,
+        comparison.unexpected_changes,
+    ):
+        if type(records) not in {list, tuple}:
+            continue
+        for item in records:
+            if isinstance(item, ComparedRecord) and (
+                isinstance(item.before, FileRecord)
+                and item.before.private is True
+                or isinstance(item.after, FileRecord)
+                and item.after.private is True
+            ):
+                return True
+    return False
+
+
+def _validate_compared_record(item: ComparedRecord) -> None:
+    if not isinstance(item, ComparedRecord):
+        raise BootstrapError("comparison report record is invalid")
+    logical_path = _logical_path(item.logical_path, "comparison report logical path")
+    _validate_record(item.before)
+    _validate_record(item.after)
+    if (
+        item.before.logical_path != logical_path
+        or item.after.logical_path != logical_path
+    ):
+        raise BootstrapError("comparison report record path does not match")
+    if item.before.private != item.after.private:
+        raise BootstrapError("comparison report privacy metadata does not match")
+    if not isinstance(item.policy, str) or item.policy not in {"expected", "unchanged"}:
+        raise BootstrapError("comparison report policy is invalid")
+
+
+def _report_identifier(value: str) -> str:
+    return canonical_json(value).decode("ascii")[1:-1]
+
+
+def render_comparison(comparison: Comparison) -> str:
+    """Render a digest-free human report, fully redacting private records."""
+    private = _comparison_report_is_private(comparison)
+    try:
+        if not isinstance(comparison, Comparison):
+            raise BootstrapError("comparison report is invalid")
+        categories = (
+            ("expected changes", comparison.expected_changes),
+            ("required unchanged", comparison.required_unchanged),
+            ("unexpected changes", comparison.unexpected_changes),
+        )
+        lines: list[str] = []
+        for label, records in categories:
+            if type(records) is not tuple:
+                raise BootstrapError("comparison report records are invalid")
+            lines.append(f"{label}:")
+            for item in records:
+                _validate_compared_record(item)
+                if item.before.private:
+                    lines.append("- [private local digest verified]")
+                else:
+                    lines.append(f"- {_report_identifier(item.logical_path)}")
+        lines.append(f"result: {'ok' if comparison.ok else 'unexpected changes'}")
+        return "\n".join(lines) + "\n"
+    except (BootstrapError, TypeError, ValueError):
+        if private:
+            raise BootstrapError(_PRIVATE_COMPARISON_ERROR) from None
+        raise

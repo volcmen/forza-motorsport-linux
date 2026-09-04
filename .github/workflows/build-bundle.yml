@@ -1,0 +1,53 @@
+name: reproduce-bootstrap-bundle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Install archive tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes zstd
+      - name: Start rootless Docker
+        run: |
+          dockerd-rootless-setuptool.sh install --force
+          echo "DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock" >> "$GITHUB_ENV"
+      - name: Read immutable builder identity
+        run: |
+          uv run python - <<'PY' >> "$GITHUB_ENV"
+          import tomllib
+          from pathlib import Path
+
+          manifest = tomllib.loads(Path("manifests/bootstrap-v1.toml").read_text())
+          print(f"FORZA_BUILDER_IMAGE={manifest['builder']['image']}")
+          PY
+      - name: Reproduce twice from exact public revisions
+        run: |
+          mkdir -m 0700 /tmp/forza-bundle-build-a /tmp/forza-bundle-build-b
+          ./tools/build-bootstrap-bundle --clean \
+            --builder-image "$FORZA_BUILDER_IMAGE" \
+            --output /tmp/forza-bundle-build-a
+          ./tools/build-bootstrap-bundle --clean \
+            --builder-image "$FORZA_BUILDER_IMAGE" \
+            --output /tmp/forza-bundle-build-b
+          cmp /tmp/forza-bundle-build-a/forza-bootstrap-bundle-v1.tar.zst \
+            /tmp/forza-bundle-build-b/forza-bootstrap-bundle-v1.tar.zst
+          ./tools/verify-bootstrap-bundle \
+            --manifest manifests/bootstrap-v1.toml \
+            /tmp/forza-bundle-build-a/forza-bootstrap-bundle-v1.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forza-bootstrap-bundle-v1
+          path: /tmp/forza-bundle-build-a/forza-bootstrap-bundle-v1.tar.zst
+          if-no-files-found: error
+          retention-days: 7

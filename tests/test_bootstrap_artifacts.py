@@ -1,0 +1,1853 @@
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+from __future__ import annotations
+
+import io
+import os
+import subprocess
+import tarfile
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Self
+from urllib.request import Request
+
+import pytest
+
+import forza_bootstrap.artifacts as artifacts_module
+from forza_bootstrap.artifacts import (
+    ArchivePolicy,
+    download_once,
+    extract_bundle,
+    extract_ge,
+    inspect_tar,
+    verify_bundle_root,
+    verify_cached_file,
+)
+from forza_bootstrap.model import (
+    ArtifactSpec,
+    BootstrapError,
+    BootstrapManifest,
+    BuilderSpec,
+    DownloadSpec,
+    ProtonUpSpec,
+    SourceSpec,
+    canonical_json,
+    sha256_bytes,
+)
+
+
+@dataclass(frozen=True)
+class TarEntry:
+    name: str
+    kind: str
+    data: bytes = b""
+    mode: int = 0o644
+    link_target: str = ""
+
+
+class FakeResponse(io.BytesIO):
+    def __init__(
+        self,
+        payload: bytes,
+        final_url: str = "https://downloads.example.invalid/artifact.bin",
+        on_enter: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(payload)
+        self.final_url = final_url
+        self.on_enter = on_enter
+        self.read_sizes: list[int] = []
+
+    def geturl(self) -> str:
+        return self.final_url
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        return super().read(size)
+
+    def __enter__(self) -> Self:
+        if self.on_enter is not None:
+            self.on_enter()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
+def private_directory(path: Path) -> Path:
+    path.mkdir()
+    path.chmod(0o700)
+    return path
+
+
+def sha256_file(path: Path) -> str:
+    return sha256_bytes(path.read_bytes())
+
+
+def download_spec(payload: bytes, **updates: object) -> DownloadSpec:
+    values = {
+        "name": "fixture",
+        "release": "v1",
+        "url": "https://downloads.example.invalid/artifact.bin",
+        "filename": "artifact.bin",
+        "size": len(payload),
+        "sha256": sha256_bytes(payload),
+        "expected_root": "fixture-root",
+        "allowed_redirect_hosts": ("downloads.example.invalid",),
+    }
+    values.update(updates)
+    return DownloadSpec(**values)  # type: ignore[arg-type]
+
+
+def write_private_cache(path: Path, payload: bytes) -> Path:
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    return path
+
+
+def tar_bytes(entries: list[TarEntry]) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for entry in entries:
+            info = tarfile.TarInfo(entry.name)
+            info.mode = entry.mode
+            info.uid = 0
+            info.gid = 0
+            info.mtime = 0
+            if entry.kind == "file":
+                info.type = tarfile.REGTYPE
+                info.size = len(entry.data)
+                archive.addfile(info, io.BytesIO(entry.data))
+            elif entry.kind == "directory":
+                info.type = tarfile.DIRTYPE
+                info.size = 0
+                archive.addfile(info)
+            elif entry.kind == "symlink":
+                info.type = tarfile.SYMTYPE
+                info.linkname = entry.link_target
+                archive.addfile(info)
+            elif entry.kind == "hardlink":
+                info.type = tarfile.LNKTYPE
+                info.linkname = entry.link_target
+                archive.addfile(info)
+            elif entry.kind == "fifo":
+                info.type = tarfile.FIFOTYPE
+                archive.addfile(info)
+            elif entry.kind == "device":
+                info.type = tarfile.CHRTYPE
+                info.devmajor = 1
+                info.devminor = 3
+                archive.addfile(info)
+            else:
+                raise AssertionError(f"unknown fixture kind: {entry.kind}")
+    return output.getvalue()
+
+
+def bundle_metadata_entries(
+    root: str, sources: tuple[str, ...] = ("xodus",)
+) -> list[TarEntry]:
+    return [
+        TarEntry(f"{root}/licenses", "directory", mode=0o755),
+        *[
+            TarEntry(f"{root}/licenses/{source}.txt", "file", b"fixture license\n")
+            for source in sources
+        ],
+        TarEntry(f"{root}/provenance", "directory", mode=0o755),
+        TarEntry(f"{root}/provenance/sources.json", "file", b"{}\n"),
+        TarEntry(f"{root}/provenance/build-environment.json", "file", b"{}\n"),
+        TarEntry(f"{root}/provenance/build-commands.txt", "file", b"build\n"),
+        TarEntry(f"{root}/SHA256SUMS", "file", b"fixture checksums\n"),
+    ]
+
+
+def bundle_entries(
+    root: str,
+    manifest_data: bytes,
+    payload: bytes,
+    mode: int,
+    *,
+    extras: tuple[TarEntry, ...] = (),
+    omit: frozenset[str] = frozenset(),
+) -> list[TarEntry]:
+    entries = [
+        TarEntry(root, "directory", mode=0o755),
+        TarEntry(f"{root}/bundle-manifest.json", "file", manifest_data, 0o644),
+        TarEntry(f"{root}/bin", "directory", mode=0o755),
+        TarEntry(f"{root}/bin/tool", "file", payload, mode),
+        *bundle_metadata_entries(root),
+    ]
+    return [entry for entry in entries if entry.name not in omit] + list(extras)
+
+
+def make_tar(
+    tmp_path: Path,
+    entries: list[TarEntry],
+    *,
+    suffix: str = ".tar",
+    name: str = "fixture",
+) -> Path:
+    raw = tar_bytes(entries)
+    path = tmp_path / f"{name}{suffix}"
+    if suffix == ".tar.zst":
+        compressed = subprocess.run(
+            ["zstd", "-q", "-c", "-"],
+            input=raw,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout
+        path.write_bytes(compressed)
+    elif suffix == ".tar.gz":
+        with tarfile.open(path, mode="w:gz", format=tarfile.USTAR_FORMAT) as archive:
+            for entry in entries:
+                info = tarfile.TarInfo(entry.name)
+                info.mode = entry.mode
+                info.uid = 0
+                info.gid = 0
+                info.mtime = 0
+                if entry.kind == "file":
+                    info.type = tarfile.REGTYPE
+                    info.size = len(entry.data)
+                    archive.addfile(info, io.BytesIO(entry.data))
+                elif entry.kind == "directory":
+                    info.type = tarfile.DIRTYPE
+                    archive.addfile(info)
+                elif entry.kind == "symlink":
+                    info.type = tarfile.SYMTYPE
+                    info.linkname = entry.link_target
+                    archive.addfile(info)
+                elif entry.kind == "hardlink":
+                    info.type = tarfile.LNKTYPE
+                    info.linkname = entry.link_target
+                    archive.addfile(info)
+                elif entry.kind == "fifo":
+                    info.type = tarfile.FIFOTYPE
+                    archive.addfile(info)
+                elif entry.kind == "device":
+                    info.type = tarfile.CHRTYPE
+                    info.devmajor = 1
+                    info.devminor = 3
+                    archive.addfile(info)
+                else:
+                    raise AssertionError(f"unknown fixture kind: {entry.kind}")
+    else:
+        path.write_bytes(raw)
+    return path
+
+
+def make_oversized_extension_tar(tmp_path: Path, extension: str) -> Path:
+    output = io.BytesIO()
+    info = tarfile.TarInfo("root/item")
+    info.mode = 0o644
+    payload: io.BytesIO | None = io.BytesIO(b"payload")
+    info.size = 7
+    archive_format = tarfile.PAX_FORMAT
+    if extension == "pax":
+        info.pax_headers = {"comment": "x" * 1_048_577}
+    elif extension == "gnu-long-name":
+        archive_format = tarfile.GNU_FORMAT
+        info.name = "root/" + "n" * 1_048_577
+    elif extension == "gnu-long-link":
+        archive_format = tarfile.GNU_FORMAT
+        info.type = tarfile.SYMTYPE
+        info.size = 0
+        info.linkname = "t" * 1_048_577
+        payload = None
+    else:
+        raise AssertionError(f"unknown extension fixture: {extension}")
+    with tarfile.open(fileobj=output, mode="w", format=archive_format) as archive:
+        archive.addfile(info, payload)
+    path = tmp_path / f"oversized-{extension}.tar"
+    path.write_bytes(output.getvalue())
+    return path
+
+
+def _set_tar_checksum(header: bytearray) -> None:
+    header[148:156] = b"        "
+    header[148:156] = f"{sum(header):06o}\0 ".encode("ascii")
+
+
+def make_gnu_sparse_chain_tar(tmp_path: Path, depth: int) -> Path:
+    info = tarfile.TarInfo("root/sparse")
+    info.mode = 0o644
+    info.type = tarfile.GNUTYPE_SPARSE
+    info.size = 0
+    header = bytearray(info.tobuf(format=tarfile.GNU_FORMAT))
+    header[482] = 1
+    header[483:495] = b"00000000000\0"
+    _set_tar_checksum(header)
+    extensions: list[bytes] = []
+    for index in range(depth):
+        extension = bytearray(512)
+        extension[504] = int(index + 1 < depth)
+        extensions.append(bytes(extension))
+    path = tmp_path / "sparse-chain.tar"
+    path.write_bytes(bytes(header) + b"".join(extensions) + bytes(1024))
+    return path
+
+
+def make_gnu_long_name_chain_tar(tmp_path: Path, depth: int) -> Path:
+    extension_payload = b"root/item\0"
+    extension = tarfile.TarInfo("././@LongLink")
+    extension.type = tarfile.GNUTYPE_LONGNAME
+    extension.mode = 0o644
+    extension.size = len(extension_payload)
+    padded_payload = extension_payload.ljust(512, b"\0")
+    member = tarfile.TarInfo("root/item")
+    member.mode = 0o644
+    member.size = 0
+    path = tmp_path / "long-name-chain.tar"
+    path.write_bytes(
+        (extension.tobuf(format=tarfile.GNU_FORMAT) + padded_payload) * depth
+        + member.tobuf(format=tarfile.GNU_FORMAT)
+        + bytes(1024)
+    )
+    return path
+
+
+def policy(
+    root: str = "root",
+    *,
+    members: int = 32,
+    total: int = 1024 * 1024,
+    links: bool = False,
+) -> ArchivePolicy:
+    return ArchivePolicy(root, members, total, links)
+
+
+def artifact(
+    payload: bytes = b"tool",
+    *,
+    relative_path: str = "bin/tool",
+    mode: int = 0o755,
+    digest: str | None = None,
+    size: int | None = None,
+) -> ArtifactSpec:
+    return ArtifactSpec(
+        logical_name="tool",
+        relative_path=relative_path,
+        size=len(payload) if size is None else size,
+        sha256=sha256_bytes(payload) if digest is None else digest,
+        mode=mode,
+        private=False,
+    )
+
+
+def internal_manifest_bytes(artifacts: tuple[ArtifactSpec, ...]) -> bytes:
+    return canonical_json(
+        {
+            "artifacts": [
+                {
+                    "logical_name": item.logical_name,
+                    "mode": item.mode,
+                    "private": item.private,
+                    "relative_path": item.relative_path,
+                    "sha256": item.sha256,
+                    "size": item.size,
+                }
+                for item in artifacts
+            ],
+            "profile": "fixture",
+            "schema": 1,
+            "sources": {"xodus": "1" * 40},
+        }
+    )
+
+
+def bootstrap_manifest(
+    archive: Path,
+    artifacts: tuple[ArtifactSpec, ...],
+    *,
+    root: str = "forza-bootstrap-bundle-v1",
+) -> BootstrapManifest:
+    return BootstrapManifest(
+        schema=1,
+        app_id="2440510",
+        host=("arch", "x86_64", "native-steam"),
+        profile="fixture",
+        protonup=ProtonUpSpec(version="0.1.5", project_relative="tools/protonup"),
+        ge=download_spec(b"ge", expected_root="GE-Proton11-3"),
+        bundle=DownloadSpec(
+            name="fixture-bundle",
+            release="v1",
+            url="https://downloads.example.invalid/bundle.tar.zst",
+            filename="bundle.tar.zst",
+            size=archive.stat().st_size,
+            sha256=sha256_file(archive),
+            expected_root=root,
+            allowed_redirect_hosts=("downloads.example.invalid",),
+        ),
+        sources=(
+            SourceSpec(
+                name="xodus",
+                repository="https://example.invalid/xodus",
+                revision="1" * 40,
+            ),
+        ),
+        builder=BuilderSpec(
+            image="example.invalid/builder@sha256:" + "2" * 64,
+            base_image="example.invalid/base@sha256:" + "3" * 64,
+            arch_snapshot="https://example.invalid/archive",
+            source_date_epoch=0,
+        ),
+        artifacts=artifacts,
+        path=Path("bootstrap.toml"),
+        sha256="4" * 64,
+    )
+
+
+def bundle_archive(
+    tmp_path: Path,
+    *,
+    declared_artifact: ArtifactSpec | None = None,
+    actual_payload: bytes = b"tool",
+    actual_mode: int = 0o755,
+    manifest_payload: bytes | None = None,
+    suffix: str = ".tar.zst",
+    extras: tuple[TarEntry, ...] = (),
+    omit: frozenset[str] = frozenset(),
+) -> tuple[Path, BootstrapManifest, bytes]:
+    declared = artifact() if declared_artifact is None else declared_artifact
+    manifest_data = (
+        internal_manifest_bytes((declared,))
+        if manifest_payload is None
+        else manifest_payload
+    )
+    root = "forza-bootstrap-bundle-v1"
+    entries = bundle_entries(
+        root,
+        manifest_data,
+        actual_payload,
+        actual_mode,
+        extras=extras,
+        omit=omit,
+    )
+    archive = make_tar(tmp_path, entries, suffix=suffix, name="bundle")
+    return archive, bootstrap_manifest(archive, (declared,)), manifest_data
+
+
+def test_verify_cached_file_returns_false_only_for_absence(tmp_path: Path) -> None:
+    cache = private_directory(tmp_path / "cache")
+
+    assert verify_cached_file(cache / "missing.bin", 0, sha256_bytes(b"")) is False
+
+
+def test_verify_cached_file_accepts_exact_owner_only_regular(tmp_path: Path) -> None:
+    cache = private_directory(tmp_path / "cache")
+    payload = b"accepted"
+    cached = write_private_cache(cache / "artifact.bin", payload)
+
+    assert verify_cached_file(cached, len(payload), sha256_bytes(payload)) is True
+
+
+@pytest.mark.parametrize(
+    ("expected_size", "expected_digest", "message"),
+    [
+        (7, sha256_bytes(b"accepted"), "cached artifact size mismatch"),
+        (8, "0" * 64, "cached artifact digest mismatch"),
+    ],
+)
+def test_verify_cached_file_raises_for_every_mismatch(
+    tmp_path: Path, expected_size: int, expected_digest: str, message: str
+) -> None:
+    cache = private_directory(tmp_path / "cache")
+    cached = write_private_cache(cache / "artifact.bin", b"accepted")
+
+    with pytest.raises(BootstrapError, match=message):
+        verify_cached_file(cached, expected_size, expected_digest)
+
+
+@pytest.mark.parametrize("hostile", ("symlink", "directory", "fifo", "wrong-mode"))
+def test_verify_cached_file_rejects_hostile_cache_objects(
+    tmp_path: Path, hostile: str
+) -> None:
+    cache = private_directory(tmp_path / "cache")
+    cached = cache / "artifact.bin"
+    if hostile == "symlink":
+        target = write_private_cache(cache / "target", b"accepted")
+        cached.symlink_to(target)
+    elif hostile == "directory":
+        cached.mkdir()
+    elif hostile == "fifo":
+        os.mkfifo(cached, 0o600)
+    else:
+        write_private_cache(cached, b"accepted").chmod(0o644)
+
+    with pytest.raises(BootstrapError, match="cached artifact"):
+        verify_cached_file(cached, 8, sha256_bytes(b"accepted"))
+
+
+@pytest.mark.parametrize("destination", [
+    "https://untrusted.example.invalid/file",
+    "http://downloads.example.invalid/file",
+    "https://user:password@downloads.example.invalid/file",
+    "https://downloads.example.invalid:443/file",
+    "https://127.0.0.1/file",
+])
+def test_redirect_rejected_before_following(destination: str) -> None:
+    handler = artifacts_module._AllowedRedirectHandler(("downloads.example.invalid",))
+    request = Request("https://downloads.example.invalid/start")
+    with pytest.raises(BootstrapError, match="redirect is outside"):
+        handler.redirect_request(request, None, 302, "Found", {}, destination)
+
+
+def test_tree_walk_uses_fresh_directory_position(tmp_path, monkeypatch):
+    (tmp_path / "file").write_bytes(b"payload")
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    original = os.scandir
+
+    def independent_scan(fd):
+        assert fd != root_fd, "do not reuse an extraction descriptor's directory position"
+        return original(fd)
+
+    monkeypatch.setattr(os, "scandir", independent_scan)
+    try:
+        assert set(artifacts_module._walk_tree(root_fd)) == {"file"}
+        (tmp_path / "new-file").write_bytes(b"new")
+        assert set(artifacts_module._walk_tree(root_fd)) == {"file", "new-file"}
+    finally:
+        os.close(root_fd)
+
+
+def test_redirect_handler_allows_https_release_host() -> None:
+    handler = artifacts_module._AllowedRedirectHandler(
+        ("downloads.example.invalid", "cdn.example.invalid")
+    )
+    request = Request("https://downloads.example.invalid/start")
+    redirected = handler.redirect_request(
+        request, None, 302, "Found", {}, "https://cdn.example.invalid/file"
+    )
+    assert redirected.full_url == "https://cdn.example.invalid/file"
+    # An allowed intermediate host must not permit an untrusted next hop.
+    with pytest.raises(BootstrapError, match="redirect is outside"):
+        handler.redirect_request(
+            redirected, None, 302, "Found", {}, "https://untrusted.example.invalid/file"
+        )
+
+
+def test_default_download_uses_redirect_policy_and_timeout(tmp_path, monkeypatch):
+    payload = b"downloaded"
+    calls = []
+
+    class Client:
+        def open(self, url, *, timeout):
+            calls.append((url, timeout))
+            return FakeResponse(payload)
+
+    def client_factory(handler):
+        assert isinstance(handler, artifacts_module._AllowedRedirectHandler)
+        assert handler.allowed_hosts == ("downloads.example.invalid",)
+        return Client()
+
+    monkeypatch.setattr(artifacts_module, "build_opener", client_factory)
+    result = download_once(download_spec(payload), tmp_path / "cache")
+    assert result.read_bytes() == payload
+    assert calls == [("https://downloads.example.invalid/artifact.bin", 30)]
+
+
+def test_download_once_streams_one_attempt_into_private_cache(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    payload = b"downloaded"
+    response = FakeResponse(payload)
+    calls = 0
+
+    def opener(url: str) -> FakeResponse:
+        nonlocal calls
+        calls += 1
+        assert url == "https://downloads.example.invalid/artifact.bin"
+        return response
+
+    result = download_once(download_spec(payload), cache, opener)
+
+    assert calls == 1
+    assert result.read_bytes() == payload
+    assert result.stat().st_mode & 0o777 == 0o600
+    assert cache.stat().st_mode & 0o777 == 0o700
+    assert response.closed
+    assert response.read_sizes == [1024 * 1024, 1024 * 1024]
+    assert [path.name for path in cache.iterdir()] == ["artifact.bin"]
+
+
+def test_download_once_reuses_verified_cache_without_opening_network(
+    tmp_path: Path,
+) -> None:
+    cache = private_directory(tmp_path / "cache")
+    payload = b"accepted"
+    cached = write_private_cache(cache / "artifact.bin", payload)
+
+    def opener(_url: str) -> FakeResponse:
+        raise AssertionError("verified cache must not open the network")
+
+    assert download_once(download_spec(payload), cache, opener) == cached
+
+
+@pytest.mark.parametrize(
+    "final_url",
+    (
+        "http://downloads.example.invalid/artifact.bin",
+        "https://outside.example.invalid/artifact.bin",
+    ),
+)
+def test_download_once_rejects_redirect_outside_https_allowlist(
+    tmp_path: Path, final_url: str
+) -> None:
+    response = FakeResponse(b"accepted", final_url)
+
+    with pytest.raises(BootstrapError, match="redirect is outside the HTTPS allowlist"):
+        download_once(
+            download_spec(b"accepted"), tmp_path / "cache", lambda _url: response
+        )
+
+    assert response.closed
+    assert not list((tmp_path / "cache").iterdir())
+
+
+def test_download_once_never_retries_failed_opener(tmp_path: Path) -> None:
+    attempts = 0
+
+    def failing_opener(_url: str) -> FakeResponse:
+        nonlocal attempts
+        attempts += 1
+        raise OSError("controlled opener failure")
+
+    with pytest.raises(BootstrapError, match="download failed"):
+        download_once(download_spec(b"accepted"), tmp_path / "cache", failing_opener)
+
+    assert attempts == 1
+    assert not list((tmp_path / "cache").iterdir())
+
+
+def test_failed_download_never_replaces_verified_cache_created_concurrently(
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "cache"
+    accepted = b"accepted"
+    cached = cache / "artifact.bin"
+
+    def publish_accepted_cache() -> None:
+        write_private_cache(cached, accepted)
+
+    response = FakeResponse(b"wrong!!!", on_enter=publish_accepted_cache)
+
+    with pytest.raises(BootstrapError, match="download digest mismatch"):
+        download_once(download_spec(accepted), cache, lambda _url: response)
+
+    assert cached.read_bytes() == accepted
+    assert cached.stat().st_mode & 0o777 == 0o600
+    assert [path.name for path in cache.iterdir()] == ["artifact.bin"]
+
+
+def test_download_once_rejects_oversize_stream_before_publication(
+    tmp_path: Path,
+) -> None:
+    response = FakeResponse(b"accepted-plus")
+
+    with pytest.raises(BootstrapError, match="download exceeds pinned size"):
+        download_once(
+            download_spec(b"accepted"), tmp_path / "cache", lambda _url: response
+        )
+
+    assert response.closed
+    assert not list((tmp_path / "cache").iterdir())
+
+
+def test_download_once_verifies_staged_bytes_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_write_all = artifacts_module.write_all
+
+    def corrupt_staged_write(fd: int, data: bytes) -> None:
+        real_write_all(fd, b"x" * len(data))
+
+    monkeypatch.setattr(artifacts_module, "write_all", corrupt_staged_write)
+
+    with pytest.raises(BootstrapError, match="download staged file mismatch"):
+        download_once(
+            download_spec(b"accepted"),
+            tmp_path / "cache",
+            lambda _url: FakeResponse(b"accepted"),
+        )
+
+    assert not list((tmp_path / "cache").iterdir())
+
+
+def test_download_once_rejects_same_inode_mutation_during_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    real_rename = artifacts_module.rename_noreplace
+
+    def mutate_then_rename(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        (cache / source_name).write_bytes(b"corrupt!")
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+
+    monkeypatch.setattr(artifacts_module, "rename_noreplace", mutate_then_rename)
+
+    with pytest.raises(
+        BootstrapError, match="download publication verification failed"
+    ):
+        download_once(
+            download_spec(b"accepted"), cache, lambda _url: FakeResponse(b"accepted")
+        )
+
+    assert not (cache / "artifact.bin").exists()
+
+
+def test_download_once_preserves_concurrent_replacement_after_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    real_rename = artifacts_module.rename_noreplace
+
+    def replace_after_rename(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+        if destination_name == "artifact.bin" and not source_name.endswith(".recovery"):
+            destination = cache / destination_name
+            destination.unlink()
+            write_private_cache(destination, b"parallel")
+
+    monkeypatch.setattr(artifacts_module, "rename_noreplace", replace_after_rename)
+
+    with pytest.raises(
+        BootstrapError, match="download publication verification failed"
+    ):
+        download_once(
+            download_spec(b"accepted"), cache, lambda _url: FakeResponse(b"accepted")
+        )
+
+    assert (cache / "artifact.bin").read_bytes() == b"parallel"
+
+
+def test_download_cleanup_never_unlinks_a_replacement_racing_the_final_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    real_rename = artifacts_module.rename_noreplace
+    real_unlink = artifacts_module.os.unlink
+    injected = False
+
+    def mutate_then_rename(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        (cache / source_name).write_bytes(b"corrupt!")
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+
+    def replace_public_at_delete(
+        path: str | bytes, *, dir_fd: int | None = None
+    ) -> None:
+        nonlocal injected
+        name = os.fsdecode(path)
+        is_cleanup_delete = name == "artifact.bin" or (
+            name.startswith(".artifact.bin.") and name.endswith(".recovery")
+        )
+        if not injected and is_cleanup_delete:
+            assert dir_fd is not None
+            try:
+                real_unlink("artifact.bin", dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+            replacement_fd = os.open(
+                "artifact.bin",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=dir_fd,
+            )
+            try:
+                os.write(replacement_fd, b"parallel")
+            finally:
+                os.close(replacement_fd)
+            injected = True
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(artifacts_module, "rename_noreplace", mutate_then_rename)
+    monkeypatch.setattr(artifacts_module.os, "unlink", replace_public_at_delete)
+
+    with pytest.raises(
+        BootstrapError, match="download publication verification failed"
+    ):
+        download_once(
+            download_spec(b"accepted"), cache, lambda _url: FakeResponse(b"accepted")
+        )
+
+    assert injected is True
+    assert (cache / "artifact.bin").read_bytes() == b"parallel"
+
+
+def test_download_cleanup_preserves_quarantined_foreign_file_when_restore_races(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    real_rename = artifacts_module.rename_noreplace
+    restore_collision = False
+
+    def replace_and_collide_restore(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        nonlocal restore_collision
+        if source_name.endswith(".recovery") and destination_name == "artifact.bin":
+            restore_collision = True
+            write_private_cache(cache / destination_name, b"new")
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+        if destination_name == "artifact.bin" and source_name.startswith(
+            ".artifact.bin."
+        ):
+            destination = cache / destination_name
+            destination.unlink()
+            write_private_cache(destination, b"foreign")
+
+    monkeypatch.setattr(
+        artifacts_module, "rename_noreplace", replace_and_collide_restore
+    )
+
+    with pytest.raises(
+        BootstrapError, match="download publication verification failed"
+    ):
+        download_once(
+            download_spec(b"accepted"), cache, lambda _url: FakeResponse(b"accepted")
+        )
+
+    recoveries = list(cache.glob(".artifact.bin.*.recovery"))
+    assert restore_collision is True
+    assert (cache / "artifact.bin").read_bytes() == b"new"
+    assert len(recoveries) == 1
+    assert recoveries[0].read_bytes() == b"foreign"
+
+
+def test_download_cleanup_preserves_a_recreated_stage_name_after_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    real_rename = artifacts_module.rename_noreplace
+    recreated_stage: Path | None = None
+
+    def mutate_publish_and_recreate_stage(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        nonlocal recreated_stage
+        if destination_name == "artifact.bin":
+            (cache / source_name).write_bytes(b"corrupt!")
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+        if destination_name == "artifact.bin":
+            recreated_stage = write_private_cache(cache / source_name, b"foreign-stage")
+
+    monkeypatch.setattr(
+        artifacts_module, "rename_noreplace", mutate_publish_and_recreate_stage
+    )
+
+    with pytest.raises(
+        BootstrapError, match="download publication verification failed"
+    ):
+        download_once(
+            download_spec(b"accepted"), cache, lambda _url: FakeResponse(b"accepted")
+        )
+
+    assert recreated_stage is not None
+    assert recreated_stage.read_bytes() == b"foreign-stage"
+
+
+def test_download_once_refuses_hostile_existing_cache_without_network(
+    tmp_path: Path,
+) -> None:
+    cache = private_directory(tmp_path / "cache")
+    (cache / "artifact.bin").symlink_to(cache / "missing")
+    attempts = 0
+
+    def opener(_url: str) -> FakeResponse:
+        nonlocal attempts
+        attempts += 1
+        return FakeResponse(b"accepted")
+
+    with pytest.raises(BootstrapError, match="cached artifact"):
+        download_once(download_spec(b"accepted"), cache, opener)
+
+    assert attempts == 0
+
+
+def test_download_once_normalizes_malformed_direct_allowlist(tmp_path: Path) -> None:
+    spec = download_spec(b"accepted", allowed_redirect_hosts=("[broken",))
+
+    with pytest.raises(BootstrapError, match="redirect allowlist is invalid"):
+        download_once(spec, tmp_path / "cache", lambda _url: FakeResponse(b"accepted"))
+
+    assert not (tmp_path / "cache").exists()
+
+
+def test_inspect_tar_returns_complete_bounded_graph(tmp_path: Path) -> None:
+    archive = make_tar(
+        tmp_path,
+        [
+            TarEntry("root", "directory", mode=0o755),
+            TarEntry("root/bin", "directory", mode=0o755),
+            TarEntry("root/bin/tool", "file", b"payload", 0o755),
+        ],
+        suffix=".tar.gz",
+    )
+
+    graph = inspect_tar(archive, policy())
+
+    assert graph.root == "root"
+    assert graph.total_regular_size == 7
+    assert [(item.path, item.kind, item.size, item.mode) for item in graph.members] == [
+        ("root", "directory", 0, 0o755),
+        ("root/bin", "directory", 0, 0o755),
+        ("root/bin/tool", "regular", 7, 0o755),
+    ]
+
+
+def test_inspect_tar_normalizes_missing_archive_error(tmp_path: Path) -> None:
+    with pytest.raises(BootstrapError, match="archive access failed"):
+        inspect_tar(tmp_path / "missing.tar", policy())
+
+
+@pytest.mark.parametrize(
+    "member",
+    ("/absolute", "../escape", "root/../../escape", "root//duplicate"),
+)
+def test_bundle_rejects_unsafe_member_names(tmp_path: Path, member: str) -> None:
+    archive = make_tar(tmp_path, [TarEntry(member, "file", b"payload")])
+
+    with pytest.raises(BootstrapError, match="unsafe archive member"):
+        inspect_tar(archive, policy())
+
+
+def test_archive_rejects_duplicate_normalized_members(tmp_path: Path) -> None:
+    archive = make_tar(
+        tmp_path,
+        [
+            TarEntry("root/item", "file", b"first"),
+            TarEntry("root/item", "file", b"second"),
+        ],
+    )
+
+    with pytest.raises(BootstrapError, match="duplicate archive member"):
+        inspect_tar(archive, policy())
+
+
+@pytest.mark.parametrize("kind", ("symlink", "hardlink", "fifo", "device"))
+def test_bundle_rejects_links_and_special_files(tmp_path: Path, kind: str) -> None:
+    entry = TarEntry(
+        "forza-bootstrap-bundle-v1/member",
+        kind,
+        link_target="forza-bootstrap-bundle-v1/target",
+    )
+    archive = make_tar(tmp_path, [entry], suffix=".tar.zst")
+    manifest = bootstrap_manifest(archive, (artifact(),))
+
+    with pytest.raises(BootstrapError, match="regular files and directories"):
+        extract_bundle(archive, tmp_path / "out", manifest)
+
+    assert not (tmp_path / "out").exists()
+
+
+def test_archive_rejects_too_many_members_before_extraction(tmp_path: Path) -> None:
+    archive = make_tar(
+        tmp_path,
+        [TarEntry("root/one", "file", b"1"), TarEntry("root/two", "file", b"2")],
+    )
+
+    with pytest.raises(BootstrapError, match="too many members"):
+        inspect_tar(archive, policy(members=1))
+
+
+def test_archive_rejects_expanded_size_over_policy_cap(tmp_path: Path) -> None:
+    archive = make_tar(tmp_path, [TarEntry("root/large", "file", b"12345")])
+
+    with pytest.raises(BootstrapError, match="expanded size limit"):
+        inspect_tar(archive, policy(total=4))
+
+
+def test_archive_rejects_declared_payload_on_non_regular_member(tmp_path: Path) -> None:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        info = tarfile.TarInfo("root/link")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "target"
+        info.mode = 0o777
+        info.size = 4
+        archive.addfile(info, io.BytesIO(b"data"))
+    path = tmp_path / "link-with-payload.tar"
+    path.write_bytes(output.getvalue())
+
+    with pytest.raises(
+        BootstrapError, match="non-regular archive member declares data"
+    ):
+        inspect_tar(path, policy(links=True))
+
+
+@pytest.mark.parametrize("extension", ("pax", "gnu-long-name", "gnu-long-link"))
+def test_archive_rejects_oversized_extension_metadata_before_member_parsing(
+    tmp_path: Path, extension: str
+) -> None:
+    archive = make_oversized_extension_tar(tmp_path, extension)
+
+    with pytest.raises(BootstrapError, match="archive metadata exceeds limit"):
+        inspect_tar(archive, policy(links=True, total=2 * 1024 * 1024))
+
+
+def test_archive_rejects_gnu_sparse_extension_chain_before_consuming_it(
+    tmp_path: Path,
+) -> None:
+    archive = make_gnu_sparse_chain_tar(tmp_path, depth=9)
+
+    with pytest.raises(BootstrapError, match="sparse archive metadata is forbidden"):
+        inspect_tar(archive, policy(total=2 * 1024 * 1024))
+
+
+def test_archive_rejects_excessive_extension_depth(tmp_path: Path) -> None:
+    archive = make_gnu_long_name_chain_tar(tmp_path, depth=9)
+
+    with pytest.raises(BootstrapError, match="archive metadata extension depth"):
+        inspect_tar(archive, policy(total=2 * 1024 * 1024))
+
+
+def test_archive_rejects_raw_directory_alias_before_tarfile_normalizes_it(
+    tmp_path: Path,
+) -> None:
+    directory = tarfile.TarInfo("root//")
+    directory.type = tarfile.DIRTYPE
+    directory.mode = 0o755
+    archive = tmp_path / "raw-directory-alias.tar"
+    archive.write_bytes(directory.tobuf(format=tarfile.USTAR_FORMAT) + bytes(1024))
+
+    with pytest.raises(BootstrapError, match="unsafe archive member"):
+        inspect_tar(archive, policy())
+
+
+@pytest.mark.parametrize("length", (1024, 1536))
+def test_archive_requires_two_zero_termination_blocks(
+    tmp_path: Path, length: int
+) -> None:
+    raw = tar_bytes([TarEntry("root/item", "file", b"payload")])
+    archive = tmp_path / f"truncated-{length}.tar"
+    archive.write_bytes(raw[:length])
+
+    with pytest.raises(BootstrapError, match="archive stream is invalid"):
+        inspect_tar(archive, policy())
+
+
+@pytest.mark.parametrize("suffix", (".tar.gz", ".tar.zst"))
+def test_archive_rejects_corrupted_compressed_trailer(
+    tmp_path: Path, suffix: str
+) -> None:
+    archive = make_tar(
+        tmp_path,
+        [TarEntry("root/item", "file", b"payload")],
+        suffix=suffix,
+    )
+    damaged = bytearray(archive.read_bytes())
+    damaged[-1] ^= 0xFF
+    archive.write_bytes(damaged)
+
+    with pytest.raises(BootstrapError, match="archive stream is invalid"):
+        inspect_tar(archive, policy())
+
+
+@pytest.mark.parametrize("suffix", (".tar", ".tar.zst"))
+def test_archive_rejects_truncated_stream_and_closes_resources(
+    tmp_path: Path,
+    suffix: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = make_tar(
+        tmp_path,
+        [TarEntry("root/payload", "file", b"x" * 4096)],
+        suffix=suffix,
+    )
+    data = archive.read_bytes()
+    archive.write_bytes(data[: max(1, len(data) // 3)])
+    before_fds = len(os.listdir("/proc/self/fd"))
+    processes: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def tracked_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(artifacts_module.subprocess, "Popen", tracked_popen)
+
+    with pytest.raises(BootstrapError, match="archive stream is invalid"):
+        inspect_tar(archive, policy(total=8192))
+
+    assert len(os.listdir("/proc/self/fd")) == before_fds
+    assert all(process.poll() is not None for process in processes)
+    assert all(process.stdout is None or process.stdout.closed for process in processes)
+
+
+def test_zstd_decoder_uses_argv_without_shell_and_is_reaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = make_tar(
+        tmp_path,
+        [TarEntry("root/payload", "file", b"payload")],
+        suffix=".tar.zst",
+    )
+    calls: list[
+        tuple[object, dict[str, object], tuple[int, int], subprocess.Popen[bytes]]
+    ] = []
+    real_popen = subprocess.Popen
+
+    def tracked_popen(argv: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        stdin_fd = kwargs.get("stdin")
+        assert isinstance(stdin_fd, int)
+        stdin_info = os.fstat(stdin_fd)
+        process = real_popen(argv, **kwargs)
+        calls.append((argv, kwargs, (stdin_info.st_dev, stdin_info.st_ino), process))
+        return process
+
+    monkeypatch.setattr(artifacts_module.subprocess, "Popen", tracked_popen)
+
+    inspect_tar(archive, policy())
+
+    assert len(calls) == 1
+    argv, kwargs, stdin_identity, process = calls[0]
+    assert argv == ["zstd", "-dc"]
+    assert isinstance(kwargs.get("stdin"), int)
+    assert os.fspath(archive) not in argv
+    archive_info = archive.stat()
+    assert stdin_identity == (archive_info.st_dev, archive_info.st_ino)
+    assert kwargs.get("shell", False) is False
+    assert process.poll() == 0
+    assert process.stdout is not None and process.stdout.closed
+
+
+def test_extract_bundle_verifies_then_atomically_publishes(tmp_path: Path) -> None:
+    archive, manifest, manifest_data = bundle_archive(tmp_path)
+    destination = tmp_path / "published"
+
+    verified = extract_bundle(archive, destination, manifest)
+
+    assert verified.root == destination
+    assert verified.manifest_sha256 == sha256_bytes(manifest_data)
+    assert verified.artifacts == manifest.artifacts
+    assert (destination / "bin/tool").read_bytes() == b"tool"
+    assert (destination / "bin/tool").stat().st_mode & 0o777 == 0o755
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "bundle.tar.zst",
+        "published",
+    ]
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "bin/unlisted",
+        "runtime/unlisted",
+        "licenses/unlisted.txt",
+        "provenance/unlisted.json",
+    ),
+)
+def test_extract_bundle_rejects_every_undeclared_regular_file(
+    tmp_path: Path, relative_path: str
+) -> None:
+    root = "forza-bootstrap-bundle-v1"
+    archive, manifest, _manifest_data = bundle_archive(
+        tmp_path,
+        extras=(TarEntry(f"{root}/{relative_path}", "file", b"untrusted"),),
+    )
+
+    with pytest.raises(BootstrapError, match="undeclared bundle regular file"):
+        extract_bundle(archive, tmp_path / "published", manifest)
+
+    assert not (tmp_path / "published").exists()
+
+
+def test_extract_bundle_rejects_undeclared_top_level_regular_file(
+    tmp_path: Path,
+) -> None:
+    root = "forza-bootstrap-bundle-v1"
+    archive, manifest, _manifest_data = bundle_archive(
+        tmp_path,
+        extras=(TarEntry(f"{root}/README", "file", b"untrusted"),),
+    )
+
+    with pytest.raises(BootstrapError, match="unexpected bundle top-level entry"):
+        extract_bundle(archive, tmp_path / "published", manifest)
+
+    assert not (tmp_path / "published").exists()
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "bundle-manifest.json",
+        "licenses/xodus.txt",
+        "provenance/sources.json",
+        "provenance/build-environment.json",
+        "provenance/build-commands.txt",
+        "SHA256SUMS",
+    ),
+)
+def test_extract_bundle_requires_each_named_metadata_file(
+    tmp_path: Path, relative_path: str
+) -> None:
+    root = "forza-bootstrap-bundle-v1"
+    archive, manifest, _manifest_data = bundle_archive(
+        tmp_path,
+        omit=frozenset({f"{root}/{relative_path}"}),
+    )
+
+    with pytest.raises(BootstrapError, match="bundle metadata is missing"):
+        extract_bundle(archive, tmp_path / "published", manifest)
+
+    assert not (tmp_path / "published").exists()
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        TarEntry(
+            "forza-bootstrap-bundle-v1/licenses/xodus.txt",
+            "file",
+            b"license\n",
+            0o755,
+        ),
+        TarEntry(
+            "forza-bootstrap-bundle-v1/provenance/sources.json",
+            "file",
+            b"",
+            0o644,
+        ),
+        TarEntry(
+            "forza-bootstrap-bundle-v1/provenance/build-commands.txt",
+            "directory",
+            mode=0o755,
+        ),
+    ),
+)
+def test_extract_bundle_validates_each_named_metadata_file(
+    tmp_path: Path, replacement: TarEntry
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(
+        tmp_path,
+        extras=(replacement,),
+        omit=frozenset({replacement.name}),
+    )
+
+    with pytest.raises(BootstrapError, match="bundle metadata is invalid"):
+        extract_bundle(archive, tmp_path / "published", manifest)
+
+    assert not (tmp_path / "published").exists()
+
+
+def test_extract_bundle_rejects_duplicate_named_metadata_file(tmp_path: Path) -> None:
+    root = "forza-bootstrap-bundle-v1"
+    archive, manifest, _manifest_data = bundle_archive(
+        tmp_path,
+        extras=(TarEntry(f"{root}/provenance/sources.json", "file", b"other"),),
+    )
+
+    with pytest.raises(BootstrapError, match="duplicate archive member"):
+        extract_bundle(archive, tmp_path / "published", manifest)
+
+    assert not (tmp_path / "published").exists()
+
+
+def test_extract_bundle_rejects_wrong_archive_size_or_digest_as_declared(
+    tmp_path: Path,
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    destination = tmp_path / "published"
+
+    for wrong_bundle in (
+        replace(manifest.bundle, size=manifest.bundle.size + 1),
+        replace(manifest.bundle, sha256="0" * 64),
+    ):
+        with pytest.raises(BootstrapError, match="bundle archive .* mismatch"):
+            extract_bundle(archive, destination, replace(manifest, bundle=wrong_bundle))
+        assert not destination.exists()
+
+
+def test_extract_bundle_uses_one_pinned_source_across_both_archive_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_directory = tmp_path / "source"
+    source_directory.mkdir()
+    archive, manifest, manifest_data = bundle_archive(source_directory)
+    root = manifest.bundle.expected_root
+    replacement_directory = tmp_path / "replacement-source"
+    replacement_directory.mkdir()
+    replacement = make_tar(
+        replacement_directory,
+        bundle_entries(root, manifest_data, b"evil", 0o755),
+        suffix=".tar.zst",
+        name="bundle",
+    )
+    assert replacement.name == archive.name
+    real_scan = artifacts_module._scan_archive
+    replaced = False
+
+    def replace_path_after_inspection(
+        *args: object, **kwargs: object
+    ) -> artifacts_module._ArchiveScan:
+        nonlocal replaced
+        scan = real_scan(*args, **kwargs)
+        if kwargs.get("extraction_root_fd") is None and not replaced:
+            os.rename(source_directory, tmp_path / "retired-source")
+            os.rename(replacement_directory, source_directory)
+            replaced = True
+        return scan
+
+    monkeypatch.setattr(
+        artifacts_module, "_scan_archive", replace_path_after_inspection
+    )
+    destination = tmp_path / "published"
+
+    verified = extract_bundle(archive, destination, manifest)
+
+    assert replaced is True
+    assert verified.root == destination
+    assert (destination / "bin/tool").read_bytes() == b"tool"
+
+
+def test_extract_bundle_normalizes_archive_disappearance(tmp_path: Path) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    archive.unlink()
+
+    with pytest.raises(BootstrapError, match="bundle extraction failed"):
+        extract_bundle(archive, tmp_path / "published", manifest)
+
+
+def test_extract_bundle_rejects_wrong_internal_manifest_hash(tmp_path: Path) -> None:
+    archive, manifest, _manifest_data = bundle_archive(
+        tmp_path,
+        manifest_payload=canonical_json(
+            {
+                "artifacts": [],
+                "profile": "wrong-profile",
+                "schema": 1,
+                "sources": {},
+            }
+        ),
+    )
+
+    with pytest.raises(BootstrapError, match="bundle manifest mismatch"):
+        extract_bundle(archive, tmp_path / "published", manifest)
+
+    assert not (tmp_path / "published").exists()
+
+
+@pytest.mark.parametrize(
+    ("declared", "actual_payload", "actual_mode"),
+    (
+        (artifact(mode=0o700), b"tool", 0o755),
+        (artifact(size=5), b"tool", 0o755),
+        (artifact(digest="0" * 64), b"tool", 0o755),
+    ),
+)
+def test_extract_bundle_rejects_wrong_member_mode_size_or_hash(
+    tmp_path: Path,
+    declared: ArtifactSpec,
+    actual_payload: bytes,
+    actual_mode: int,
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(
+        tmp_path,
+        declared_artifact=declared,
+        actual_payload=actual_payload,
+        actual_mode=actual_mode,
+    )
+
+    with pytest.raises(BootstrapError, match="bundle artifact mismatch"):
+        extract_bundle(archive, tmp_path / "published", manifest)
+
+    assert not (tmp_path / "published").exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["bundle.tar.zst"]
+
+
+def test_extract_bundle_preserves_preexisting_destination(tmp_path: Path) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    destination = tmp_path / "published"
+    destination.mkdir()
+    marker = destination / "keep"
+    marker.write_bytes(b"untouched")
+
+    with pytest.raises(BootstrapError, match="destination already exists"):
+        extract_bundle(archive, destination, manifest)
+
+    assert marker.read_bytes() == b"untouched"
+
+
+def test_verify_bundle_root_rejects_any_link_or_special_object(tmp_path: Path) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path, suffix=".tar")
+    destination = tmp_path / "published"
+    extract_bundle(archive, destination, manifest)
+    (destination / "bin/link").symlink_to(destination / "bin/tool")
+
+    with pytest.raises(BootstrapError, match="regular files and directories"):
+        verify_bundle_root(destination, manifest)
+
+
+def test_verify_bundle_root_normalizes_missing_root(tmp_path: Path) -> None:
+    _archive, manifest, _manifest_data = bundle_archive(tmp_path)
+
+    with pytest.raises(BootstrapError, match="bundle verification failed"):
+        verify_bundle_root(tmp_path / "missing", manifest)
+
+
+def test_extract_bundle_revalidates_stage_at_publication_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    destination = tmp_path / "published"
+    real_verify_bundle_root = artifacts_module.verify_bundle_root
+    mutated = False
+
+    def mutate_after_verification(
+        root: Path, trust_manifest: BootstrapManifest
+    ) -> artifacts_module.VerifiedBundle:
+        nonlocal mutated
+        verified = real_verify_bundle_root(root, trust_manifest)
+        (root / "bin/tool").write_bytes(b"evil")
+        mutated = True
+        return verified
+
+    monkeypatch.setattr(
+        artifacts_module, "verify_bundle_root", mutate_after_verification
+    )
+
+    with pytest.raises(BootstrapError, match="extracted archive regular file mismatch"):
+        extract_bundle(archive, destination, manifest)
+
+    assert mutated is True
+    assert not destination.exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["bundle.tar.zst"]
+
+
+def test_extract_bundle_rejects_same_inode_mutation_during_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    destination = tmp_path / "published"
+    real_rename = artifacts_module.rename_noreplace
+
+    def mutate_then_rename(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        (tmp_path / source_name / "bin/tool").write_bytes(b"evil")
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+
+    monkeypatch.setattr(artifacts_module, "rename_noreplace", mutate_then_rename)
+
+    with pytest.raises(BootstrapError, match="archive publication verification failed"):
+        extract_bundle(archive, destination, manifest)
+
+    assert not destination.exists()
+
+
+def test_extract_bundle_preserves_concurrent_destination_replacement_after_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    destination = tmp_path / "published"
+    displaced = tmp_path / ".displaced-by-test"
+    real_rename = artifacts_module.rename_noreplace
+
+    def replace_after_rename(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+        if destination_name == "published" and source_name.endswith(".stage"):
+            os.replace(destination, displaced)
+            destination.mkdir(mode=0o700)
+            (destination / "concurrent").write_bytes(b"preserve")
+
+    monkeypatch.setattr(artifacts_module, "rename_noreplace", replace_after_rename)
+
+    with pytest.raises(BootstrapError, match="archive publication verification failed"):
+        extract_bundle(archive, destination, manifest)
+
+    assert (destination / "concurrent").read_bytes() == b"preserve"
+    assert (displaced / "bin/tool").read_bytes() == b"tool"
+
+
+def test_extract_cleanup_never_rmdirs_a_replacement_racing_the_final_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    destination = tmp_path / "published"
+    displaced = tmp_path / ".displaced-at-delete"
+    real_rename = artifacts_module.rename_noreplace
+    real_rmdir = artifacts_module.os.rmdir
+    replacement_inode: int | None = None
+
+    def mutate_then_rename(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        (tmp_path / source_name / "bin/tool").write_bytes(b"evil")
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+
+    def replace_public_at_rmdir(
+        path: str | bytes, *, dir_fd: int | None = None
+    ) -> None:
+        nonlocal replacement_inode
+        name = os.fsdecode(path)
+        is_cleanup_delete = name == "published" or (
+            name.startswith(".published.") and name.endswith(".recovery")
+        )
+        if replacement_inode is None and is_cleanup_delete:
+            if destination.exists():
+                os.replace(destination, displaced)
+            destination.mkdir(mode=0o700)
+            replacement_inode = destination.stat().st_ino
+        real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(artifacts_module, "rename_noreplace", mutate_then_rename)
+    monkeypatch.setattr(artifacts_module.os, "rmdir", replace_public_at_rmdir)
+
+    with pytest.raises(BootstrapError, match="archive publication verification failed"):
+        extract_bundle(archive, destination, manifest)
+
+    assert replacement_inode is not None
+    assert destination.stat().st_ino == replacement_inode
+
+
+def test_extract_cleanup_preserves_quarantined_foreign_tree_when_restore_races(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    destination = tmp_path / "published"
+    displaced = tmp_path / ".displaced-before-quarantine"
+    real_rename = artifacts_module.rename_noreplace
+    restore_collision = False
+
+    def replace_and_collide_restore(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        nonlocal restore_collision
+        if source_name.endswith(".recovery") and destination_name == "published":
+            restore_collision = True
+            destination.mkdir(mode=0o700)
+            (destination / "new").write_bytes(b"preserve")
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+        if destination_name == "published" and source_name.endswith(".stage"):
+            os.replace(destination, displaced)
+            destination.mkdir(mode=0o700)
+            (destination / "foreign").write_bytes(b"preserve")
+
+    monkeypatch.setattr(
+        artifacts_module, "rename_noreplace", replace_and_collide_restore
+    )
+
+    with pytest.raises(BootstrapError, match="archive publication verification failed"):
+        extract_bundle(archive, destination, manifest)
+
+    recoveries = list(tmp_path.glob(".published.*.recovery"))
+    assert restore_collision is True
+    assert (destination / "new").read_bytes() == b"preserve"
+    assert len(recoveries) == 1
+    assert (recoveries[0] / "foreign").read_bytes() == b"preserve"
+    assert (displaced / "bin/tool").read_bytes() == b"tool"
+
+
+def test_extract_bundle_closes_descriptors_when_stage_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(
+        tmp_path,
+        manifest_payload=canonical_json(
+            {"artifacts": [], "profile": "wrong", "schema": 1, "sources": {}}
+        ),
+    )
+    before_fds = len(os.listdir("/proc/self/fd"))
+
+    def failed_cleanup(_directory_fd: int) -> None:
+        raise OSError("controlled cleanup failure")
+
+    monkeypatch.setattr(artifacts_module, "_remove_directory_contents", failed_cleanup)
+
+    with pytest.raises(BootstrapError, match="bundle extraction failed"):
+        extract_bundle(archive, tmp_path / "published", manifest)
+
+    assert len(os.listdir("/proc/self/fd")) == before_fds
+
+
+def test_extract_bundle_removes_reserved_stage_when_stage_open_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    real_open = os.open
+
+    def fail_stage_open(
+        path: str | bytes,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if (
+            isinstance(path, str)
+            and path.startswith(".published.")
+            and path.endswith(".stage")
+            and flags & os.O_DIRECTORY
+        ):
+            raise OSError("controlled staging open failure")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(artifacts_module.os, "open", fail_stage_open)
+
+    with pytest.raises(BootstrapError, match="bundle extraction failed"):
+        extract_bundle(archive, tmp_path / "published", manifest)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["bundle.tar.zst"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "link_target"),
+    (
+        ("symlink", "../bin/target"),
+        ("hardlink", "GE-Proton11-3/bin/target"),
+    ),
+)
+def test_extract_ge_accepts_declared_relative_contained_links(
+    tmp_path: Path, kind: str, link_target: str
+) -> None:
+    root = "GE-Proton11-3"
+    archive = make_tar(
+        tmp_path,
+        [
+            TarEntry(root, "directory", mode=0o755),
+            TarEntry(f"{root}/bin", "directory", mode=0o755),
+            TarEntry(f"{root}/lib", "directory", mode=0o755),
+            TarEntry(f"{root}/bin/target", "file", b"target", 0o755),
+            TarEntry(f"{root}/lib/link", kind, link_target=link_target),
+        ],
+        suffix=".tar.gz",
+    )
+    destination = tmp_path / "ge"
+
+    assert extract_ge(archive, destination, root) == destination
+    assert (destination / "lib/link").read_bytes() == b"target"
+    if kind == "symlink":
+        assert (destination / "lib/link").is_symlink()
+        assert os.readlink(destination / "lib/link") == "../bin/target"
+    else:
+        assert not (destination / "lib/link").is_symlink()
+        assert (destination / "lib/link").stat().st_ino == (
+            destination / "bin/target"
+        ).stat().st_ino
+
+
+@pytest.mark.parametrize(
+    ("entries", "message"),
+    (
+        (
+            [TarEntry("GE-Proton11-3/link", "symlink", link_target="/absolute")],
+            "absolute archive link",
+        ),
+        (
+            [TarEntry("GE-Proton11-3/link", "symlink", link_target="../../escape")],
+            "escapes expected root",
+        ),
+        (
+            [TarEntry("GE-Proton11-3/link", "symlink", link_target="missing")],
+            "undeclared archive link target",
+        ),
+        (
+            [
+                TarEntry("GE-Proton11-3/a", "symlink", link_target="b"),
+                TarEntry("GE-Proton11-3/b", "symlink", link_target="a"),
+            ],
+            "archive link cycle",
+        ),
+        (
+            [
+                TarEntry(
+                    "GE-Proton11-3/link",
+                    "hardlink",
+                    link_target="GE-Proton11-3/missing",
+                )
+            ],
+            "undeclared archive link target",
+        ),
+    ),
+)
+def test_extract_ge_rejects_unsafe_dangling_or_cyclic_links(
+    tmp_path: Path, entries: list[TarEntry], message: str
+) -> None:
+    root = "GE-Proton11-3"
+    archive = make_tar(
+        tmp_path,
+        [TarEntry(root, "directory", mode=0o755), *entries],
+        suffix=".tar.gz",
+    )
+
+    with pytest.raises(BootstrapError, match=message):
+        extract_ge(archive, tmp_path / "ge", root)
+
+    assert not (tmp_path / "ge").exists()
+
+
+def test_extract_ge_rejects_special_files(tmp_path: Path) -> None:
+    archive = make_tar(
+        tmp_path,
+        [
+            TarEntry("GE-Proton11-3", "directory", mode=0o755),
+            TarEntry("GE-Proton11-3/device", "device"),
+        ],
+        suffix=".tar.gz",
+    )
+
+    with pytest.raises(BootstrapError, match="unsupported archive member type"):
+        extract_ge(archive, tmp_path / "ge", "GE-Proton11-3")
+
+    assert not (tmp_path / "ge").exists()
+
+
+def test_extract_ge_normalizes_missing_archive(tmp_path: Path) -> None:
+    with pytest.raises(BootstrapError, match="GE extraction failed"):
+        extract_ge(tmp_path / "missing.tar.gz", tmp_path / "ge", "GE-Proton11-3")
+
+
+def test_verify_bundle_tool_runs_the_real_verifier(tmp_path: Path) -> None:
+    payload = b"cli-tool"
+    declared = ArtifactSpec(
+        logical_name="xodus-service",
+        relative_path="bin/xodus-service",
+        size=len(payload),
+        sha256=sha256_bytes(payload),
+        mode=0o755,
+        private=False,
+    )
+    manifest_data = canonical_json(
+        {
+            "artifacts": [
+                {
+                    "logical_name": "xodus-service",
+                    "mode": 0o755,
+                    "private": False,
+                    "relative_path": "bin/xodus-service",
+                    "sha256": sha256_bytes(payload),
+                    "size": len(payload),
+                }
+            ],
+            "profile": "legacy-v0.1",
+            "schema": 1,
+            "sources": {
+                "xgameruntime": "a1548b1cf57371715d10b608bc81a77a188e40d4",
+                "xodus": "7b236772297b3475ea4f3cb830feb5b224f3064a",
+            },
+        }
+    )
+    root = "forza-bootstrap-bundle-v1"
+    archive = make_tar(
+        tmp_path,
+        [
+            TarEntry(root, "directory", mode=0o755),
+            TarEntry(f"{root}/bundle-manifest.json", "file", manifest_data, 0o644),
+            TarEntry(f"{root}/bin", "directory", mode=0o755),
+            TarEntry(f"{root}/bin/xodus-service", "file", payload, 0o755),
+            *bundle_metadata_entries(root, ("xodus", "xgameruntime")),
+        ],
+        suffix=".tar.zst",
+        name="cli-bundle",
+    )
+    fixture = (
+        Path(__file__).parent / "fixtures/bootstrap/valid-bootstrap.toml"
+    ).read_text(encoding="utf-8")
+    manifest_text = fixture.replace("size = 1234", f"size = {archive.stat().st_size}")
+    manifest_text = manifest_text.replace(
+        'sha256 = "1111111111111111111111111111111111111111111111111111111111111111"',
+        f'sha256 = "{sha256_file(archive)}"',
+    )
+    manifest_text = manifest_text.replace("size = 100", f"size = {declared.size}")
+    manifest_text = manifest_text.replace(
+        'sha256 = "2222222222222222222222222222222222222222222222222222222222222222"',
+        f'sha256 = "{declared.sha256}"',
+    )
+    manifest = tmp_path / "bootstrap.toml"
+    manifest.write_text(manifest_text, encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            str(Path(__file__).parents[1] / "tools/verify-bootstrap-bundle"),
+            "--manifest",
+            str(manifest),
+            str(archive),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (
+        completed.stdout
+        == f"verified bundle manifest sha256 {sha256_bytes(manifest_data)}\n"
+    )

@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+schema = 1
+app_id = "2440510"
+host = ["arch", "x86_64", "native-steam"]
+profile = "legacy-v0.1"
+
+[protonup]
+version = "0.1.5"
+project_relative = "tools/protonup"
+
+[ge]
+name = "GE-Proton11-3"
+release = "GE-Proton11-3"
+url = "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton11-3/GE-Proton11-3.tar.gz"
+filename = "GE-Proton11-3.tar.gz"
+size = 532524366
+sha256 = "861c2edc8d40d051fb1e7a692deb953be52bd339c46d90f2b7dde50ddad91266"
+expected_root = "GE-Proton11-3"
+allowed_redirect_hosts = ["github.com", "release-assets.githubusercontent.com"]
+
+[bundle]
+name = "forza-bootstrap-bundle"
+release = "v0.2.0"
+url = "https://github.com/volcmen/forza-motorsport-linux/releases/download/v0.2.0/forza-bootstrap-bundle-v1.tar.zst"
+filename = "forza-bootstrap-bundle-v1.tar.zst"
+size = 13107039
+sha256 = "68d7fc9e70a665c575f34432a5136e22bc07c840a028a52ec83b06f889c2b9b1"
+expected_root = "forza-bootstrap-bundle-v1"
+allowed_redirect_hosts = ["github.com", "release-assets.githubusercontent.com"]
+
+[[sources]]
+name = "xodus"
+repository = "https://github.com/volcmen/xodus"
+revision = "7b236772297b3475ea4f3cb830feb5b224f3064a"
+
+[[sources]]
+name = "xgameruntime"
+repository = "https://github.com/volcmen/wine-forza-motorsport"
+revision = "a1548b1cf57371715d10b608bc81a77a188e40d4"
+
+[builder]
+image = "ghcr.io/volcmen/forza-motorsport-builder@sha256:3a4274c5913404e366163e23437101f64e59ccbe1b00c74d9d57378f4ac82ae5"
+base_image = "docker.io/library/archlinux:base-devel@sha256:694da1fce635e3a14d90751941b08f02c500e8724682f7a00768e7152251ec34"
+arch_snapshot = "https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch"
+source_date_epoch = 1756684800
+
+[[artifacts]]
+logical_name = "xodus-service"
+relative_path = "bin/xodus-service"
+size = 22107120
+sha256 = "6e4d185ea4bcb216feb0b49d207c2c8737f943e2f0cc917403d4276f8db1519c"
+mode = 493
+private = false
+
+[[artifacts]]
+logical_name = "xodus-cli"
+relative_path = "bin/xodus-cli"
+size = 21546816
+sha256 = "f476dc34824ca8dc2f9f4f1df954586d4bd12d19d91d771e6496264c27378895"
+mode = 493
+private = false
+
+[[artifacts]]
+logical_name = "xodus-overlay"
+relative_path = "bin/xodus-overlay"
+size = 2312928
+sha256 = "4471cd345b2b40a8ad3c5dfc57e5a5082c1ed93f180d585a674db90994839cfd"
+mode = 493
+private = false
+
+[[artifacts]]
+logical_name = "xgameruntime-pe64"
+relative_path = "runtime/xgameruntime.dll"
+size = 11326976
+sha256 = "49e2d351c327d0012cacd23184f64af2ae2f7c7efe2d75dc366609541faf8f46"
+mode = 420
+private = false
+
+[[artifacts]]
+logical_name = "xgameruntime-unix64"
+relative_path = "runtime/xgameruntime.so"
+size = 48608
+sha256 = "5f48981522e088018d4b87727c7b3d4985156b233f42fb9a23ddef2b1c3f5b4a"
+mode = 493
+private = false

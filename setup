@@ -6,9 +6,14 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DOCTOR="$ROOT/bin/forza-doctor"
 INSTALL_USER="$ROOT/scripts/install-user"
 RUNTIME_INSTALLER="$ROOT/scripts/install-runtime-components"
+BOOTSTRAP="$ROOT/scripts/forza-bootstrap"
 
 usage() {
-    printf '%s\n' "usage: $0 [check|status|rollback|steam-options|uninstall]" >&2
+    printf '%s\n' \
+        "usage: $0 [check|status|rollback|steam-options|uninstall]" \
+        "       $0 bootstrap [OPTIONS]" \
+        "       $0 snapshot [OPTIONS]" \
+        "       $0 compare [OPTIONS]" >&2
     exit 64
 }
 
@@ -16,14 +21,23 @@ print_help() {
     printf '%s\n' \
         'Guided setup for an experimental, source-only Forza Motorsport Linux integration.' \
         '' \
+        'Hybrid bootstrap:' \
+        '  ./setup bootstrap              Prepare or resume the hybrid bootstrap' \
+        '  ./setup bootstrap --check      Inspect durable state and managed paths; bootstrap --check is read-only' \
+        '  ./setup bootstrap --rollback   Roll back the composed bootstrap transaction' \
+        '  ./setup snapshot               Capture the finite scope; prints redacted JSON; --output writes private evidence' \
+        '  ./setup compare                Compare the last transaction before/after pair by default' \
+        '' \
+        'Legacy expert workflow:' \
         '  ./setup                 Guided installation (shows a digest-bound plan first)' \
         '  ./setup check           Read-only readiness check' \
         '  ./setup status          Runtime transaction state and readiness report' \
-        '  ./setup rollback        Explicit transaction rollback' \
+        '  ./setup rollback        Roll back only the legacy runtime transaction' \
         '  ./setup steam-options   Print launch options for manual pasting' \
         '  ./setup uninstall       Remove manifest-proven files while Forza/Xodus are stopped' \
         '' \
-        'This command does not download binaries, edit Steam, patch Wine, or launch the game.'
+        'The hybrid bootstrap does not edit Steam or launch the game.' \
+        'The legacy guided command does not download binaries, edit Steam, patch Wine, or launch the game.'
 }
 
 require_absolute() {
@@ -221,6 +235,14 @@ run_install() {
     printf '%s\n' 'Paste the generated options into Steam. Launch Forza yourself from Steam.'
     printf '%s\n' 'If the doctor reports a known-build WARN, review the documented controller/AP702 fallback before launching.'
 }
+
+case "${1:-}" in
+    bootstrap | snapshot | compare)
+        command=$1
+        shift
+        exec "$BOOTSTRAP" "$command" "$@"
+        ;;
+esac
 
 (($# <= 1)) || usage
 case "${1:-}" in

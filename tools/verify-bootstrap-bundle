@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Verify a bootstrap release bundle without publishing its extracted tree."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from forza_bootstrap.artifacts import extract_bundle
+from forza_bootstrap.manifest import load_bootstrap_manifest
+from forza_bootstrap.model import BootstrapError
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Verify one pinned bootstrap bundle")
+    parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("archive", type=Path)
+    arguments = parser.parse_args(argv)
+    try:
+        manifest = load_bootstrap_manifest(arguments.manifest)
+        with tempfile.TemporaryDirectory(prefix="forza-bundle-verify-") as temporary:
+            destination = Path(temporary) / manifest.bundle.expected_root
+            verified = extract_bundle(
+                arguments.archive.resolve(), destination, manifest
+            )
+            print(f"verified bundle manifest sha256 {verified.manifest_sha256}")
+        return 0
+    except BootstrapError as error:
+        print(f"bundle verification failed: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

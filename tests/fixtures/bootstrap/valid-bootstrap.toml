@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+schema = 1
+app_id = "2440510"
+host = ["arch", "x86_64", "native-steam"]
+profile = "legacy-v0.1"
+
+[protonup]
+version = "0.1.5"
+project_relative = "tools/protonup"
+
+[ge]
+name = "GE-Proton11-3"
+release = "GE-Proton11-3"
+url = "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton11-3/GE-Proton11-3.tar.gz"
+filename = "GE-Proton11-3.tar.gz"
+size = 532524366
+sha256 = "861c2edc8d40d051fb1e7a692deb953be52bd339c46d90f2b7dde50ddad91266"
+expected_root = "GE-Proton11-3"
+allowed_redirect_hosts = ["github.com"]
+
+[bundle]
+name = "forza-bootstrap-bundle"
+release = "v1"
+url = "https://example.invalid/forza-bootstrap-bundle-v1.tar.zst"
+filename = "forza-bootstrap-bundle-v1.tar.zst"
+size = 1234
+sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+expected_root = "forza-bootstrap-bundle-v1"
+allowed_redirect_hosts = ["example.invalid"]
+
+[[sources]]
+name = "xodus"
+repository = "https://github.com/volcmen/xodus"
+revision = "7b236772297b3475ea4f3cb830feb5b224f3064a"
+
+[[sources]]
+name = "xgameruntime"
+repository = "https://github.com/volcmen/wine-forza-motorsport"
+revision = "a1548b1cf57371715d10b608bc81a77a188e40d4"
+
+[builder]
+image = "registry.example.invalid/forza-builder@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+base_image = "docker.io/library/archlinux:base-devel@sha256:694da1fce635e3a14d90751941b08f02c500e8724682f7a00768e7152251ec34"
+arch_snapshot = "https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch"
+source_date_epoch = 1756684800
+
+[[artifacts]]
+logical_name = "xodus-service"
+relative_path = "bin/xodus-service"
+size = 100
+sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
+mode = 493
+private = false

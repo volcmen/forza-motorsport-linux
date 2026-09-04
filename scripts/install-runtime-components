@@ -24,7 +24,8 @@ from typing import Any
 
 APP_ID = "2440510"
 VERSION = 2
-EVIDENCE_VERSION = 2
+EVIDENCE_VERSION = 3
+LEGACY_EVIDENCE_VERSION = 2
 MANIFEST_MODE = 0o600
 SAFE_SOURCE_MASK = 0o7022
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -115,6 +116,24 @@ ROLES = {
         "destination_relative": ".config/systemd/user/xodus-forza.service",
         "target_mode": 0o644,
     },
+}
+BUNDLE_ROLE_PATHS = {
+    "xodus-service": "bin/xodus-service",
+    "xodus-cli": "bin/xodus-cli",
+    "xodus-overlay": "bin/xodus-overlay",
+    "xgameruntime-pe64": "runtime/xgameruntime.dll",
+    "xgameruntime-unix64": "runtime/xgameruntime.so",
+}
+BUNDLE_MANIFEST_NAME = "bundle-manifest.json"
+BUNDLE_MANIFEST_MODE = 0o644
+BUNDLE_MANIFEST_KEYS = {"schema", "profile", "sources", "artifacts"}
+BUNDLE_ARTIFACT_KEYS = {
+    "logical_name",
+    "relative_path",
+    "size",
+    "sha256",
+    "mode",
+    "private",
 }
 INSTALL_ORDER = (
     "launcher-gate",
@@ -420,6 +439,25 @@ def expected_runtime_profile(integration_root: Path) -> tuple[str, str, str]:
     return reviewed_runtime_profile(integration_root)
 
 
+def integration_root() -> Path:
+    configured = os.environ.get("FORZA_RUNTIME_INTEGRATION_ROOT")
+    if configured is None:
+        root = Path(
+            git_output(
+                Path(os.path.abspath(__file__)).parent.parent,
+                "rev-parse",
+                "--show-toplevel",
+            )
+        )
+    else:
+        root = Path(configured)
+        if not root.is_absolute():
+            raise RuntimeInstallError("runtime integration root must be absolute")
+    root_fd = open_absolute_directory(root)
+    os.close(root_fd)
+    return root
+
+
 def source_roots(wine_build: Path, xodus_build: Path) -> dict[str, Path]:
     wine_fd = open_absolute_directory(wine_build)
     try:
@@ -439,21 +477,11 @@ def source_roots(wine_build: Path, xodus_build: Path) -> dict[str, Path]:
         raise RuntimeInstallError(
             "Xodus build directory must be the reviewed target/release directory"
         )
-    integration_root = Path(
-        git_output(
-            Path(os.path.abspath(__file__)).parent.parent,
-            "rev-parse",
-            "--show-toplevel",
-        )
-    )
-    if os.environ.get("FORZA_RUNTIME_TESTING") == "1":
-        integration_root = Path(
-            os.environ.get("FORZA_RUNTIME_INTEGRATION_ROOT", integration_root)
-        )
+    integration = integration_root()
     roots = {
         "xgameruntime": Path(matches[0]),
         "xodus": xodus_build.parent.parent,
-        "integration": integration_root,
+        "integration": integration,
     }
     for root in roots.values():
         root_fd = open_absolute_directory(root)
@@ -466,9 +494,7 @@ def verify_revisions(roots: dict[str, Path]) -> tuple[str, dict[str, str]]:
         roots["integration"]
     )
     observed = {
-        "xgameruntime_git_sha": git_output(
-            roots["xgameruntime"], "rev-parse", "HEAD"
-        ),
+        "xgameruntime_git_sha": git_output(roots["xgameruntime"], "rev-parse", "HEAD"),
         "xodus_git_sha": git_output(roots["xodus"], "rev-parse", "HEAD"),
         "integration_git_sha": git_output(roots["integration"], "rev-parse", "HEAD"),
     }
@@ -495,8 +521,15 @@ def artifact_inputs(
         "xodus": xodus_build,
         "integration": integration_root,
     }
+    return artifact_inputs_from_roots(build_roots, tuple(ROLES))
+
+
+def artifact_inputs_from_roots(
+    build_roots: dict[str, Path], roles: tuple[str, ...]
+) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
-    for role, contract in ROLES.items():
+    for role in roles:
+        contract = ROLES[role]
         root_fd = open_absolute_directory(build_roots[contract["source_root"]])
         try:
             data, mode, _ = read_relative(root_fd, contract["source_relative"])
@@ -522,6 +555,167 @@ def artifact_inputs(
     return result
 
 
+def bundle_manifest_path(bundle_root: Path, requested: Path) -> Path:
+    expected = bundle_root / BUNDLE_MANIFEST_NAME
+    if requested != expected:
+        raise RuntimeInstallError(f"bundle manifest must be exactly {expected}")
+    return expected
+
+
+def load_bundle_manifest(
+    bundle_root: Path, requested: Path
+) -> tuple[dict[str, Any], bytes]:
+    bundle_manifest_path(bundle_root, requested)
+    root_fd = open_absolute_directory(bundle_root)
+    try:
+        data, mode, info = read_relative(root_fd, BUNDLE_MANIFEST_NAME)
+    finally:
+        os.close(root_fd)
+    if mode != BUNDLE_MANIFEST_MODE or info.st_size > 1024 * 1024:
+        raise RuntimeInstallError("bundle manifest has unsafe mode or size")
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeInstallError("bundle manifest is invalid JSON") from error
+    if not isinstance(value, dict) or set(value) != BUNDLE_MANIFEST_KEYS:
+        raise RuntimeInstallError("bundle manifest keys are invalid")
+    if type(value.get("schema")) is not int or value["schema"] != 1:
+        raise RuntimeInstallError("bundle manifest schema is invalid")
+    if not isinstance(value.get("profile"), str) or not value["profile"].strip():
+        raise RuntimeInstallError("bundle runtime profile is invalid")
+    sources = value.get("sources")
+    if (
+        not isinstance(sources, dict)
+        or set(sources) != {"xgameruntime", "xodus"}
+        or not all(valid_digest(revision, 40) for revision in sources.values())
+    ):
+        raise RuntimeInstallError("bundle source revisions are invalid")
+    records = value.get("artifacts")
+    if not isinstance(records, list) or len(records) != len(BUNDLE_ROLE_PATHS):
+        raise RuntimeInstallError("bundle artifact role set mismatch")
+    by_role: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, dict) or set(record) != BUNDLE_ARTIFACT_KEYS:
+            raise RuntimeInstallError("bundle artifact record is invalid")
+        role = record.get("logical_name")
+        if (
+            not isinstance(role, str)
+            or role not in BUNDLE_ROLE_PATHS
+            or role in by_role
+        ):
+            raise RuntimeInstallError("bundle artifact role set mismatch")
+        if (
+            record.get("relative_path") != BUNDLE_ROLE_PATHS[role]
+            or type(record.get("size")) is not int
+            or record["size"] < 0
+            or not valid_digest(record.get("sha256"))
+            or type(record.get("mode")) is not int
+            or not 0 <= record["mode"] <= 0o777
+            or record.get("private") is not False
+        ):
+            raise RuntimeInstallError(f"bundle artifact record is invalid: {role}")
+        by_role[role] = record
+    if set(by_role) != set(BUNDLE_ROLE_PATHS):
+        raise RuntimeInstallError("bundle artifact role set mismatch")
+    return value, data
+
+
+def artifact_inputs_from_bundle(
+    bundle_root: Path, bundle_manifest: Path
+) -> dict[str, dict[str, Any]]:
+    manifest, _ = load_bundle_manifest(bundle_root, bundle_manifest)
+    return artifact_inputs_from_bundle_manifest(bundle_root, manifest)
+
+
+def artifact_inputs_from_bundle_manifest(
+    bundle_root: Path, manifest: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    records = {record["logical_name"]: record for record in manifest["artifacts"]}
+    root_fd = open_absolute_directory(bundle_root)
+    result: dict[str, dict[str, Any]] = {}
+    try:
+        for role, relative in BUNDLE_ROLE_PATHS.items():
+            data, mode, info = read_relative(root_fd, relative)
+            record = records[role]
+            if info.st_size != record["size"] or digest(data) != record["sha256"]:
+                raise RuntimeInstallError(f"bundle artifact digest mismatch: {role}")
+            if mode != record["mode"] or mode & SAFE_SOURCE_MASK:
+                raise RuntimeInstallError(f"bundle artifact mode mismatch: {role}")
+            if role.startswith("xodus-") and not mode & 0o111:
+                raise RuntimeInstallError(f"bundle artifact is not executable: {role}")
+            result[role] = {
+                "role": role,
+                "source_root": "bundle",
+                "source_relative": relative,
+                "source_mode": mode,
+                "source_sha256": digest(data),
+                "target_mode": ROLES[role]["target_mode"],
+                "data": data,
+            }
+    finally:
+        os.close(root_fd)
+    return result
+
+
+def source_input_context(
+    arguments: argparse.Namespace,
+) -> tuple[str, dict[str, str], str | None, dict[str, dict[str, Any]]]:
+    roots = source_roots(arguments.xgameruntime_build_dir, arguments.xodus_build_dir)
+    profile, revisions = verify_revisions(roots)
+    artifacts = artifact_inputs(
+        arguments.xgameruntime_build_dir,
+        arguments.xodus_build_dir,
+        roots["integration"],
+    )
+    return profile, revisions, None, artifacts
+
+
+def bundle_input_context(
+    arguments: argparse.Namespace,
+) -> tuple[str, dict[str, str], str, dict[str, dict[str, Any]]]:
+    integration = integration_root()
+    profile, expected_wine, expected_xodus = expected_runtime_profile(integration)
+    manifest, manifest_data = load_bundle_manifest(
+        arguments.artifact_bundle_root, arguments.bundle_manifest
+    )
+    if manifest["profile"] != profile:
+        raise RuntimeInstallError("bundle runtime profile mismatch")
+    expected_sources = {
+        "xgameruntime": expected_wine,
+        "xodus": expected_xodus,
+    }
+    if manifest["sources"] != expected_sources:
+        raise RuntimeInstallError("bundle source revision mismatch")
+    integration_revision = git_output(integration, "rev-parse", "HEAD")
+    if git_output(integration, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise RuntimeInstallError(f"reviewed source worktree is dirty: {integration}")
+    artifacts = artifact_inputs_from_bundle_manifest(
+        arguments.artifact_bundle_root, manifest
+    )
+    integration_roles = tuple(
+        role
+        for role, contract in ROLES.items()
+        if contract["source_root"] == "integration"
+    )
+    artifacts.update(
+        artifact_inputs_from_roots({"integration": integration}, integration_roles)
+    )
+    revisions = {
+        "xgameruntime_git_sha": manifest["sources"]["xgameruntime"],
+        "xodus_git_sha": manifest["sources"]["xodus"],
+        "integration_git_sha": integration_revision,
+    }
+    return profile, revisions, digest(manifest_data), artifacts
+
+
+def input_context(
+    arguments: argparse.Namespace,
+) -> tuple[str, dict[str, str], str | None, dict[str, dict[str, Any]]]:
+    if arguments.input_kind == "bundle":
+        return bundle_input_context(arguments)
+    return source_input_context(arguments)
+
+
 def evidence_path(user_root: Path, requested: Path) -> Path:
     expected = user_root / STATE_RELATIVE / EVIDENCE_NAME
     if requested != expected:
@@ -532,15 +726,10 @@ def evidence_path(user_root: Path, requested: Path) -> Path:
 
 
 def lock_evidence(arguments: argparse.Namespace) -> None:
-    roots = source_roots(arguments.xgameruntime_build_dir, arguments.xodus_build_dir)
-    profile, revisions = verify_revisions(roots)
-    artifacts = artifact_inputs(
-        arguments.xgameruntime_build_dir,
-        arguments.xodus_build_dir,
-        roots["integration"],
-    )
+    profile, revisions, bundle_manifest_hash, artifacts = input_context(arguments)
     evidence = {
         "version": EVIDENCE_VERSION,
+        "input_kind": arguments.input_kind,
         "runtime_profile": profile,
         "source_revisions": revisions,
         "artifacts": [
@@ -548,6 +737,8 @@ def lock_evidence(arguments: argparse.Namespace) -> None:
             for role in ROLES
         ],
     }
+    if bundle_manifest_hash is not None:
+        evidence["bundle_manifest_sha256"] = bundle_manifest_hash
     user_fd = open_absolute_directory(arguments.user_root)
     try:
         state_fd = open_state_directory(user_fd, create=True)
@@ -579,9 +770,31 @@ def validate_evidence(value: object) -> dict[str, Any]:
     if (
         not isinstance(value, dict)
         or type(value.get("version")) is not int
-        or value["version"] != EVIDENCE_VERSION
+        or value["version"] not in {LEGACY_EVIDENCE_VERSION, EVIDENCE_VERSION}
     ):
         raise RuntimeInstallError("artifact evidence manifest version mismatch")
+    version = value["version"]
+    if version == LEGACY_EVIDENCE_VERSION:
+        input_kind = "source"
+    else:
+        input_kind = value.get("input_kind")
+        if not isinstance(input_kind, str) or input_kind not in {"source", "bundle"}:
+            raise RuntimeInstallError("artifact evidence input kind is invalid")
+        expected_keys = {
+            "version",
+            "input_kind",
+            "runtime_profile",
+            "source_revisions",
+            "artifacts",
+        }
+        if input_kind == "bundle":
+            expected_keys.add("bundle_manifest_sha256")
+        if set(value) != expected_keys:
+            raise RuntimeInstallError("artifact evidence manifest keys are invalid")
+        if input_kind == "bundle" and not valid_digest(
+            value.get("bundle_manifest_sha256")
+        ):
+            raise RuntimeInstallError("artifact evidence bundle digest is invalid")
     revisions = value.get("source_revisions")
     if (
         not isinstance(value.get("runtime_profile"), str)
@@ -593,13 +806,21 @@ def validate_evidence(value: object) -> dict[str, Any]:
     ):
         raise RuntimeInstallError("artifact evidence source revisions are invalid")
     records = value.get("artifacts")
-    if not isinstance(records, list) or [
-        record.get("role") for record in records if isinstance(record, dict)
-    ] != list(ROLES):
+    if (
+        not isinstance(records, list)
+        or len(records) != len(ROLES)
+        or not all(isinstance(record, dict) for record in records)
+        or [record.get("role") for record in records] != list(ROLES)
+    ):
         raise RuntimeInstallError("artifact evidence role set mismatch")
     for record in records:
         role = record["role"]
         contract = ROLES[role]
+        expected_source_root = contract["source_root"]
+        expected_source_relative = contract["source_relative"]
+        if input_kind == "bundle" and role in BUNDLE_ROLE_PATHS:
+            expected_source_root = "bundle"
+            expected_source_relative = BUNDLE_ROLE_PATHS[role]
         if (
             set(record)
             != {
@@ -610,8 +831,8 @@ def validate_evidence(value: object) -> dict[str, Any]:
                 "source_sha256",
                 "target_mode",
             }
-            or record.get("source_root") != contract["source_root"]
-            or record.get("source_relative") != contract["source_relative"]
+            or record.get("source_root") != expected_source_root
+            or record.get("source_relative") != expected_source_relative
             or not isinstance(record.get("source_mode"), int)
             or record.get("source_mode") & SAFE_SOURCE_MASK
             or not valid_digest(record.get("source_sha256"))
@@ -640,18 +861,24 @@ def load_evidence(
         raise RuntimeInstallError(
             "artifact evidence manifest is invalid JSON"
         ) from error
-    roots = source_roots(arguments.xgameruntime_build_dir, arguments.xodus_build_dir)
-    profile, revisions = verify_revisions(roots)
+    evidence_input_kind = (
+        "source"
+        if evidence["version"] == LEGACY_EVIDENCE_VERSION
+        else evidence["input_kind"]
+    )
+    if evidence_input_kind != arguments.input_kind:
+        raise RuntimeInstallError("artifact evidence input kind mismatch")
+    profile, revisions, bundle_manifest_hash, current = input_context(arguments)
     if (
         evidence.get("runtime_profile") != profile
         or evidence.get("source_revisions") != revisions
     ):
         raise RuntimeInstallError("artifact evidence source revision mismatch")
-    current = artifact_inputs(
-        arguments.xgameruntime_build_dir,
-        arguments.xodus_build_dir,
-        roots["integration"],
-    )
+    if (
+        arguments.input_kind == "bundle"
+        and evidence.get("bundle_manifest_sha256") != bundle_manifest_hash
+    ):
+        raise RuntimeInstallError("bundle manifest changed after evidence lock")
     expected_records = {record["role"]: record for record in evidence["artifacts"]}
     for role, observed in current.items():
         record = {key: value for key, value in observed.items() if key != "data"}
@@ -846,6 +1073,40 @@ def acquire_launcher_lock() -> int:
         raise RuntimeInstallError("XDG_RUNTIME_DIR is required for mutating operations")
     runtime_fd = open_absolute_directory(Path(runtime))
     try:
+        inherited = os.environ.get("FORZA_LAUNCHER_LEASE_FD")
+        if inherited is not None:
+            if not inherited.isascii() or not inherited.isdecimal():
+                raise RuntimeInstallError("inherited launcher lease is invalid")
+            inherited_fd = int(inherited)
+            if inherited_fd < 3:
+                raise RuntimeInstallError("inherited launcher lease is invalid")
+            linked_fd: int | None = None
+            try:
+                inherited_info = os.fstat(inherited_fd)
+                linked_fd = os.open(
+                    "forza-linux.lock",
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=runtime_fd,
+                )
+                linked_info = os.fstat(linked_fd)
+                if (
+                    not stat.S_ISREG(inherited_info.st_mode)
+                    or inherited_info.st_uid != os.getuid()
+                    or stat.S_IMODE(inherited_info.st_mode) != 0o600
+                    or inherited_info.st_nlink != 1
+                    or (inherited_info.st_dev, inherited_info.st_ino)
+                    != (linked_info.st_dev, linked_info.st_ino)
+                ):
+                    raise RuntimeInstallError("inherited launcher lease is invalid")
+                fcntl.flock(inherited_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return os.dup(inherited_fd)
+            except (OSError, BlockingIOError) as error:
+                raise RuntimeInstallError(
+                    "inherited launcher lease is invalid"
+                ) from error
+            finally:
+                if linked_fd is not None:
+                    os.close(linked_fd)
         try:
             lock_fd = os.open(
                 "forza-linux.lock",
@@ -934,8 +1195,7 @@ def validate_v1_journal_schema(journal: dict[str, Any], revisions: object) -> No
         raise RuntimeInstallError("transaction journal v1 must not name a profile")
     if (
         not isinstance(revisions, dict)
-        or set(revisions)
-        != {"winegdk_git_sha", "xodus_git_sha", "integration_git_sha"}
+        or set(revisions) != {"winegdk_git_sha", "xodus_git_sha", "integration_git_sha"}
         or not all(valid_digest(value, 40) for value in revisions.values())
     ):
         raise RuntimeInstallError("transaction journal source revisions are invalid")
@@ -1755,13 +2015,19 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--xgameruntime-build-dir",
-        required=True,
         type=absolute_argument("XGameRuntime build directory"),
     )
     parser.add_argument(
         "--xodus-build-dir",
-        required=True,
         type=absolute_argument("Xodus build directory"),
+    )
+    parser.add_argument(
+        "--artifact-bundle-root",
+        type=absolute_argument("artifact bundle root"),
+    )
+    parser.add_argument(
+        "--bundle-manifest",
+        type=absolute_argument("bundle manifest"),
     )
     parser.add_argument(
         "--artifact-evidence-manifest",
@@ -1771,6 +2037,27 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--plan-sha256")
     parser.add_argument("--adopt-unmanaged", action="store_true")
     arguments = parser.parse_args()
+    bundle_mode = (
+        arguments.artifact_bundle_root is not None
+        or arguments.bundle_manifest is not None
+    )
+    source_mode = (
+        arguments.xgameruntime_build_dir is not None
+        or arguments.xodus_build_dir is not None
+    )
+    if bundle_mode and source_mode:
+        parser.error("choose exactly one complete artifact input mode")
+    if not bundle_mode and not source_mode:
+        parser.error("choose exactly one complete artifact input mode")
+    if bundle_mode and (
+        arguments.artifact_bundle_root is None or arguments.bundle_manifest is None
+    ):
+        parser.error("artifact input mode bundle requires root and manifest")
+    if source_mode and (
+        arguments.xgameruntime_build_dir is None or arguments.xodus_build_dir is None
+    ):
+        parser.error("artifact input mode source requires both build directories")
+    arguments.input_kind = "bundle" if bundle_mode else "source"
     if arguments.operation == "install":
         value = arguments.plan_sha256 or ""
         if len(value) != 64 or any(
@@ -1785,6 +2072,10 @@ def parse_arguments() -> argparse.Namespace:
         parser.error("--adopt-unmanaged is valid only for plan and install")
     try:
         evidence_path(arguments.user_root, arguments.artifact_evidence_manifest)
+        if arguments.input_kind == "bundle":
+            bundle_manifest_path(
+                arguments.artifact_bundle_root, arguments.bundle_manifest
+            )
     except RuntimeInstallError as error:
         parser.error(str(error))
     return arguments

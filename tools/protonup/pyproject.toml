@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[project]
+name = "forza-bootstrap-protonup-runner"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["protonup==0.1.5"]

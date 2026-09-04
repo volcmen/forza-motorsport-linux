@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+import uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from forza_bootstrap.container_build import (
+    BUNDLE_ARCHIVE,
+    BuildInputs,
+    builder_build_argv,
+    check_docker,
+    dependency_fetch_argv,
+    fetch_source,
+    offline_build_argv,
+    prepare_container_stage,
+    publish_container_output,
+    validate_offline_build_argv,
+    verify_fixture_archive,
+    verify_output_bundle,
+)
+from forza_bootstrap.model import BootstrapError, SourceSpec
+
+XODUS = SourceSpec(
+    "xodus",
+    "https://github.com/volcmen/xodus",
+    "7b236772297b3475ea4f3cb830feb5b224f3064a",
+)
+XGAMERUNTIME = SourceSpec(
+    "xgameruntime",
+    "https://github.com/volcmen/wine-forza-motorsport",
+    "a1548b1cf57371715d10b608bc81a77a188e40d4",
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build the verified open-source Forza bootstrap bundle."
+    )
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--fixture", action="store_true")
+    mode.add_argument("--clean", action="store_true")
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--builder-image")
+    parser.add_argument("--expected-sha256")
+    return parser.parse_args()
+
+
+def checked_output(path: Path) -> Path:
+    if not path.is_absolute():
+        raise BootstrapError("output directory must be absolute")
+    try:
+        info = path.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.getuid()
+            or path.resolve(strict=True) != path
+        ):
+            raise BootstrapError("output directory is unsafe")
+        if any(path.iterdir()):
+            raise BootstrapError("output directory is not empty")
+    except FileNotFoundError:
+        raise BootstrapError("output directory does not exist") from None
+    return path
+
+
+def run(argv: tuple[str, ...]) -> None:
+    subprocess.run(argv, cwd=ROOT, check=True)
+
+
+def make_fixture_source(path: Path, revision_seed: str) -> tuple[Path, str]:
+    path.mkdir()
+    subprocess.run(("git", "init", "-q", str(path)), check=True)
+    subprocess.run(
+        ("git", "-C", str(path), "config", "user.name", "Fixture"), check=True
+    )
+    subprocess.run(
+        ("git", "-C", str(path), "config", "user.email", "fixture@example.invalid"),
+        check=True,
+    )
+    marker = path / "fixture"
+    marker.write_text(revision_seed + "\n", encoding="ascii")
+    subprocess.run(("git", "-C", str(path), "add", "fixture"), check=True)
+    subprocess.run(
+        ("git", "-C", str(path), "commit", "-q", "-m", "fixture"), check=True
+    )
+    subprocess.run(
+        ("git", "-C", str(path), "checkout", "-q", "--detach", "HEAD"), check=True
+    )
+    revision = subprocess.run(
+        ("git", "-C", str(path), "rev-parse", "--verify", "HEAD^{commit}"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return path, revision
+
+
+def local_builder_ref() -> str:
+    path = ROOT / "runtime/release/builder-ref.txt"
+    try:
+        value = path.read_text(encoding="ascii").splitlines()[0]
+    except (OSError, IndexError):
+        raise BootstrapError("builder image digest is required") from None
+    return value
+
+
+def require_declared_output(stage: Path) -> Path:
+    expected = stage / BUNDLE_ARCHIVE
+    if (
+        set(stage.iterdir()) != {expected}
+        or expected.is_symlink()
+        or not expected.is_file()
+    ):
+        raise BootstrapError("container produced undeclared output")
+    return expected
+
+
+def fixture_build(output: Path) -> Path:
+    tag = f"forza-bundle-fixture:{uuid.uuid4().hex}"
+    build = list(builder_build_argv(tag))
+    build[build.index("--target=builder")] = "--target=fixture"
+    run(tuple(build))
+    result = subprocess.run(
+        ("docker", "image", "inspect", "--format", "{{.Id}}", tag),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    image = result.stdout.strip()
+    with tempfile.TemporaryDirectory(prefix="forza-container-fixture-") as temporary:
+        root = Path(temporary)
+        dependencies = prepare_container_stage(root, "dependencies")
+        container_output = prepare_container_stage(root, "output")
+        xodus_source, xodus_revision = make_fixture_source(root / "xodus", "xodus")
+        runtime_source, runtime_revision = make_fixture_source(
+            root / "xgameruntime", "xgameruntime"
+        )
+        inputs = BuildInputs(
+            xodus_source,
+            runtime_source,
+            dependencies,
+            container_output,
+            image,
+            xodus_revision,
+            runtime_revision,
+            root,
+        )
+        offline = validate_offline_build_argv(
+            (*offline_build_argv(inputs, container_output), "--fixture"),
+            inputs,
+            container_output,
+            fixture=True,
+        )
+        run(offline)
+        archive = publish_container_output(
+            require_declared_output(container_output), output
+        )
+    return archive
+
+
+def clean_build(output: Path, builder_image: str) -> Path:
+    # Retain source-build evidence, including rootless subuid-owned Cargo
+    # checkouts, so cleanup cannot mask a compiler failure.
+    root = Path(tempfile.mkdtemp(prefix="forza-source-build-"))
+    print(f"Build workspace retained at {root}", file=sys.stderr)
+    source_cache = root / "sources"
+    source_cache.mkdir(mode=0o700)
+    dependencies = prepare_container_stage(root, "dependencies")
+    container_output = prepare_container_stage(root, "output")
+    inputs = BuildInputs(
+        fetch_source(XODUS, source_cache),
+        fetch_source(XGAMERUNTIME, source_cache),
+        dependencies,
+        container_output,
+        builder_image,
+        XODUS.revision,
+        XGAMERUNTIME.revision,
+        root,
+    )
+    run(dependency_fetch_argv(inputs))
+    offline = validate_offline_build_argv(
+        offline_build_argv(inputs, container_output), inputs, container_output
+    )
+    run(offline)
+    archive = publish_container_output(
+        require_declared_output(container_output), output
+    )
+    return archive
+
+
+def main() -> int:
+    args = parse_args()
+    output = checked_output(args.output)
+    check_docker()
+    archive = (
+        fixture_build(output)
+        if args.fixture
+        else clean_build(output, args.builder_image or local_builder_ref())
+    )
+    if args.fixture:
+        verify_fixture_archive(archive)
+    if args.expected_sha256:
+        verify_output_bundle(archive, args.expected_sha256)
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    print(f"{digest}  {archive}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (BootstrapError, subprocess.CalledProcessError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        raise SystemExit(2) from None
