@@ -274,6 +274,64 @@ def test_v3_evidence_rejects_unknown_keys_before_destinations_change(tmp_path: P
     assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
 
 
+def test_bundle_manifest_rejects_non_string_logical_name_without_traceback(
+    tmp_path: Path,
+):
+    fixture = setup_fixture(tmp_path, input_kind="bundle")
+    manifest: Path = fixture["bundle_manifest"]  # type: ignore[assignment]
+    value = json.loads(manifest.read_text())
+    value["artifacts"][0]["logical_name"] = []
+    manifest.write_text(json.dumps(value) + "\n", encoding="ascii")
+    manifest.chmod(0o644)
+    before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
+    before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
+
+    failed = run_tool(fixture, "lock-evidence", check=False)
+
+    assert failed.returncode != 0
+    assert "bundle artifact" in failed.stderr.lower()
+    assert "traceback" not in failed.stderr.lower()
+    assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
+
+
+def test_v3_evidence_rejects_non_string_input_kind_without_traceback(tmp_path: Path):
+    fixture = setup_fixture(tmp_path, input_kind="bundle")
+    run_tool(fixture, "lock-evidence")
+    evidence: Path = fixture["evidence"]  # type: ignore[assignment]
+    value = json.loads(evidence.read_text())
+    value["input_kind"] = []
+    evidence.write_text(json.dumps(value) + "\n", encoding="ascii")
+    evidence.chmod(0o600)
+    before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
+    before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
+
+    failed = run_tool(fixture, "plan", check=False)
+
+    assert failed.returncode != 0
+    assert "evidence input kind" in failed.stderr.lower()
+    assert "traceback" not in failed.stderr.lower()
+    assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
+
+
+def test_v3_evidence_rejects_extra_non_record_without_traceback(tmp_path: Path):
+    fixture = setup_fixture(tmp_path)
+    run_tool(fixture, "lock-evidence")
+    evidence: Path = fixture["evidence"]  # type: ignore[assignment]
+    value = json.loads(evidence.read_text())
+    value["artifacts"].append("not-an-artifact-record")
+    evidence.write_text(json.dumps(value) + "\n", encoding="ascii")
+    evidence.chmod(0o600)
+    before_user = tree_snapshot(fixture["user_root"])  # type: ignore[arg-type]
+    before_compat = tree_snapshot(fixture["compat_root"])  # type: ignore[arg-type]
+
+    failed = run_tool(fixture, "plan", check=False)
+
+    assert failed.returncode != 0
+    assert "evidence role set" in failed.stderr.lower()
+    assert "traceback" not in failed.stderr.lower()
+    assert_runtime_destinations_unchanged(fixture, before_user, before_compat)
+
+
 def test_bundle_plan_install_and_rollback_round_trip(tmp_path: Path):
     fixture = setup_fixture(tmp_path, input_kind="bundle")
 

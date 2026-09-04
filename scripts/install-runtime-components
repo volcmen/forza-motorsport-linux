@@ -594,7 +594,11 @@ def load_bundle_manifest(
         if not isinstance(record, dict) or set(record) != BUNDLE_ARTIFACT_KEYS:
             raise RuntimeInstallError("bundle artifact record is invalid")
         role = record.get("logical_name")
-        if role not in BUNDLE_ROLE_PATHS or role in by_role:
+        if (
+            not isinstance(role, str)
+            or role not in BUNDLE_ROLE_PATHS
+            or role in by_role
+        ):
             raise RuntimeInstallError("bundle artifact role set mismatch")
         if (
             record.get("relative_path") != BUNDLE_ROLE_PATHS[role]
@@ -770,7 +774,7 @@ def validate_evidence(value: object) -> dict[str, Any]:
         input_kind = "source"
     else:
         input_kind = value.get("input_kind")
-        if input_kind not in {"source", "bundle"}:
+        if not isinstance(input_kind, str) or input_kind not in {"source", "bundle"}:
             raise RuntimeInstallError("artifact evidence input kind is invalid")
         expected_keys = {
             "version",
@@ -798,9 +802,12 @@ def validate_evidence(value: object) -> dict[str, Any]:
     ):
         raise RuntimeInstallError("artifact evidence source revisions are invalid")
     records = value.get("artifacts")
-    if not isinstance(records, list) or [
-        record.get("role") for record in records if isinstance(record, dict)
-    ] != list(ROLES):
+    if (
+        not isinstance(records, list)
+        or len(records) != len(ROLES)
+        or not all(isinstance(record, dict) for record in records)
+        or [record.get("role") for record in records] != list(ROLES)
+    ):
         raise RuntimeInstallError("artifact evidence role set mismatch")
     for record in records:
         role = record["role"]
