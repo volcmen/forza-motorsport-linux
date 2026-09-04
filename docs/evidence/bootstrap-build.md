@@ -1,6 +1,6 @@
 # Hybrid bootstrap candidate verification
 
-Status: **release candidate, not published**. These checks do not replace live
+Status: **v0.2.0 published as an experimental prerelease**. These checks do not replace live
 Forza acceptance. No installed game, Steam configuration, Microsoft/Xodus credentials, or
 licensed threading DLL was changed during this verification.
 
@@ -83,6 +83,11 @@ builder identity in its provenance.
 ## Release gate
 
 The repeated-build comparison and trust-manifest finalization passed. The
-release still requires public package visibility, verification through the
-public download path, and live acceptance of the rebuilt artifacts. Passing
-synthetic tests or compiling a DLL is not evidence that these gates passed.
+builder package is public, and anonymous registry manifest access was verified
+using an empty Docker credential configuration. After publishing v0.2.0, an
+unauthenticated HTTPS download passed `tools/verify-bootstrap-bundle` and matched
+the registry-bound bundle SHA-256 above. Both GitHub verification runs passed
+at release commit `3836ffe3d1e9964c176181380e92b5870e941402`.
+
+Live acceptance of the rebuilt artifacts remains pending. Passing synthetic
+tests or compiling a DLL is not evidence of successful gameplay.

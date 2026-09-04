@@ -8,23 +8,24 @@ Guided, recoverable tools for running the **Steam edition of Forza Motorsport**
 (`AppID 2440510`) with the reviewed `GE-Proton11-3-FM` and Xodus stack.
 
 > [!IMPORTANT]
-> This is an **Experimental**, source-only integration for one documented
-> component set. It is not ordinary upstream Proton support, a binary bundle,
-> or a promise that Forza will work on another system.
+> This is an **Experimental** integration for one documented component set,
+> not ordinary upstream Proton support or a compatibility guarantee. The v0.1
+> manual workflow is source-only; the v0.2.0 bootstrap prerelease includes a
+> verified open-source binary bundle and still requires live acceptance.
 
 The friendly entry point is [`./setup`](#guided-setup). The detailed evidence,
 manual transaction controls, and source provenance remain available for anyone
 who wants to audit exactly what it does.
 
-### Bootstrap development status
+### Bootstrap prerelease
 
-The `feature/hybrid-bootstrap` branch adds `./setup bootstrap` for acquiring
+The [v0.2.0 prerelease](https://github.com/volcmen/forza-motorsport-linux/releases/tag/v0.2.0) adds `./setup bootstrap` for acquiring
 the reviewed components, preparing a dedicated Proton tool, and completing a
 recoverable installation. Its clean-start, repeated-run, and rollback tests
 pass with synthetic game inputs. The real component bundle now builds
-reproducibly, but public artifact publication and live acceptance are still
-pending; this branch is not yet a released one-command installer. The existing
-guided setup below remains the documented release path.
+reproducibly, and anonymous registry access and the public bundle download
+have been verified. Live acceptance of these rebuilt binaries remains pending.
+The existing guided setup below remains available for the v0.1 manual workflow.
 
 Bootstrap requires two manual steps: creating the game's prefix through Steam
 and supplying your own licensed Microsoft threading DLL. It prints the Steam
@@ -33,7 +34,7 @@ to inspect the available commands. `./setup bootstrap --rollback` rolls back
 the composed bootstrap; `./setup rollback` retains its original runtime-only
 meaning.
 
-See the [bootstrap candidate guide](docs/bootstrap.md) for the manual
+See the [bootstrap prerelease guide](docs/bootstrap.md) for the manual
 checkpoints, acquisition choices, privacy boundary, and recovery commands.
 
 ## Status and tested matrix

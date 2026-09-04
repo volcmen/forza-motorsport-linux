@@ -1,13 +1,13 @@
-# Bootstrap installation (release candidate)
+# Bootstrap installation (v0.2.0 prerelease)
 
-The hybrid bootstrap is **not released yet**. The local bundle builds
-reproducibly and the trust manifest is finalized; public download verification
-and live acceptance are still pending. For the existing
-release, use [the guided/manual installation guide](install.md).
+The hybrid bootstrap is available as an **experimental prerelease**. The bundle
+builds reproducibly, and anonymous registry access and the public download have
+been verified. Live acceptance of the rebuilt binaries remains pending.
+For the v0.1 workflow, use [the guided/manual installation guide](install.md).
 The [candidate verification record](evidence/bootstrap-build.md) separates
 automated checks, real compilation, and the remaining release gates.
 
-## What it will automate
+## What it automates
 
 The supported target is Arch Linux x86_64 with native Steam. Bootstrap acquires
 the pinned GE-Proton base through the repository-local ProtonUp integration,
@@ -24,14 +24,19 @@ It does not edit Steam settings, launch Forza, log into Microsoft, or obtain
 Microsoft's proprietary threading runtime for you. KDE Wallet can supply the
 standard Secret Service API; do not install GNOME Keyring merely for this tool.
 
-## Planned user flow
+## User flow
 
-Once a verified release is available, run from its checkout, without `sudo`:
+Use a separate checkout of the immutable prerelease tag, without `sudo`:
 
 ```bash
+git clone --branch v0.2.0 --depth 1 https://github.com/volcmen/forza-motorsport-linux.git forza-motorsport-linux-v0.2.0
+cd forza-motorsport-linux-v0.2.0
 ./setup bootstrap --check
 ./setup bootstrap
 ```
+
+The tag preserves the candidate-era documentation captured before publication;
+the published release notes and this guide record the subsequent download checks.
 
 Follow the printed checkpoints: restart Steam so it discovers the dedicated
 tool, select `GE-Proton11-3-FM` for Forza, then start and close the game to create
