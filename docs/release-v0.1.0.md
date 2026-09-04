@@ -6,10 +6,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
 # v0.1.0 release evidence
 
 [`Forza Motorsport Linux tools`](https://github.com/volcmen/forza-motorsport-linux)
-v0.1.0 is an experimental, source-only release
-for the Steam edition, AppID `2440510`, with the reviewed
-`GE-Proton11-3-FM` layout. It documents one reproducible configuration and is
-not ordinary upstream Proton support.
+v0.1.0 is the experimental, source-only setup I used to get the Steam edition
+of Forza Motorsport (AppID `2440510`) playing on Linux with `GE-Proton11-3-FM`.
+It worked on my machine, including playing with a friend on Windows. It is
+not ordinary upstream Proton support, and results on other systems may differ.
+
+Looking for the newer installer? See the
+[v0.2.0 prerelease](https://github.com/volcmen/forza-motorsport-linux/releases/tag/v0.2.0).
+Its rebuilt components still need in-game testing; the results here apply only
+to the older v0.1 setup.
 
 ## Verified on the tested system
 
@@ -27,7 +32,7 @@ The exact `legacy-v0.1` profile passed the complete two-launch matrix on
 - a second successful launch without a system reboot.
 
 The redacted observation and installed open-source artifact hashes are recorded
-in [`docs/evidence/v0.1-live-validation.md`](evidence/v0.1-live-validation.md).
+in the [v0.1 test record](https://github.com/volcmen/forza-motorsport-linux/blob/v0.1.0/docs/evidence/v0.1-live-validation.md).
 
 ## Source revisions
 
@@ -58,17 +63,15 @@ profile.
 
 ## Installation boundary
 
-The repository contains scripts, manifests, documentation, and synthetic test
-fixtures only. It distributes no compiled Wine, Proton, Xodus, Microsoft,
-Steam, or game artifact. Users build the open-source components themselves and
-must supply any required Microsoft threading runtime only from a source they
-are licensed to use. The project never reads, hashes, copies, publishes, or
-downloads that separately supplied file.
+This v0.1 release contains source and setup tools, not compiled components.
+You build the open-source parts yourself and supply the Microsoft threading
+runtime from a source you're licensed to use. No Microsoft DLL or game files
+are included. This version's tools don't read, hash, copy, publish, or download
+that separately supplied DLL.
 
-Installation is user-local and digest-bound. The user unit is static and is
-started only by the per-game launcher reservation; it is not enabled as a
-persistent service. KDE Wallet is accepted through the standard Secret Service
-interface, and this workflow does not require GNOME Keyring.
+Install as your regular user. Setup asks you to confirm the exact installation
+plan before applying it. Xodus runs for the game session, not permanently in the
+background. KDE Wallet works through Secret Service; GNOME Keyring isn't needed.
 
 ## Rollback
 
@@ -76,7 +79,6 @@ Before acceptance, `scripts/install-runtime-components rollback` restores every
 destination from the transaction journal. After acceptance,
 `scripts/install-runtime-components restore-runtime` restores only the legacy
 XGameRuntime pair while preserving the accepted user-local integration files.
-The reader-first entry point is the [README](../README.md); the exact manual
-commands and conflict-preserving uninstall boundary are documented in the
-[install guide](install.md). Never delete transaction journals or recovery files
-before their recorded state has been verified.
+See the [manual install guide](https://github.com/volcmen/forza-motorsport-linux/blob/v0.1.0/docs/install.md)
+for the commands and when to use them. Keep the journals and backups until
+you've checked the installation; deleting them can prevent recovery.
