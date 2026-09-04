@@ -21,6 +21,7 @@ REQUIRED_CLAIMS = {
 }
 FORBIDDEN_SUFFIXES = {".dll", ".exe", ".sys", ".so"}
 FORBIDDEN_TEXT = ("authorization: " + "xbl3.0 x=", "proof_" + "private_key=")
+FORBIDDEN_RELEASE_SUFFIXES = (".dll", ".so", ".tar.zst")
 PUBLIC_COMPONENTS = {
     "xodus_legacy": (
         "https://github.com/volcmen/xodus",
@@ -132,6 +133,17 @@ def test_repository_contains_no_prohibited_binaries_or_live_secrets():
         text = path.read_text(errors="ignore").lower()
         findings.extend((path, token) for token in FORBIDDEN_TEXT if token in text)
     assert findings == []
+
+
+def test_release_artifacts_remain_untracked_and_runtime_local():
+    tracked = subprocess.check_output(
+        ["git", "ls-files", "-z"], cwd=ROOT
+    ).decode().split("\0")
+
+    assert not [
+        name for name in tracked if name.endswith(FORBIDDEN_RELEASE_SUFFIXES)
+    ]
+    assert "runtime/" in (ROOT / ".gitignore").read_text().splitlines()
 
 
 def test_repository_policy_rejects_renamed_pe_binary(tmp_path):
