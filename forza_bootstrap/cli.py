@@ -10,8 +10,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .coordinator import (
+    FinishContext,
     PrepareContext,
     build_prepare_plan,
+    finish,
+    finish_context_from_prepare,
     inspect_prepare,
     prepare,
     resolve_supported_host,
@@ -26,6 +29,7 @@ from .snapshot import (
     read_snapshot,
     render_comparison,
 )
+from .state import BootstrapPhase, BootstrapState, load_unfinished_transaction
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -86,15 +90,44 @@ def _confirm_prepare(expected: str) -> str:
     return input(f"Type the complete PLAN_SHA256 {expected} to prepare: ")
 
 
+def _confirm_finish(expected: str) -> str:
+    return input(f"Type the complete PLAN_SHA256 {expected} to finish: ")
+
+
+def _finish_context(
+    context: PrepareContext,
+    arguments: argparse.Namespace,
+    state: BootstrapState,
+) -> FinishContext:
+    threading = (
+        Path(arguments.threading_dll)
+        if arguments.threading_dll is not None
+        else None
+    )
+    return finish_context_from_prepare(context, state, threading)
+
+
 def _run_bootstrap(arguments: argparse.Namespace) -> None:
     if arguments.rollback:
         raise BootstrapError("bootstrap rollback is unavailable in this build")
     context = _prepare_context(arguments)
+    state = load_unfinished_transaction(context.host.state_root)
     if arguments.check:
+        if state is not None:
+            raise BootstrapError(
+                "bootstrap Finish inspection is unavailable in this build"
+            )
         inspection = inspect_prepare(context)
         plan = build_prepare_plan(context, inspection)
         print(canonical_json(plan).decode("ascii"))
         print(f"PLAN_SHA256={plan_digest(plan)}")
+        return
+    if state is not None:
+        if state.phase is not BootstrapPhase.AWAITING_STEAM_PREFIX:
+            raise BootstrapError(
+                f"bootstrap transaction requires recovery from {state.phase.value}"
+            )
+        finish(_finish_context(context, arguments, state), _confirm_finish)
         return
     prepare(context, _confirm_prepare)
 
