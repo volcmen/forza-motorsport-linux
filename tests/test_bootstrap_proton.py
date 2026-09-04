@@ -542,6 +542,73 @@ def test_publish_failure_removes_only_unchanged_created_destination(
     assert not destination.exists()
 
 
+def test_publish_stage_name_swap_quarantines_foreign_tree_outside_live_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = extracted_ge_fixture(tmp_path)
+    stage = tmp_path / "stage"
+    prepare_fm_tree(source, stage)
+    destination = tmp_path / FM_NAME
+    displaced = tmp_path / "held-original-stage"
+    foreign_payload = b"foreign tree published by stage-name swap"
+    collision = tmp_path / f".{FM_NAME}.collision.publication-recovery"
+    collision.mkdir(mode=0o700)
+    (collision / "sentinel").write_bytes(b"pre-existing recovery")
+    real_rename_noreplace = proton_module.rename_noreplace
+    swapped = False
+    replacement_added = False
+    recovery_tokens = iter(("collision", "foreign", "replacement"))
+
+    monkeypatch.setattr(
+        proton_module.secrets, "token_hex", lambda _length: next(recovery_tokens)
+    )
+
+    def swap_stage_name_before_publish(
+        source_fd: int,
+        source_name: str,
+        destination_fd: int,
+        destination_name: str,
+    ) -> None:
+        nonlocal replacement_added, swapped
+        if (
+            not swapped
+            and source_name == stage.name
+            and destination_name == destination.name
+        ):
+            stage.rename(displaced)
+            shutil.copytree(displaced, stage, symlinks=True)
+            (stage / "proton").write_bytes(foreign_payload)
+            swapped = True
+        real_rename_noreplace(source_fd, source_name, destination_fd, destination_name)
+        if (
+            source_name == destination.name
+            and destination_name.endswith(".publication-recovery")
+            and not replacement_added
+        ):
+            destination.mkdir(mode=0o700)
+            (destination / "late").write_bytes(b"concurrent destination replacement")
+            replacement_added = True
+
+    monkeypatch.setattr(
+        proton_module, "rename_noreplace", swap_stage_name_before_publish
+    )
+
+    with pytest.raises(BootstrapError, match="publication verification failed"):
+        publish_fm(stage, destination)
+
+    foreign_recovery = tmp_path / f".{FM_NAME}.foreign.publication-recovery"
+    replacement_recovery = tmp_path / f".{FM_NAME}.replacement.publication-recovery"
+    assert swapped
+    assert replacement_added
+    assert not destination.exists()
+    assert (collision / "sentinel").read_bytes() == b"pre-existing recovery"
+    assert (foreign_recovery / "proton").read_bytes() == foreign_payload
+    assert (replacement_recovery / "late").read_bytes() == (
+        b"concurrent destination replacement"
+    )
+    assert displaced.exists()
+
+
 def test_failed_stage_cleanup_never_removes_a_concurrent_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

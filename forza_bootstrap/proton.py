@@ -617,6 +617,28 @@ def _restore_recovery(parent_fd: int, recovery: str, destination: str) -> None:
     os.fsync(parent_fd)
 
 
+def _quarantine_publication_mismatches(
+    parent_fd: int, destination: str
+) -> tuple[str, ...]:
+    recoveries: list[str] = []
+    for _ in range(100):
+        try:
+            os.stat(destination, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            os.fsync(parent_fd)
+            return tuple(recoveries)
+        recovery = f".{destination}.{secrets.token_hex(12)}.publication-recovery"
+        try:
+            rename_noreplace(parent_fd, destination, parent_fd, recovery)
+        except FileExistsError:
+            continue
+        except FileNotFoundError:
+            continue
+        recoveries.append(recovery)
+        os.fsync(parent_fd)
+    raise BootstrapError("cannot quarantine failed compatibility-tool publication")
+
+
 def _remove_directory_contents(directory_fd: int) -> None:
     with os.scandir(directory_fd) as entries:
         names = sorted(entry.name for entry in entries)
@@ -1014,6 +1036,12 @@ def publish_fm(stage: Path, destination: Path) -> PublishedToolRecord:
                 existing_digest,
             )
 
+        if (
+            not _name_matches_directory(source_parent_fd, source.name, source_fd)
+            or _read_identity(source_fd) != identity
+            or _tree_digest(source_fd) != published_digest
+        ):
+            raise BootstrapError("compatibility-tool publication verification failed")
         try:
             rename_noreplace(
                 source_parent_fd,
@@ -1034,18 +1062,33 @@ def publish_fm(stage: Path, destination: Path) -> PublishedToolRecord:
         os.fsync(target_parent_fd)
         named_fd: int | None = None
         try:
-            named_fd = os.open(target.name, _DIRECTORY_FLAGS, dir_fd=target_parent_fd)
-            named_info = os.fstat(named_fd)
-            held_info = os.fstat(source_fd)
-            if (
-                (named_info.st_dev, named_info.st_ino)
-                != (held_info.st_dev, held_info.st_ino)
-                or _read_identity(source_fd) != identity
-                or _tree_digest(source_fd) != published_digest
-            ):
+            try:
+                named_fd = os.open(
+                    target.name, _DIRECTORY_FLAGS, dir_fd=target_parent_fd
+                )
+                named_info = os.fstat(named_fd)
+                held_info = os.fstat(source_fd)
+                if (
+                    (named_info.st_dev, named_info.st_ino)
+                    != (held_info.st_dev, held_info.st_ino)
+                    or _read_identity(source_fd) != identity
+                    or _tree_digest(source_fd) != published_digest
+                ):
+                    raise BootstrapError(
+                        "compatibility-tool publication verification failed"
+                    )
+            except Exception as verification_error:
+                created_record = None
+                try:
+                    _quarantine_publication_mismatches(target_parent_fd, target.name)
+                except Exception as recovery_error:
+                    raise BootstrapError(
+                        "compatibility-tool publication verification failed; "
+                        "recovery failed"
+                    ) from recovery_error
                 raise BootstrapError(
                     "compatibility-tool publication verification failed"
-                )
+                ) from verification_error
         finally:
             if named_fd is not None:
                 os.close(named_fd)
