@@ -15,6 +15,11 @@ prepares a dedicated `GE-Proton11-3-FM`, verifies the open-source component
 bundle, and coordinates the existing recoverable installers and exact-build
 controller/AP702 patches. It does not replace your other Proton tools.
 
+The host must provide the native libraries used by Xodus: GTK4, libadwaita,
+SDL3, and WebKitGTK 4.1 (Arch packages `gtk4`, `libadwaita`, `sdl3`, and
+`webkit2gtk-4.1`, with their dependencies). The bundle is not a statically
+linked application or an AppImage. Bootstrap does not install system packages.
+
 It does not edit Steam settings, launch Forza, log into Microsoft, or obtain
 Microsoft's proprietary threading runtime for you. KDE Wallet can supply the
 standard Secret Service API; do not install GNOME Keyring merely for this tool.
