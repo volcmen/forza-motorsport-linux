@@ -1,9 +1,11 @@
 # Bootstrap installation (release candidate)
 
-The hybrid bootstrap is **not released yet**. The production bundle and its
-immutable trust manifest must pass real build and reproduction checks before
-the commands below become an installation path for users. For the existing
+The hybrid bootstrap is **not released yet**. The local bundle builds
+reproducibly; public artifacts, the final trust manifest, and live acceptance
+are still pending before these commands become an installation path for users. For the existing
 release, use [the guided/manual installation guide](install.md).
+The [candidate verification record](evidence/bootstrap-build.md) separates
+automated checks, real compilation, and the remaining release gates.
 
 ## What it will automate
 

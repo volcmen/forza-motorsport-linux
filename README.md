@@ -21,9 +21,10 @@ who wants to audit exactly what it does.
 The `feature/hybrid-bootstrap` branch adds `./setup bootstrap` for acquiring
 the reviewed components, preparing a dedicated Proton tool, and completing a
 recoverable installation. Its clean-start, repeated-run, and rollback tests
-pass with synthetic game inputs. The production bundle is still undergoing
-real source-build verification; this branch is not yet a released one-command
-installer. The existing guided setup below remains the documented release path.
+pass with synthetic game inputs. The real component bundle now builds
+reproducibly, but public artifact publication and live acceptance are still
+pending; this branch is not yet a released one-command installer. The existing
+guided setup below remains the documented release path.
 
 Bootstrap requires two manual steps: creating the game's prefix through Steam
 and supplying your own licensed Microsoft threading DLL. It prints the Steam
