@@ -53,9 +53,7 @@ _FM_NAME = "GE-Proton11-3-FM"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _MIN_PREPARE_BYTES = 2 * 1024 * 1024 * 1024
-_TERMINAL_RUNTIME_STATES = frozenset(
-    {"accepted", "rolled_back", "runtime_restored"}
-)
+_TERMINAL_RUNTIME_STATES = frozenset({"accepted", "rolled_back", "runtime_restored"})
 
 
 @dataclass(frozen=True)
@@ -87,8 +85,16 @@ class HostProbe:
 
 
 @dataclass(frozen=True)
+class _DirectoryProbe:
+    path: Path
+    info: os.stat_result
+    exists: bool
+
+
+@dataclass(frozen=True)
 class PrepareInspection:
     root_ids: Mapping[str, str]
+    filesystem_ids: Mapping[str, str]
     available_bytes: int
     required_bytes: int
     tool_disposition: ToolDisposition
@@ -104,6 +110,7 @@ class PrepareOperations:
     acquire_ge: Callable[[PrepareContext], Path]
     acquire_bundle: Callable[[PrepareContext], VerifiedBundle]
     publish_fm: Callable[[PrepareContext, Path], PublishedToolRecord]
+    locked_preflight: Callable[[PrepareContext, int], PrepareInspection] | None = None
     event: Callable[[str], None] = lambda _event: None
     boundary: Callable[[str], None] = lambda _boundary: None
 
@@ -187,47 +194,152 @@ def _owned_regular(path: Path, label: str) -> None:
         raise BootstrapError(f"{label} has unsafe type or ownership")
 
 
-def _validate_app_manifest(path: Path) -> None:
-    _owned_regular(path, f"Steam AppID {_APP_ID} manifest")
+def _inspect_directory_path(
+    path: Path, label: str, *, private_if_exists: bool
+) -> _DirectoryProbe:
+    if (
+        not path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts[1:])
+    ):
+        raise BootstrapError(f"{label} has unsafe path")
+    descriptor = os.open("/", _DIRECTORY)
+    current = Path("/")
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        raise BootstrapError(f"Steam AppID {_APP_ID} manifest is invalid") from None
-    try:
-        before = os.fstat(fd)
-        data = os.read(fd, 1024 * 1024 + 1)
-        after = os.fstat(fd)
+        for part in path.parts[1:]:
+            try:
+                next_descriptor = os.open(part, _DIRECTORY, dir_fd=descriptor)
+            except FileNotFoundError:
+                info = os.fstat(descriptor)
+                if info.st_uid != os.getuid():
+                    raise BootstrapError(f"{label} has unsafe ownership") from None
+                return _DirectoryProbe(current, info, False)
+            except OSError:
+                raise BootstrapError(f"{label} has unsafe path") from None
+            os.close(descriptor)
+            descriptor = next_descriptor
+            current /= part
+        info = os.fstat(descriptor)
+        if info.st_uid != os.getuid():
+            raise BootstrapError(f"{label} has unsafe ownership")
+        if private_if_exists and stat.S_IMODE(info.st_mode) != 0o700:
+            raise BootstrapError(f"{label} has unsafe mode")
+        return _DirectoryProbe(current, info, True)
     finally:
-        os.close(fd)
-    identity = lambda value: (
+        os.close(descriptor)
+
+
+def _stat_generation(value: os.stat_result) -> tuple[int, ...]:
+    return (
         value.st_dev,
         value.st_ino,
         value.st_mode,
+        value.st_nlink,
+        value.st_uid,
         value.st_size,
         value.st_mtime_ns,
         value.st_ctime_ns,
     )
-    app_ids = re.findall(rb'"appid"\s+"([^"\r\n]+)"', data)
+
+
+def _open_owned_directory(path: Path, label: str) -> int:
     if (
-        len(data) > 1024 * 1024
-        or len(app_ids) != 1
-        or app_ids[0] != _APP_ID.encode("ascii")
-        or identity(before) != identity(after)
+        not path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts[1:])
     ):
+        raise BootstrapError(f"{label} is invalid")
+    descriptor = os.open("/", _DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            next_descriptor = os.open(part, _DIRECTORY, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        info = os.fstat(descriptor)
+        if info.st_uid != os.getuid():
+            raise OSError
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _read_owned_regular(
+    path: Path, label: str, maximum_size: int, *, missing_ok: bool = False
+) -> bytes | None:
+    parent_fd: int | None = None
+    file_fd: int | None = None
+    try:
+        try:
+            parent_fd = _open_owned_directory(path.parent, label)
+            file_fd = os.open(
+                path.name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise
+        before = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or before.st_size > maximum_size
+        ):
+            raise OSError
+        chunks: list[bytes] = []
+        remaining = maximum_size + 1
+        while remaining:
+            block = os.read(file_fd, min(64 * 1024, remaining))
+            if not block:
+                break
+            chunks.append(block)
+            remaining -= len(block)
+        data = b"".join(chunks)
+        after = os.fstat(file_fd)
+        bound = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            len(data) > maximum_size
+            or _stat_generation(before) != _stat_generation(after)
+            or _stat_generation(after) != _stat_generation(bound)
+        ):
+            raise OSError
+        return data
+    except BootstrapError:
+        raise
+    except OSError:
+        raise BootstrapError(f"{label} is invalid") from None
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def _validate_app_manifest_data(data: bytes) -> None:
+    app_ids = re.findall(rb'"appid"\s+"([^"\r\n]+)"', data)
+    if len(app_ids) != 1 or app_ids[0] != _APP_ID.encode("ascii"):
         raise BootstrapError(f"Steam AppID {_APP_ID} manifest is invalid")
+
+
+def _validate_app_manifest(path: Path) -> None:
+    data = _read_owned_regular(path, f"Steam AppID {_APP_ID} manifest", 1024 * 1024)
+    assert data is not None
+    _validate_app_manifest_data(data)
 
 
 def _steam_library_paths(steam_root: Path) -> tuple[Path, ...]:
     """Return native library roots from Valve's small VDF without writing it."""
     paths = [steam_root]
     file = steam_root / "steamapps/libraryfolders.vdf"
-    try:
-        data = file.read_bytes()
-    except FileNotFoundError:
+    data = _read_owned_regular(
+        file, "Steam library manifest", 4 * 1024 * 1024, missing_ok=True
+    )
+    if data is None:
         return tuple(paths)
-    except OSError:
-        raise BootstrapError("Steam library manifest is unavailable") from None
-    if len(data) > 4 * 1024 * 1024 or b"\x00" in data:
+    if b"\x00" in data:
         raise BootstrapError("Steam library manifest is invalid")
     try:
         text = data.decode("utf-8")
@@ -272,7 +384,9 @@ def resolve_supported_host(
     if not steam_root.exists():
         flatpak = user_root / ".var/app/com.valvesoftware.Steam/.local/share/Steam"
         if flatpak.exists():
-            raise BootstrapError("Flatpak Steam is not supported; native Steam is required")
+            raise BootstrapError(
+                "Flatpak Steam is not supported; native Steam is required"
+            )
         raise BootstrapError("native Steam root is missing")
     _owned_directory(steam_root, "native Steam root")
 
@@ -280,15 +394,22 @@ def resolve_supported_host(
     for library in _steam_library_paths(steam_root):
         _owned_directory(library, "Steam library root")
         candidate = library / f"steamapps/appmanifest_{_APP_ID}.acf"
-        if candidate.exists() or candidate.is_symlink():
-            if library != steam_root:
-                raise BootstrapError(
-                    "AppID 2440510 in additional Steam libraries is not supported"
-                )
-            _validate_app_manifest(candidate)
-            if app_manifest is not None:
-                raise BootstrapError(f"multiple Steam AppID {_APP_ID} manifests")
-            app_manifest = candidate
+        app_data = _read_owned_regular(
+            candidate,
+            f"Steam AppID {_APP_ID} manifest",
+            1024 * 1024,
+            missing_ok=True,
+        )
+        if app_data is None:
+            continue
+        if library != steam_root:
+            raise BootstrapError(
+                "AppID 2440510 in additional Steam libraries is not supported"
+            )
+        _validate_app_manifest_data(app_data)
+        if app_manifest is not None:
+            raise BootstrapError(f"multiple Steam AppID {_APP_ID} manifests")
+        app_manifest = candidate
     if app_manifest is None:
         raise BootstrapError(f"Steam AppID {_APP_ID} manifest is missing")
     return ResolvedHost(
@@ -324,7 +445,9 @@ def _validate_context(context: PrepareContext) -> None:
     if context.acquisition_mode == "local" and context.bundle_path is None:
         raise BootstrapError("local bundle path is required")
     if context.acquisition_mode != "local" and context.bundle_path is not None:
-        raise BootstrapError("local bundle and source/download mode are mutually exclusive")
+        raise BootstrapError(
+            "local bundle and source/download mode are mutually exclusive"
+        )
     if context.bundle_path is not None and not context.bundle_path.is_absolute():
         raise BootstrapError("local bundle path must be absolute")
     if not context.repository_root.is_absolute():
@@ -371,6 +494,36 @@ def _probe_launcher_lock(host: ResolvedHost) -> None:
         os.close(fd)
 
 
+def _validate_held_launcher_lock(host: ResolvedHost, lease_fd: int) -> None:
+    linked_fd: int | None = None
+    try:
+        lease_info = os.fstat(lease_fd)
+        runtime_fd = os.open(host.runtime_dir, _DIRECTORY)
+        try:
+            linked_fd = os.open(
+                "forza-linux.lock",
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=runtime_fd,
+            )
+        finally:
+            os.close(runtime_fd)
+        linked_info = os.fstat(linked_fd)
+        if (
+            not stat.S_ISREG(lease_info.st_mode)
+            or lease_info.st_uid != os.getuid()
+            or stat.S_IMODE(lease_info.st_mode) != 0o600
+            or (lease_info.st_dev, lease_info.st_ino)
+            != (linked_info.st_dev, linked_info.st_ino)
+        ):
+            raise OSError
+        fcntl.flock(lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError):
+        raise BootstrapError("launcher lock changed while Prepare held it") from None
+    finally:
+        if linked_fd is not None:
+            os.close(linked_fd)
+
+
 def _probe_xodus_service(probe: HostProbe) -> None:
     try:
         result = probe.runner(
@@ -383,7 +536,7 @@ def _probe_xodus_service(probe: HostProbe) -> None:
         raise BootstrapError("cannot prove xodus-forza.service is inactive") from None
     if result.returncode == 0:
         raise BootstrapError("xodus-forza.service is active")
-    if result.returncode != 3:
+    if result.returncode not in {3, 4}:
         raise BootstrapError("cannot prove xodus-forza.service is inactive")
 
 
@@ -395,14 +548,18 @@ def _probe_forza_processes(probe: HostProbe) -> None:
     try:
         entries = tuple(probe.proc_root.glob("[0-9]*/cmdline"))
     except OSError:
-        raise BootstrapError("cannot prove Forza Motorsport processes are inactive") from None
+        raise BootstrapError(
+            "cannot prove Forza Motorsport processes are inactive"
+        ) from None
     for entry in entries:
         try:
             command = entry.read_bytes().lower()
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             continue
         except OSError:
-            raise BootstrapError("cannot prove Forza Motorsport processes are inactive") from None
+            raise BootstrapError(
+                "cannot prove Forza Motorsport processes are inactive"
+            ) from None
         if any(pattern in command for pattern in patterns):
             raise BootstrapError("Forza Motorsport process is active")
 
@@ -486,14 +643,26 @@ def _probe_runtime_children(host: ResolvedHost) -> None:
         os.close(root_fd)
 
 
-def _probe_existing_bootstrap_state(host: ResolvedHost) -> None:
-    try:
-        entries = tuple(host.state_root.iterdir())
-    except FileNotFoundError:
+def _probe_existing_bootstrap_state(
+    host: ResolvedHost, state_root: _DirectoryProbe
+) -> None:
+    if not state_root.exists:
         return
-    except OSError:
+    descriptor: int | None = None
+    try:
+        descriptor = _open_owned_directory(host.state_root, "bootstrap state root")
+        info = os.fstat(descriptor)
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            raise OSError
+        entries = tuple(os.listdir(descriptor))
+    except (OSError, BootstrapError):
         raise BootstrapError("bootstrap state root is unsafe") from None
-    significant = [entry for entry in entries if entry.name not in {".bootstrap.lock", ".journal.lock"}]
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    significant = [
+        entry for entry in entries if entry not in {".bootstrap.lock", ".journal.lock"}
+    ]
     if significant:
         raise BootstrapError("unfinished bootstrap transaction requires resume support")
 
@@ -528,7 +697,9 @@ def _read_local_bundle(path: Path, expected_size: int, expected_sha256: str) -> 
         raise BootstrapError("local bundle does not match the pinned manifest")
 
 
-def inspect_prepare(context: PrepareContext) -> PrepareInspection:
+def inspect_prepare(
+    context: PrepareContext, *, held_launcher_lock: int | None = None
+) -> PrepareInspection:
     """Complete every read-only Prepare preflight before any private write."""
     _validate_context(context)
     host = context.host
@@ -536,8 +707,29 @@ def inspect_prepare(context: PrepareContext) -> PrepareInspection:
     _owned_directory(host.steam_root, "native Steam root")
     _validate_app_manifest(host.app_manifest)
     _owned_directory(host.runtime_dir, "runtime directory")
-    _probe_existing_bootstrap_state(host)
-    _probe_launcher_lock(host)
+    state_root = _inspect_directory_path(
+        host.state_root, "state root", private_if_exists=True
+    )
+    cache_root = _inspect_directory_path(
+        host.cache_root, "cache root", private_if_exists=True
+    )
+    staging = _inspect_directory_path(
+        host.cache_root / "staging", "cache staging", private_if_exists=True
+    )
+    destination_root = _inspect_directory_path(
+        host.compatibility_tools,
+        "compatibility-tool destination",
+        private_if_exists=False,
+    )
+    if staging.info.st_dev != destination_root.info.st_dev:
+        raise BootstrapError(
+            "cache staging and compatibility-tool destination must share the same filesystem"
+        )
+    _probe_existing_bootstrap_state(host, state_root)
+    if held_launcher_lock is None:
+        _probe_launcher_lock(host)
+    else:
+        _validate_held_launcher_lock(host, held_launcher_lock)
     _probe_xodus_service(context.probe)
     _probe_forza_processes(context.probe)
     _probe_runtime_children(host)
@@ -564,18 +756,24 @@ def inspect_prepare(context: PrepareContext) -> PrepareInspection:
         3 * (context.manifest.ge.size + context.manifest.bundle.size),
     )
     try:
-        available = context.probe.disk_usage(host.steam_root).free
+        staging_available = context.probe.disk_usage(staging.path).free
+        destination_available = context.probe.disk_usage(destination_root.path).free
     except OSError:
         raise BootstrapError("available disk space cannot be determined") from None
+    available = min(staging_available, destination_available)
     if available < required:
         raise BootstrapError("insufficient disk space for Prepare")
     return PrepareInspection(
         root_ids={
             "user": _root_id(host.user_root, "user root"),
             "steam": _root_id(host.steam_root, "native Steam root"),
-            "cache": _root_id(host.cache_root, "cache parent"),
-            "state": _root_id(host.state_root, "state parent"),
+            "cache": f"{cache_root.info.st_dev}:{cache_root.info.st_ino}",
+            "state": f"{state_root.info.st_dev}:{state_root.info.st_ino}",
             "runtime": _root_id(host.runtime_dir, "runtime directory"),
+        },
+        filesystem_ids={
+            "cache-staging": str(staging.info.st_dev),
+            "compatibility-destination": str(destination_root.info.st_dev),
         },
         available_bytes=available,
         required_bytes=required,
@@ -618,10 +816,21 @@ def build_prepare_plan(
         raise BootstrapError("Prepare inspection is invalid")
     required_root_ids = {"user", "steam", "cache", "state", "runtime"}
     if set(facts.root_ids) != required_root_ids or any(
-        not isinstance(value, str) or re.fullmatch(r"(?:0|[1-9][0-9]*):(?:0|[1-9][0-9]*)", value) is None
+        not isinstance(value, str)
+        or re.fullmatch(r"(?:0|[1-9][0-9]*):(?:0|[1-9][0-9]*)", value) is None
         for value in facts.root_ids.values()
     ):
         raise BootstrapError("Prepare root identities are invalid")
+    required_filesystem_ids = {"cache-staging", "compatibility-destination"}
+    if set(facts.filesystem_ids) != required_filesystem_ids or any(
+        not isinstance(value, str) or re.fullmatch(r"(?:0|[1-9][0-9]*)", value) is None
+        for value in facts.filesystem_ids.values()
+    ):
+        raise BootstrapError("Prepare filesystem identities are invalid")
+    if len(set(facts.filesystem_ids.values())) != 1:
+        raise BootstrapError(
+            "cache staging and compatibility-tool destination must share the same filesystem"
+        )
     if (
         type(facts.available_bytes) is not int
         or type(facts.required_bytes) is not int
@@ -673,11 +882,7 @@ def build_prepare_plan(
         "source": f"source-output/{context.manifest.bundle.filename}",
     }[context.acquisition_mode]
     local_input = (
-        {
-            "path_sha256": hashlib.sha256(
-                os.fsencode(context.bundle_path)
-            ).hexdigest()
-        }
+        {"path_sha256": hashlib.sha256(os.fsencode(context.bundle_path)).hexdigest()}
         if context.bundle_path is not None
         else None
     )
@@ -701,12 +906,18 @@ def build_prepare_plan(
         "roots": {
             name: {
                 "identity": facts.root_ids[name],
-                "path_sha256": hashlib.sha256(os.fsencode(root_paths[name])).hexdigest(),
+                "path_sha256": hashlib.sha256(
+                    os.fsencode(root_paths[name])
+                ).hexdigest(),
             }
             for name in sorted(facts.root_ids)
         },
         "disk": {
             "required_bytes": facts.required_bytes,
+            "filesystems": {
+                name: {"device": facts.filesystem_ids[name]}
+                for name in sorted(facts.filesystem_ids)
+            },
         },
         "acquisition": {
             "ge": {
@@ -799,9 +1010,7 @@ def _snapshot_scope(context: PrepareContext, transaction_id: str) -> SnapshotSco
         ".config/systemd/user/xodus-forza.service",
         ".local/state/forza-motorsport-linux/install-manifest",
     )
-    targets.extend(
-        SnapshotTarget(f"user/{path}", "user", path) for path in user_paths
-    )
+    targets.extend(SnapshotTarget(f"user/{path}", "user", path) for path in user_paths)
     return SnapshotScope(
         1,
         transaction_id,
@@ -884,7 +1093,10 @@ def _publish_fm(context: PrepareContext, ge_root: Path) -> PublishedToolRecord:
     stage_parent = _ensure_cache_subdirectory(context.host.cache_root, "staging")
     stage = stage_parent / _FM_NAME
     prepare_fm_tree(ge_root, stage)
-    if context.host.compatibility_tools != context.host.steam_root / "compatibilitytools.d":
+    if (
+        context.host.compatibility_tools
+        != context.host.steam_root / "compatibilitytools.d"
+    ):
         raise BootstrapError("compatibility-tool root is invalid")
     try:
         steam_fd = os.open(context.host.steam_root, _DIRECTORY)
@@ -917,6 +1129,9 @@ def default_prepare_operations() -> PrepareOperations:
         acquire_ge=_acquire_ge,
         acquire_bundle=_acquire_bundle,
         publish_fm=_publish_fm,
+        locked_preflight=lambda context, lease: inspect_prepare(
+            context, held_launcher_lock=lease
+        ),
     )
 
 
@@ -1049,8 +1264,13 @@ def _prepare_confirmed(
     inspection: PrepareInspection,
     plan: dict[str, Any],
     digest: str,
+    lease_fd: int,
 ) -> BootstrapState:
-    reinspection = operations.preflight(context)
+    reinspection = (
+        operations.locked_preflight(context, lease_fd)
+        if operations.locked_preflight is not None
+        else operations.preflight(context)
+    )
     if plan_digest(build_prepare_plan(context, reinspection)) != digest:
         raise BootstrapError(
             "Prepare inputs changed during confirmation; no changes were made"
@@ -1101,9 +1321,19 @@ def _prepare_confirmed(
 
     if inspection.tool_disposition is ToolDisposition.ADOPTED:
         assert inspection.existing_tool_identity is not None
+        current_tool = inspect_fm(
+            context.host.compatibility_tools / _FM_NAME, context.manifest
+        )
+        if (
+            current_tool.disposition is not ToolDisposition.ADOPTED
+            or current_tool.identity != inspection.existing_tool_identity
+            or current_tool.tree_sha256 != inspection.existing_tool_tree_sha256
+        ):
+            raise BootstrapError("adopted compatibility tool changed after acquisition")
         disposition = "adopted"
-        identity = inspection.existing_tool_identity
-        tool_tree_sha256 = inspection.existing_tool_tree_sha256
+        identity = current_tool.identity
+        tool_tree_sha256 = current_tool.tree_sha256
+        assert identity is not None
         ge_reference = {
             "root": "steam",
             "relative": f"compatibilitytools.d/{_FM_NAME}",
@@ -1114,8 +1344,7 @@ def _prepare_confirmed(
         if (
             not isinstance(published, PublishedToolRecord)
             or published.disposition is not ToolDisposition.CREATED
-            or published.destination
-            != context.host.compatibility_tools / _FM_NAME
+            or published.destination != context.host.compatibility_tools / _FM_NAME
             or _SHA256.fullmatch(published.published_tree_sha256) is None
         ):
             raise BootstrapError(
@@ -1157,9 +1386,7 @@ def _prepare_confirmed(
     return state
 
 
-def prepare(
-    context: PrepareContext, confirm: Callable[[str], str]
-) -> BootstrapState:
+def prepare(context: PrepareContext, confirm: Callable[[str], str]) -> BootstrapState:
     """Execute confirmed Phase A and stop at the manual Steam handoff."""
     _validate_context(context)
     if not callable(confirm):
@@ -1191,6 +1418,8 @@ def prepare(
         )
     lease_fd = _acquire_launcher_lease(context.host)
     try:
-        return _prepare_confirmed(context, operations, inspection, plan, digest)
+        return _prepare_confirmed(
+            context, operations, inspection, plan, digest, lease_fd
+        )
     finally:
         os.close(lease_fd)

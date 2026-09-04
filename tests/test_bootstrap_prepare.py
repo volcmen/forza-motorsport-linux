@@ -13,9 +13,11 @@ import stat
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import forza_bootstrap.coordinator as coordinator_module
 from forza_bootstrap.artifacts import VerifiedBundle
 from forza_bootstrap.coordinator import (
     HostProbe,
@@ -43,6 +45,7 @@ from forza_bootstrap.proton import (
     PublishedToolRecord,
     ToolDisposition,
     ToolIdentity,
+    ToolInspection,
 )
 from forza_bootstrap.snapshot import FileRecord, Snapshot
 from forza_bootstrap.state import BootstrapPhase, load_unfinished_transaction
@@ -164,6 +167,7 @@ class PrepareFixture:
         self.bundle_root = self.cache / "bundle/forza-bootstrap-bundle-v1"
         self.ge_root.mkdir(parents=True)
         self.bundle_root.mkdir(parents=True)
+        self.cache.chmod(0o700)
         self.identity = ToolIdentity(
             "GE-Proton11-3-FM", "GE-Proton11-3", "c" * 64, "d" * 64, "e" * 64
         )
@@ -175,11 +179,19 @@ class PrepareFixture:
                 "state": "1:13",
                 "runtime": "1:14",
             },
+            filesystem_ids={
+                "cache-staging": "1",
+                "compatibility-destination": "1",
+            },
             available_bytes=10_000_000,
             required_bytes=1_000,
             tool_disposition=disposition,
-            existing_tool_identity=self.identity if disposition is ToolDisposition.ADOPTED else None,
-            existing_tool_tree_sha256="0" * 64 if disposition is ToolDisposition.ADOPTED else None,
+            existing_tool_identity=self.identity
+            if disposition is ToolDisposition.ADOPTED
+            else None,
+            existing_tool_tree_sha256="0" * 64
+            if disposition is ToolDisposition.ADOPTED
+            else None,
             docker_available=docker_available,
         )
 
@@ -201,9 +213,7 @@ class PrepareFixture:
         def acquire_bundle(_context: PrepareContext) -> VerifiedBundle:
             return VerifiedBundle(self.bundle_root, "f" * 64, self.manifest.artifacts)
 
-        def publish(
-            _context: PrepareContext, _ge: Path
-        ) -> PublishedToolRecord:
+        def publish(_context: PrepareContext, _ge: Path) -> PublishedToolRecord:
             return PublishedToolRecord(
                 self.compatibility / "GE-Proton11-3-FM",
                 ToolDisposition.CREATED,
@@ -218,7 +228,9 @@ class PrepareFixture:
             host=self.host,
             repository_root=tmp_path,
             acquisition_mode=mode,
-            bundle_path=(tmp_path / "local-bundle.tar.zst") if mode == "local" else None,
+            bundle_path=(tmp_path / "local-bundle.tar.zst")
+            if mode == "local"
+            else None,
             output=self.stdout,
             operations=PrepareOperations(
                 preflight=preflight,
@@ -290,7 +302,9 @@ def test_resolve_unsupported_host_is_read_only(
     probe = HostProbe(os_release=release, machine=lambda: architecture)
 
     with pytest.raises(BootstrapError, match=message):
-        resolve_supported_host({"HOME": str(user), "XDG_RUNTIME_DIR": str(tmp_path / "run")}, probe)
+        resolve_supported_host(
+            {"HOME": str(user), "XDG_RUNTIME_DIR": str(tmp_path / "run")}, probe
+        )
 
     assert tree_manifest(tmp_path) == before
 
@@ -326,6 +340,7 @@ def test_host_resolution_rejects_unsupported_layout_without_writes(
     real_lstat = Path.lstat
 
     if mutation == "wrong-owner":
+
         def foreign_lstat(path: Path):
             info = real_lstat(path)
             if path == steam:
@@ -365,9 +380,11 @@ def test_preflight_blockers_leave_state_cache_and_target_untouched(
         fixture.context,
         operations=replace(
             fixture.context.operations,
-            preflight=lambda context: (_ for _ in ()).throw(BootstrapError(message))
-            if change != "disk"
-            else inspection,
+            preflight=lambda context: (
+                (_ for _ in ()).throw(BootstrapError(message))
+                if change != "disk"
+                else inspection
+            ),
         ),
     )
     before = tree_manifest(tmp_path)
@@ -399,7 +416,9 @@ def test_prepare_revalidates_read_only_facts_after_confirmation_before_writing(
     tmp_path: Path,
 ) -> None:
     fixture = PrepareFixture(tmp_path)
-    changed = replace(fixture.inspection, root_ids={**fixture.inspection.root_ids, "steam": "1:99"})
+    changed = replace(
+        fixture.inspection, root_ids={**fixture.inspection.root_ids, "steam": "1:99"}
+    )
     inspections = iter((fixture.inspection, changed))
     fixture.context = replace(
         fixture.context,
@@ -446,6 +465,54 @@ def test_prepare_holds_the_launcher_lease_across_every_mutation(tmp_path: Path) 
         os.close(fd)
 
 
+def test_default_prepare_revalidation_reuses_held_launcher_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context, _calls = production_preflight_fixture(tmp_path)
+    context.host.cache_root.chmod(0o700)
+    destination = context.host.compatibility_tools / "GE-Proton11-3-FM"
+    identity = ToolIdentity(
+        "GE-Proton11-3-FM", "GE-Proton11-3", "c" * 64, "d" * 64, "e" * 64
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "inspect_fm",
+        lambda _path, _manifest: ToolInspection(ToolDisposition.ABSENT, None, None),
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "_acquire_ge",
+        lambda _context: context.host.cache_root / "ge/GE-Proton11-3",
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "_acquire_bundle",
+        lambda _context: VerifiedBundle(
+            context.host.cache_root / "bundle/forza-bootstrap-bundle-v1",
+            "f" * 64,
+            context.manifest.artifacts,
+        ),
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "_publish_fm",
+        lambda _context, _ge: PublishedToolRecord(
+            destination,
+            ToolDisposition.CREATED,
+            identity,
+            1,
+            100,
+            "d" * 64,
+        ),
+    )
+    inspection = inspect_prepare(context)
+    digest = plan_digest(build_prepare_plan(context, inspection))
+
+    result = prepare(context, lambda _expected: digest)
+
+    assert result.phase is BootstrapPhase.AWAITING_STEAM_PREFIX
+
+
 @pytest.mark.parametrize(
     ("mode", "bundle_path", "message"),
     (
@@ -479,8 +546,19 @@ def test_docker_absence_blocks_only_source_mode(tmp_path: Path) -> None:
     assert download.run().phase is BootstrapPhase.AWAITING_STEAM_PREFIX
 
 
-def test_exact_existing_tool_is_adopted_without_ge_or_publication(tmp_path: Path) -> None:
+def test_exact_existing_tool_is_adopted_without_ge_or_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fixture = PrepareFixture(tmp_path, disposition=ToolDisposition.ADOPTED)
+    monkeypatch.setattr(
+        coordinator_module,
+        "inspect_fm",
+        lambda _path, _manifest: ToolInspection(
+            ToolDisposition.ADOPTED,
+            fixture.identity,
+            fixture.inspection.existing_tool_tree_sha256,
+        ),
+    )
     forbidden = lambda *_args: (_ for _ in ()).throw(AssertionError("must adopt"))
     fixture.context = replace(
         fixture.context,
@@ -500,12 +578,44 @@ def test_exact_existing_tool_is_adopted_without_ge_or_publication(tmp_path: Path
     assert plan["destination"]["after"]["tree_sha256"] == "0" * 64
 
 
+@pytest.mark.parametrize("drift", ("removed", "identity", "tree"))
+def test_adopted_tool_is_reopened_after_acquisition_before_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drift: str
+) -> None:
+    fixture = PrepareFixture(tmp_path, disposition=ToolDisposition.ADOPTED)
+    changed_identity = replace(fixture.identity, vdf_sha256="9" * 64)
+    inspection = {
+        "removed": ToolInspection(ToolDisposition.ABSENT, None, None),
+        "identity": ToolInspection(
+            ToolDisposition.ADOPTED,
+            changed_identity,
+            fixture.inspection.existing_tool_tree_sha256,
+        ),
+        "tree": ToolInspection(
+            ToolDisposition.ADOPTED,
+            fixture.identity,
+            "9" * 64,
+        ),
+    }[drift]
+    monkeypatch.setattr(
+        coordinator_module,
+        "inspect_fm",
+        lambda _path, _manifest: inspection,
+    )
+
+    with pytest.raises(BootstrapError, match="adopted compatibility tool changed"):
+        fixture.run()
+
+    state = load_unfinished_transaction(fixture.state)
+    assert state is not None
+    assert state.phase is BootstrapPhase.PREPARING
+    assert "checkpoint-awaiting-prefix" not in fixture.actions
+
+
 def test_absent_destination_plan_rejects_concurrent_adoption(tmp_path: Path) -> None:
     fixture = PrepareFixture(tmp_path)
 
-    def concurrent_adoption(
-        _context: PrepareContext, _ge: Path
-    ) -> PublishedToolRecord:
+    def concurrent_adoption(_context: PrepareContext, _ge: Path) -> PublishedToolRecord:
         return PublishedToolRecord(
             fixture.compatibility / "GE-Proton11-3-FM",
             ToolDisposition.ADOPTED,
@@ -604,7 +714,9 @@ def test_prepare_rejects_acquisition_root_through_cache_symlink_before_publicati
     operations = fixture.context.operations
     assert operations is not None
     if escaped == "ge":
-        operations = replace(operations, acquire_ge=lambda _context: linked / "acquired")
+        operations = replace(
+            operations, acquire_ge=lambda _context: linked / "acquired"
+        )
     else:
         operations = replace(
             operations,
@@ -686,7 +798,10 @@ def test_interruption_at_each_prepare_boundary_is_fail_closed_and_durable(
         assert not fixture.state.exists()
     else:
         assert state is not None
-        assert state.phase in {BootstrapPhase.PREPARING, BootstrapPhase.AWAITING_STEAM_PREFIX}
+        assert state.phase in {
+            BootstrapPhase.PREPARING,
+            BootstrapPhase.AWAITING_STEAM_PREFIX,
+        }
     forbidden = ("steam", "xdg-open", "proton", "forza_steamworks_release_final.exe")
     assert not any(word in "\0".join(fixture.actions).lower() for word in forbidden)
 
@@ -735,6 +850,195 @@ def test_prepare_plan_names_the_exact_bundle_acquisition_object(
         )
 
 
+def host_resolution_layout(
+    tmp_path: Path,
+) -> tuple[dict[str, str], HostProbe, Path, Path]:
+    user = tmp_path / "home"
+    steam = user / ".local/share/Steam"
+    runtime = tmp_path / "run"
+    app = steam / "steamapps/appmanifest_2440510.acf"
+    app.parent.mkdir(parents=True)
+    app.write_text('"appid" "2440510"\n', encoding="ascii")
+    runtime.mkdir()
+    release = tmp_path / "os-release"
+    release.write_text("ID=arch\n", encoding="ascii")
+    return (
+        {"HOME": str(user), "XDG_RUNTIME_DIR": str(runtime)},
+        HostProbe(os_release=release, machine=lambda: "x86_64"),
+        steam / "steamapps/libraryfolders.vdf",
+        app,
+    )
+
+
+@pytest.mark.parametrize("kind", ("symlink", "fifo", "oversize"))
+def test_library_manifest_special_inputs_are_bounded_and_never_path_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    env, probe, library_manifest, _app = host_resolution_layout(tmp_path)
+    if kind == "symlink":
+        outside = tmp_path / "outside-libraryfolders.vdf"
+        outside.write_text('"libraryfolders" {}\n', encoding="ascii")
+        library_manifest.symlink_to(outside)
+    elif kind == "fifo":
+        os.mkfifo(library_manifest)
+    else:
+        library_manifest.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+    before = tree_manifest(tmp_path)
+    original_read_bytes = Path.read_bytes
+
+    def reject_path_read(path: Path) -> bytes:
+        if path == library_manifest:
+            raise AssertionError("libraryfolders.vdf was read by pathname")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_path_read)
+    with pytest.raises(BootstrapError, match="Steam library manifest"):
+        resolve_supported_host(env, probe)
+    monkeypatch.setattr(Path, "read_bytes", original_read_bytes)
+
+    assert tree_manifest(tmp_path) == before
+
+
+@pytest.mark.parametrize("kind", ("symlink", "fifo", "oversize"))
+def test_app_manifest_rejects_links_special_files_and_oversize_without_writes(
+    tmp_path: Path, kind: str
+) -> None:
+    env, probe, _library_manifest, app = host_resolution_layout(tmp_path)
+    if kind == "symlink":
+        outside = tmp_path / "outside-appmanifest.acf"
+        outside.write_text('"appid" "2440510"\n', encoding="ascii")
+        app.unlink()
+        app.symlink_to(outside)
+    elif kind == "fifo":
+        app.unlink()
+        os.mkfifo(app)
+    else:
+        app.write_bytes(b"x" * (1024 * 1024 + 1))
+    before = tree_manifest(tmp_path)
+
+    with pytest.raises(BootstrapError, match="AppID 2440510 manifest"):
+        resolve_supported_host(env, probe)
+
+    assert tree_manifest(tmp_path) == before
+
+
+@pytest.mark.parametrize("target_name", ("library", "app"))
+def test_steam_metadata_rejects_name_rebinding_during_descriptor_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_name: str
+) -> None:
+    env, probe, library_manifest, app = host_resolution_layout(tmp_path)
+    library_manifest.write_text('"libraryfolders" {}\n', encoding="ascii")
+    target = library_manifest if target_name == "library" else app
+    label = (
+        "Steam library manifest"
+        if target_name == "library"
+        else "AppID 2440510 manifest"
+    )
+    replacement = target.read_bytes()
+    backup = target.with_name(target.name + ".race-backup")
+    real_stat = os.stat
+    swapped = False
+
+    def swap_during_binding(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal swapped
+        if path == target.name and dir_fd is not None and not swapped:
+            target.rename(backup)
+            target.write_bytes(replacement)
+            try:
+                result = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+            finally:
+                target.unlink()
+                backup.rename(target)
+            swapped = True
+            return result
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(coordinator_module.os, "stat", swap_during_binding)
+    before = tree_manifest(tmp_path)
+
+    with pytest.raises(BootstrapError, match=label):
+        resolve_supported_host(env, probe)
+
+    assert swapped is True
+    assert tree_manifest(tmp_path) == before
+
+
+@pytest.mark.parametrize("target_name", ("library", "app"))
+def test_steam_metadata_rejects_in_place_generation_change_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_name: str
+) -> None:
+    env, probe, library_manifest, app = host_resolution_layout(tmp_path)
+    library_manifest.write_text('"libraryfolders" {}\n', encoding="ascii")
+    target = library_manifest if target_name == "library" else app
+    label = (
+        "Steam library manifest"
+        if target_name == "library"
+        else "AppID 2440510 manifest"
+    )
+    original = target.read_bytes()
+    real_read = os.read
+    changed = False
+    before = tree_manifest(tmp_path)
+
+    def change_generation(fd: int, size: int) -> bytes:
+        nonlocal changed
+        data = real_read(fd, size)
+        if data and not changed:
+            descriptor_path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+            if descriptor_path == target:
+                target.write_bytes(b"z" * len(original))
+                target.write_bytes(original)
+                changed = True
+        return data
+
+    monkeypatch.setattr(coordinator_module.os, "read", change_generation)
+
+    with pytest.raises(BootstrapError, match=label):
+        resolve_supported_host(env, probe)
+
+    assert changed is True
+    assert tree_manifest(tmp_path) == before
+
+
+@pytest.mark.parametrize("target_name", ("library", "app"))
+def test_steam_metadata_requires_current_owner_on_open_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_name: str
+) -> None:
+    env, probe, library_manifest, app = host_resolution_layout(tmp_path)
+    library_manifest.write_text('"libraryfolders" {}\n', encoding="ascii")
+    target = library_manifest if target_name == "library" else app
+    label = (
+        "Steam library manifest"
+        if target_name == "library"
+        else "AppID 2440510 manifest"
+    )
+    real_fstat = os.fstat
+    before = tree_manifest(tmp_path)
+
+    def foreign_file(fd: int) -> os.stat_result:
+        info = real_fstat(fd)
+        try:
+            descriptor_path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+        except OSError:
+            return info
+        if descriptor_path != target:
+            return info
+        values = list(info)
+        return os.stat_result((*values[:4], os.getuid() + 1, *values[5:]))
+
+    monkeypatch.setattr(coordinator_module.os, "fstat", foreign_file)
+
+    with pytest.raises(BootstrapError, match=label):
+        resolve_supported_host(env, probe)
+
+    assert tree_manifest(tmp_path) == before
+
+
 def test_default_host_probe_uses_only_read_only_commands(tmp_path: Path) -> None:
     user = tmp_path / "home"
     steam = user / ".local/share/Steam"
@@ -747,7 +1051,9 @@ def test_default_host_probe_uses_only_read_only_commands(tmp_path: Path) -> None
     release.write_text("ID=arch\n", encoding="ascii")
     calls: list[tuple[str, ...]] = []
 
-    def runner(argv: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def runner(
+        argv: tuple[str, ...], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 3, "", "")
 
@@ -823,7 +1129,9 @@ def production_preflight_fixture(
     proc.mkdir()
     calls: list[tuple[str, ...]] = []
 
-    def runner(argv: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def runner(
+        argv: tuple[str, ...], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
         return subprocess.CompletedProcess(argv, service_status, "", "")
 
@@ -886,6 +1194,136 @@ def test_production_preflight_detects_each_live_blocker_without_writes(
             os.close(held_lock)
 
     assert tree_manifest(tmp_path) == before
+
+
+def test_preflight_accepts_missing_xodus_unit_as_inactive(tmp_path: Path) -> None:
+    context, calls = production_preflight_fixture(tmp_path, service_status=4)
+
+    inspection = inspect_prepare(context)
+
+    assert inspection.tool_disposition is ToolDisposition.ABSENT
+    assert calls == [
+        ("systemctl", "--user", "is-active", "--quiet", "xodus-forza.service")
+    ]
+
+
+@pytest.mark.parametrize("status", (1, 2, 5))
+def test_preflight_fails_closed_on_systemctl_errors(
+    tmp_path: Path, status: int
+) -> None:
+    context, _calls = production_preflight_fixture(tmp_path, service_status=status)
+    before = tree_manifest(tmp_path)
+
+    with pytest.raises(BootstrapError, match="cannot prove.*inactive"):
+        inspect_prepare(context)
+
+    assert tree_manifest(tmp_path) == before
+
+
+@pytest.mark.parametrize("kind", ("state", "cache"))
+def test_preflight_rejects_nonprivate_managed_root_before_any_write(
+    tmp_path: Path, kind: str
+) -> None:
+    context, _calls = production_preflight_fixture(tmp_path)
+    root = context.host.state_root if kind == "state" else context.host.cache_root
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o755)
+    before = tree_manifest(tmp_path)
+
+    with pytest.raises(BootstrapError, match=rf"{kind} root has unsafe mode"):
+        inspect_prepare(context)
+
+    assert tree_manifest(tmp_path) == before
+    assert not (context.host.runtime_dir / "forza-linux.lock").exists()
+
+
+@pytest.mark.parametrize("kind", ("state", "cache"))
+def test_preflight_rejects_managed_root_symlink_ancestor_before_any_write(
+    tmp_path: Path, kind: str
+) -> None:
+    context, _calls = production_preflight_fixture(tmp_path)
+    outside = tmp_path / f"outside-{kind}"
+    (outside / "bootstrap").mkdir(parents=True, mode=0o700)
+    link = tmp_path / f"linked-{kind}"
+    link.symlink_to(outside, target_is_directory=True)
+    host = replace(
+        context.host,
+        **{f"{kind}_root": link / "bootstrap"},
+    )
+    context = replace(context, host=host)
+    before = tree_manifest(tmp_path)
+
+    with pytest.raises(BootstrapError, match=rf"{kind} root has unsafe path"):
+        inspect_prepare(context)
+
+    assert tree_manifest(tmp_path) == before
+    assert not (context.host.runtime_dir / "forza-linux.lock").exists()
+
+
+def test_preflight_requires_cache_stage_and_destination_on_same_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context, _calls = production_preflight_fixture(tmp_path)
+    staging = context.host.cache_root / "staging"
+    staging.mkdir(mode=0o700)
+    original = coordinator_module._inspect_directory_path
+
+    def different_devices(path: Path, label: str, *, private_if_exists: bool) -> object:
+        result = original(path, label, private_if_exists=private_if_exists)
+        device = (
+            1001
+            if path == staging
+            else 2002
+            if path == context.host.compatibility_tools
+            else result.info.st_dev
+        )
+        info = SimpleNamespace(
+            st_dev=device,
+            st_ino=result.info.st_ino,
+            st_mode=result.info.st_mode,
+            st_uid=result.info.st_uid,
+        )
+        return coordinator_module._DirectoryProbe(result.path, info, result.exists)
+
+    monkeypatch.setattr(
+        coordinator_module, "_inspect_directory_path", different_devices
+    )
+    before = tree_manifest(tmp_path)
+
+    with pytest.raises(BootstrapError, match="same filesystem"):
+        inspect_prepare(context)
+
+    assert tree_manifest(tmp_path) == before
+    assert not context.host.state_root.exists()
+    assert not (context.host.runtime_dir / "forza-linux.lock").exists()
+
+
+@pytest.mark.parametrize("low", ("staging", "destination"))
+def test_preflight_checks_capacity_on_actual_staging_and_destination_filesystems(
+    tmp_path: Path, low: str
+) -> None:
+    context, _calls = production_preflight_fixture(tmp_path)
+    staging = context.host.cache_root / "staging"
+    staging.mkdir(mode=0o700)
+    checked: list[Path] = []
+
+    def disk_usage(path: Path) -> shutil._ntuple_diskusage:
+        checked.append(path)
+        constrained = staging if low == "staging" else context.host.compatibility_tools
+        free = 1 if path == constrained else 10_000_000_000
+        return shutil._ntuple_diskusage(20_000_000_000, 1, free)
+
+    context = replace(context, probe=replace(context.probe, disk_usage=disk_usage))
+    before = tree_manifest(tmp_path)
+
+    with pytest.raises(BootstrapError, match="disk space"):
+        inspect_prepare(context)
+
+    assert staging in checked
+    assert context.host.compatibility_tools in checked
+    assert tree_manifest(tmp_path) == before
+    assert not context.host.state_root.exists()
+    assert not (context.host.runtime_dir / "forza-linux.lock").exists()
 
 
 def test_preflight_rejects_symlinked_runtime_journal_without_reading_target(
@@ -973,15 +1411,15 @@ def test_source_bundle_build_uses_the_injected_host_runner(tmp_path: Path) -> No
     ]
 
 
-def test_default_before_snapshot_covers_the_finite_managed_scope(tmp_path: Path) -> None:
+def test_default_before_snapshot_covers_the_finite_managed_scope(
+    tmp_path: Path,
+) -> None:
     fixture = PrepareFixture(tmp_path)
     marker = fixture.compatibility / "GE-Proton11-3-FM/.forza-bootstrap.json"
     marker.parent.mkdir()
     marker.write_bytes(b"fixture marker")
 
-    snapshot = default_prepare_operations().capture_before(
-        fixture.context, "1" * 24
-    )
+    snapshot = default_prepare_operations().capture_before(fixture.context, "1" * 24)
 
     records = {record.logical_path: record for record in snapshot.records}
     paths = set(records)
