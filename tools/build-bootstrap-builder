@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from forza_bootstrap.container_build import (
+    builder_build_argv,
+    builder_manifest_argv,
+    check_docker,
+)
+from forza_bootstrap.model import BootstrapError
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build the immutable Forza bootstrap toolchain image."
+    )
+    parser.add_argument("--tag", default="forza-motorsport-bootstrap-builder:local")
+    parser.add_argument("--verify-twice", action="store_true")
+    parser.add_argument("--push", metavar="REGISTRY_TAG")
+    parser.add_argument("--dry-run", action="store_true")
+    return parser.parse_args()
+
+
+def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(argv, cwd=ROOT, check=True, capture_output=True, text=True)
+
+
+def image_id(tag: str) -> str:
+    result = run(("docker", "image", "inspect", "--format", "{{.Id}}", tag))
+    image = result.stdout.strip()
+    if not image.startswith("sha256:") or len(image) != 71:
+        raise BootstrapError("builder image returned an invalid local digest")
+    return image
+
+
+def declared_manifest(image: str) -> str:
+    return run(builder_manifest_argv(image)).stdout
+
+
+def main() -> int:
+    args = parse_args()
+    first_argv = builder_build_argv(args.tag, no_cache=args.verify_twice)
+    if args.dry_run:
+        print(" ".join(first_argv))
+        return 0
+    check_docker()
+    run(first_argv)
+    first_id = image_id(args.tag)
+    first_manifest = declared_manifest(first_id)
+    if args.verify_twice:
+        second_tag = f"forza-builder-verify:{uuid.uuid4().hex}"
+        run(builder_build_argv(second_tag, no_cache=True))
+        if declared_manifest(image_id(second_tag)) != first_manifest:
+            raise BootstrapError("builder image rootfs is not reproducible")
+    if args.push:
+        run(("docker", "tag", args.tag, args.push))
+        run(("docker", "push", args.push))
+        repository = args.push.rsplit(":", 1)[0]
+        result = run(
+            (
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{json .RepoDigests}}",
+                args.push,
+            )
+        )
+        digests = json.loads(result.stdout)
+        matches = [item for item in digests if item.startswith(repository + "@sha256:")]
+        if len(matches) != 1:
+            raise BootstrapError("pushed builder has no unique immutable digest")
+        print(matches[0])
+    else:
+        print(first_id)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (BootstrapError, subprocess.CalledProcessError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        raise SystemExit(2) from None
