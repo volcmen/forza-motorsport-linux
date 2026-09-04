@@ -25,6 +25,7 @@ from forza_bootstrap.safeio import (
 from forza_bootstrap.state import (
     BootstrapPhase,
     create_transaction,
+    load_latest_transaction_read_only,
     load_unfinished_transaction,
     transition,
 )
@@ -92,6 +93,67 @@ def test_new_transaction_is_private_and_single(tmp_path: Path) -> None:
     assert load_unfinished_transaction(tmp_path) == state
     with pytest.raises(BootstrapError, match="unfinished bootstrap transaction"):
         create_transaction(tmp_path, "1" * 64)
+
+
+def test_read_only_latest_transaction_does_not_create_missing_state_root(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "missing-bootstrap"
+
+    assert load_latest_transaction_read_only(state_root) is None
+    assert not state_root.exists()
+
+
+def test_read_only_latest_transaction_prefers_the_current_durable_transaction(
+    tmp_path: Path,
+) -> None:
+    first = create_transaction(tmp_path, "1" * 64)
+    first = transition(first, BootstrapPhase.NEW, BootstrapPhase.ROLLING_BACK)
+    transition(first, BootstrapPhase.ROLLING_BACK, BootstrapPhase.ROLLED_BACK)
+    current = create_transaction(tmp_path, "1" * 64)
+    old_mtime = 1_700_000_000_000_000_000
+    os.utime(tmp_path / current.transaction_id / "state.json", ns=(old_mtime,) * 2)
+
+    assert load_latest_transaction_read_only(tmp_path) == current
+
+
+def test_read_only_latest_transaction_selects_newest_terminal_without_writes(
+    tmp_path: Path,
+) -> None:
+    first = create_transaction(tmp_path, "1" * 64)
+    first = transition(first, BootstrapPhase.NEW, BootstrapPhase.ROLLING_BACK)
+    first = transition(first, BootstrapPhase.ROLLING_BACK, BootstrapPhase.ROLLED_BACK)
+    second = create_transaction(tmp_path, "1" * 64)
+    second = transition(second, BootstrapPhase.NEW, BootstrapPhase.ROLLING_BACK)
+    second = transition(second, BootstrapPhase.ROLLING_BACK, BootstrapPhase.ROLLED_BACK)
+    first_path = tmp_path / first.transaction_id / "state.json"
+    second_path = tmp_path / second.transaction_id / "state.json"
+    os.utime(first_path, ns=(1_700_000_000_000_000_000,) * 2)
+    os.utime(second_path, ns=(1_700_000_001_000_000_000,) * 2)
+    before = {
+        path: (path.stat().st_ino, path.stat().st_mtime_ns, path.read_bytes())
+        for path in (first_path, second_path)
+    }
+
+    assert load_latest_transaction_read_only(tmp_path) == second
+    assert {
+        path: (path.stat().st_ino, path.stat().st_mtime_ns, path.read_bytes())
+        for path in (first_path, second_path)
+    } == before
+
+
+def test_read_only_latest_transaction_never_recovers_staging_state(
+    tmp_path: Path,
+) -> None:
+    create_transaction(tmp_path, "1" * 64)
+    transaction_id = "f" * 24
+    write_prepublication_transaction(tmp_path, transaction_id)
+
+    with pytest.raises(BootstrapError, match="interrupted publication"):
+        load_latest_transaction_read_only(tmp_path)
+
+    assert (tmp_path / f".bootstrap-staging-{transaction_id}").is_dir()
+    assert not (tmp_path / transaction_id).exists()
 
 
 @pytest.mark.parametrize("kind", ("symlink", "wrong_mode"))

@@ -299,7 +299,7 @@ def test_private_digest_and_path_never_enter_human_report() -> None:
     assert "[private local digest verified]" in report
 
 
-def test_cli_refuses_private_snapshot_stdout_without_leaking(
+def test_cli_prints_redacted_private_snapshot_stdout_without_leaking(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     private_path = "private/sensitive-component"
@@ -309,11 +309,11 @@ def test_cli_refuses_private_snapshot_stdout_without_leaking(
     )
     monkeypatch.setattr(cli_module, "_capture_current_snapshot", lambda: value)
 
-    assert main(["snapshot"]) == 1
+    assert main(["snapshot"]) == 0
 
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == "error: private snapshot requires explicit owner-only output\n"
+    assert captured.err == ""
+    assert '"sha256":"[private local digest verified]"' in captured.out
     assert private_path not in captured.out + captured.err
     assert private_digest not in captured.out + captured.err
 

@@ -126,6 +126,9 @@ test_setup_help_names_new_boundary_without_claiming_steam_or_launch_control() {
     assert_contains "$output" './setup compare' || return 1
     assert_contains "$output" './setup bootstrap --rollback' || return 1
     assert_contains "$output" './setup rollback' || return 1
+    assert_contains "$output" 'prints redacted JSON; --output writes private evidence' || return 1
+    assert_contains "$output" 'last transaction before/after pair by default' || return 1
+    assert_contains "$output" 'bootstrap --check is read-only' || return 1
     assert_contains "$output" 'does not edit Steam or launch the game' || return 1
     [[ ! -e $ACTION_LOG ]] || fail 'help invoked a child command'
     tear_down

@@ -263,6 +263,18 @@ class RecoveryContext:
     finish_context: FinishContext | None = None
 
 
+@dataclass(frozen=True)
+class BootstrapInspection:
+    """Read-only phase and evidence status for the public bootstrap check."""
+
+    phase: BootstrapPhase
+    status: str
+    cache: Literal["pending", "verified"]
+    prefix: Literal["missing", "ready"]
+    managed_records: int
+    next_action: str
+
+
 def _read_os_id(path: Path) -> str:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -1177,6 +1189,175 @@ def _capture_before(context: PrepareContext, transaction_id: str) -> Snapshot:
     return capture_snapshot(
         _snapshot_scope(context, transaction_id),
         {"steam": context.host.steam_root, "user": context.host.user_root},
+    )
+
+
+def capture_managed_snapshot(
+    context: PrepareContext, state: BootstrapState
+) -> Snapshot:
+    """Capture the canonical finite managed scope for one durable transaction."""
+    _validate_context(context)
+    if (
+        not isinstance(state, BootstrapState)
+        or state._state_root != context.host.state_root
+        or state.manifest_sha256 != context.manifest.sha256
+    ):
+        raise BootstrapError("snapshot transaction does not match the supported host")
+    _owned_directory(context.host.user_root, "user root")
+    _owned_directory(context.host.steam_root, "native Steam root")
+    _validate_app_manifest(context.host.app_manifest)
+    return _capture_before(context, state.transaction_id)
+
+
+def compare_transaction_snapshots(
+    context: PrepareContext, state: BootstrapState
+) -> Comparison:
+    """Compare the automatic before/after pair using its confirmed Finish policy."""
+    _validate_context(context)
+    if (
+        not isinstance(state, BootstrapState)
+        or state._state_root != context.host.state_root
+        or state.manifest_sha256 != context.manifest.sha256
+    ):
+        raise BootstrapError("snapshot transaction does not match the supported host")
+    transaction = context.host.state_root / state.transaction_id
+    before = read_snapshot(transaction / "before.json")
+    after = read_snapshot(transaction / "after.json")
+    plan = _finish_plan_for_recovery(state)
+    return compare_snapshots(before, after, plan.snapshot_rules)
+
+
+def inspect_bootstrap(
+    context: PrepareContext, state: BootstrapState
+) -> BootstrapInspection:
+    """Inspect durable bootstrap evidence and managed paths without invoking owners."""
+    current = capture_managed_snapshot(context, state)
+    phase = state.phase
+    transaction = context.host.state_root / state.transaction_id
+    prepare_record = _transaction_json_if_present(state, "prepare.json")
+    finish_context: FinishContext | None = None
+    cache: Literal["pending", "verified"] = "pending"
+    if prepare_record is not None and state.compatibility_tool_disposition is not None:
+        finish_context = _finish_context_from_prepare_checkpoint(context, state, None)
+        verified = verify_bundle_root(finish_context.bundle_root, context.manifest)
+        if verified.manifest_sha256 != finish_context.bundle_manifest_sha256:
+            raise BootstrapError("recorded bundle cache identity changed")
+        before = read_snapshot(transaction / "before.json")
+        _validate_finish_snapshot(before, finish_context, label="before")
+        cache = "verified"
+    elif phase not in {
+        BootstrapPhase.NEW,
+        BootstrapPhase.PREPARING,
+        BootstrapPhase.RECOVERY_REQUIRED,
+        BootstrapPhase.ROLLING_BACK,
+        BootstrapPhase.ROLLED_BACK,
+    }:
+        raise BootstrapError("durable Prepare checkpoint is missing")
+
+    if finish_context is not None:
+        tool = inspect_fm(
+            context.host.compatibility_tools / _FM_NAME,
+            context.manifest,
+        )
+        tool_matches = (
+            tool.disposition is ToolDisposition.ADOPTED
+            and tool.tree_sha256 == finish_context.compatibility_tool_tree_sha256
+        )
+        created = state.compatibility_tool_disposition == "created"
+        recovery_phase = phase in {
+            BootstrapPhase.RECOVERY_REQUIRED,
+            BootstrapPhase.ROLLING_BACK,
+        }
+        if phase is BootstrapPhase.ROLLED_BACK and created:
+            if tool.disposition is not ToolDisposition.ABSENT:
+                raise BootstrapError("rolled-back compatibility tool is still present")
+        elif recovery_phase and created:
+            if tool.disposition is not ToolDisposition.ABSENT and not tool_matches:
+                raise BootstrapError("compatibility tool differs from recovery evidence")
+        elif not tool_matches:
+            raise BootstrapError("compatibility tool differs from Prepare evidence")
+
+    prefix: Literal["missing", "ready"] = "missing"
+    if finish_context is not None:
+        try:
+            _validate_prefix_tree(finish_context)
+        except BootstrapError as error:
+            if str(error) != "Forza prefix is missing or incomplete":
+                raise
+        else:
+            prefix = "ready"
+
+    committed_finish = state.finish_plan_sha256 is not None
+    finish_plan: FinishPlan | None = None
+    if committed_finish:
+        finish_plan = _finish_plan_for_recovery(state)
+    elif phase in {
+        BootstrapPhase.PLANNED_FINISH,
+        BootstrapPhase.INSTALLING_FINISH,
+        BootstrapPhase.READY_TO_ATTEMPT,
+        BootstrapPhase.ACCEPTED,
+    }:
+        raise BootstrapError("durable Finish plan commitment is missing")
+
+    if phase in {
+        BootstrapPhase.PLANNED_FINISH,
+        BootstrapPhase.INSTALLING_FINISH,
+        BootstrapPhase.READY_TO_ATTEMPT,
+        BootstrapPhase.ACCEPTED,
+    } and prefix != "ready":
+        raise BootstrapError("committed Finish prefix is missing or incomplete")
+
+    if phase in {BootstrapPhase.READY_TO_ATTEMPT, BootstrapPhase.ACCEPTED}:
+        assert finish_plan is not None
+        before = read_snapshot(transaction / "before.json")
+        after = read_snapshot(transaction / "after.json")
+        completed = compare_snapshots(before, after, finish_plan.snapshot_rules)
+        if not completed.ok:
+            raise BootstrapError("recorded managed snapshot is inconsistent")
+        unchanged = tuple(
+            ChangeRule(item.logical_path, "unchanged", item.sha256, item.mode)
+            for item in after.records
+        )
+        if not compare_snapshots(after, current, unchanged).ok:
+            raise BootstrapError("current managed state differs from READY evidence")
+
+    status, next_action = {
+        BootstrapPhase.NEW: ("prepare-interrupted", "./setup bootstrap"),
+        BootstrapPhase.PREPARING: ("prepare-interrupted", "./setup bootstrap"),
+        BootstrapPhase.AWAITING_STEAM_PREFIX: (
+            "ready-to-finish" if prefix == "ready" else "waiting-for-steam-prefix",
+            "./setup bootstrap --threading-dll /absolute/path/to/xgameruntime.dll",
+        ),
+        BootstrapPhase.PLANNED_FINISH: (
+            "finish-interrupted",
+            "./setup bootstrap --threading-dll /absolute/path/to/xgameruntime.dll",
+        ),
+        BootstrapPhase.INSTALLING_FINISH: (
+            "finish-interrupted",
+            "./setup bootstrap --threading-dll /absolute/path/to/xgameruntime.dll",
+        ),
+        BootstrapPhase.READY_TO_ATTEMPT: (
+            "ready-to-attempt",
+            "launch Forza manually from Steam",
+        ),
+        BootstrapPhase.ACCEPTED: ("accepted", "none"),
+        BootstrapPhase.RECOVERY_REQUIRED: (
+            "recovery-required",
+            "./setup bootstrap --rollback",
+        ),
+        BootstrapPhase.ROLLING_BACK: (
+            "rollback-interrupted",
+            "./setup bootstrap --rollback",
+        ),
+        BootstrapPhase.ROLLED_BACK: ("rolled-back", "./setup bootstrap"),
+    }[phase]
+    return BootstrapInspection(
+        phase,
+        status,
+        cache,
+        prefix,
+        len(current.records),
+        next_action,
     )
 
 
@@ -3579,11 +3760,14 @@ def _finish_plan_for_recovery(state: BootstrapState) -> FinishPlan:
     ):
         raise BootstrapError("Finish recovery plan is invalid")
     rules_by_logical = {rule.logical_path: rule for rule in rules}
-    for logical_path, expected_hash in zip(
-        _PATCH_LOGICAL_PATHS, patch_hashes, strict=True
-    ):
-        if rules_by_logical[logical_path].after_sha256 != expected_hash:
-            raise BootstrapError("Finish recovery plan is invalid")
+    planned_patch_hashes = tuple(
+        rules_by_logical[logical_path].after_sha256
+        for logical_path in _PATCH_LOGICAL_PATHS
+    )
+    if any(not isinstance(value, str) for value in planned_patch_hashes) or sorted(
+        planned_patch_hashes
+    ) != sorted(patch_hashes):
+        raise BootstrapError("Finish recovery plan is invalid")
     threading_rule = rules_by_logical["prefix/threading"]
     if (
         threading_rule.after_sha256 != licensed["source_sha256"]
@@ -3840,8 +4024,8 @@ def _recovery_finish_context(
 
 
 def _has_finish_plan(state: BootstrapState) -> bool:
-    plan = _transaction_json_if_present(state, "plan.json")
-    return plan is not None and plan.get("phase") == "finish"
+    """Return whether Finish crossed its durable plan-commit transition."""
+    return state.finish_plan_sha256 is not None
 
 
 def _default_patch_recovery_status(

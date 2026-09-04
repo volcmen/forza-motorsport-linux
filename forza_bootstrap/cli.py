@@ -14,9 +14,12 @@ from .coordinator import (
     PrepareContext,
     RecoveryContext,
     build_prepare_plan,
+    capture_managed_snapshot,
+    compare_transaction_snapshots,
     finish,
     finish_context_for_recovery,
     finish_context_from_prepare,
+    inspect_bootstrap,
     inspect_prepare,
     prepare,
     resolve_supported_host,
@@ -27,13 +30,19 @@ from .manifest import load_bootstrap_manifest
 from .model import BootstrapError, canonical_json, plan_digest
 from .snapshot import (
     ChangeRule,
+    Comparison,
     Snapshot,
     compare_snapshots,
     output_snapshot,
     read_snapshot,
     render_comparison,
 )
-from .state import BootstrapPhase, BootstrapState, load_unfinished_transaction
+from .state import (
+    BootstrapPhase,
+    BootstrapState,
+    load_latest_transaction_read_only,
+    load_unfinished_transaction,
+)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -65,8 +74,22 @@ def _unavailable(_: argparse.Namespace) -> None:
 
 
 def _capture_current_snapshot() -> Snapshot:
-    """Defer current-scope resolution to the bootstrap coordinator task."""
-    raise BootstrapError("command is unavailable in this build")
+    """Resolve and capture the latest transaction's finite supported-host scope."""
+    arguments = argparse.Namespace(bundle=None, build_from_source=False)
+    context = _prepare_context(arguments)
+    state = load_latest_transaction_read_only(context.host.state_root)
+    if state is None:
+        raise BootstrapError("no bootstrap transaction exists for snapshot identity")
+    return capture_managed_snapshot(context, state)
+
+
+def _compare_latest_transaction() -> Comparison:
+    arguments = argparse.Namespace(bundle=None, build_from_source=False)
+    context = _prepare_context(arguments)
+    state = load_latest_transaction_read_only(context.host.state_root)
+    if state is None:
+        raise BootstrapError("no bootstrap transaction exists to compare")
+    return compare_transaction_snapshots(context, state)
 
 
 def _prepare_context(arguments: argparse.Namespace) -> PrepareContext:
@@ -149,6 +172,24 @@ def _confirm_rollback() -> str:
 
 def _run_bootstrap(arguments: argparse.Namespace) -> None:
     context = _prepare_context(arguments)
+    if arguments.check:
+        state = load_latest_transaction_read_only(context.host.state_root)
+        if state is not None:
+            print(f"PHASE={state.phase.value}")
+            report = inspect_bootstrap(context, state)
+            print(f"STATUS={report.status}")
+            print(f"CACHE={report.cache}")
+            print(f"PREFIX={report.prefix}")
+            print(f"MANAGED_RECORDS={report.managed_records}")
+            print(f"NEXT={report.next_action}")
+            return
+        print("PHASE=NOT_STARTED")
+        inspection = inspect_prepare(context)
+        plan = build_prepare_plan(context, inspection)
+        print(canonical_json(plan).decode("ascii"))
+        print(f"PLAN_SHA256={plan_digest(plan)}")
+        print("NEXT=./setup bootstrap")
+        return
     state = load_unfinished_transaction(context.host.state_root)
     if arguments.rollback:
         if state is None:
@@ -157,16 +198,6 @@ def _run_bootstrap(arguments: argparse.Namespace) -> None:
         rollback(_recovery_context(context, arguments, state), confirmation)
         if confirmation != "ROLLBACK":
             print("No changes made.")
-        return
-    if arguments.check:
-        if state is not None:
-            raise BootstrapError(
-                "bootstrap Finish inspection is unavailable in this build"
-            )
-        inspection = inspect_prepare(context)
-        plan = build_prepare_plan(context, inspection)
-        print(canonical_json(plan).decode("ascii"))
-        print(f"PLAN_SHA256={plan_digest(plan)}")
         return
     if state is not None:
         if state.phase is BootstrapPhase.AWAITING_STEAM_PREFIX:
@@ -192,14 +223,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "snapshot":
             output_snapshot(_capture_current_snapshot(), arguments.output, sys.stdout)
             return 0
-        if arguments.command == "compare" and arguments.before and arguments.after:
-            before = read_snapshot(arguments.before)
-            after = read_snapshot(arguments.after)
-            rules = tuple(
-                ChangeRule(item.logical_path, "unchanged", item.sha256, item.mode)
-                for item in before.records
-            )
-            comparison = compare_snapshots(before, after, rules)
+        if arguments.command == "compare":
+            if bool(arguments.before) != bool(arguments.after):
+                raise BootstrapError(
+                    "compare requires both --before and --after, or neither"
+                )
+            if arguments.before and arguments.after:
+                before = read_snapshot(arguments.before)
+                after = read_snapshot(arguments.after)
+                rules = tuple(
+                    ChangeRule(item.logical_path, "unchanged", item.sha256, item.mode)
+                    for item in before.records
+                )
+                comparison = compare_snapshots(before, after, rules)
+            else:
+                comparison = _compare_latest_transaction()
             print(render_comparison(comparison), end="")
             return 0 if comparison.ok else 1
         if arguments.command == "bootstrap":

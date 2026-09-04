@@ -9,6 +9,7 @@ import os
 import shutil
 import stat
 import subprocess
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -53,6 +54,7 @@ from forza_bootstrap.proton import (
     PublishedToolRecord,
     ToolDisposition,
     ToolIdentity,
+    ToolInspection,
 )
 from forza_bootstrap.snapshot import Snapshot, read_snapshot
 from forza_bootstrap.state import BootstrapPhase
@@ -536,6 +538,50 @@ def run_clean_start(root: Path, mode: str) -> dict[str, object]:
     fixture = CleanStartFixture(root, mode)
     prepared = fixture.prepare()
     assert prepared.phase is BootstrapPhase.AWAITING_STEAM_PREFIX
+    prepare_transaction = fixture.state_root / prepared.transaction_id
+    prepare_evidence = {
+        path.relative_to(prepare_transaction): file_identity(path)
+        for path in prepare_transaction.rglob("*")
+        if path.is_file()
+    }
+    checked_tool = ToolInspection(
+        ToolDisposition.ADOPTED,
+        ToolIdentity(
+            "GE-Proton11-3-FM",
+            "GE-Proton11-3",
+            "5" * 64,
+            "6" * 64,
+            sha256(b"synthetic bootstrap marker\n"),
+        ),
+        "7" * 64,
+    )
+    with (
+        patch.object(cli_module, "_prepare_context", return_value=fixture.context),
+        patch("forza_bootstrap.coordinator.inspect_fm", return_value=checked_tool),
+    ):
+        check = io.StringIO()
+        with redirect_stdout(check):
+            assert cli_module.main(["bootstrap", "--check"]) == 0
+    assert "PHASE=AWAITING_STEAM_PREFIX" in check.getvalue()
+    assert "STATUS=waiting-for-steam-prefix" in check.getvalue()
+    assert "CACHE=verified" in check.getvalue()
+    assert "PREFIX=missing" in check.getvalue()
+    assert {
+        path.relative_to(prepare_transaction): file_identity(path)
+        for path in prepare_transaction.rglob("*")
+        if path.is_file()
+    } == prepare_evidence
+    with (
+        patch.object(cli_module, "_prepare_context", return_value=fixture.context),
+        patch(
+            "forza_bootstrap.coordinator.inspect_fm",
+            return_value=ToolInspection(ToolDisposition.ABSENT, None, None),
+        ),
+        redirect_stdout(io.StringIO()),
+        redirect_stderr(io.StringIO()),
+    ):
+        assert cli_module.main(["bootstrap", "--check"]) == 1
+
     fixture.create_prefix()
     finish_context, ready = fixture.finish(prepared)
     assert ready.phase is BootstrapPhase.READY_TO_ATTEMPT
@@ -545,7 +591,38 @@ def run_clean_start(root: Path, mode: str) -> dict[str, object]:
     assert '"unexpected_changes":[]' in comparison.read_text(encoding="ascii")
     before_noop = fixture.managed_identity(after)
 
-    with patch.object(cli_module, "_prepare_context", return_value=fixture.context):
+    with (
+        patch.object(cli_module, "_prepare_context", return_value=fixture.context),
+        patch("forza_bootstrap.coordinator.inspect_fm", return_value=checked_tool),
+    ):
+        ready_check = io.StringIO()
+        with redirect_stdout(ready_check):
+            assert cli_module.main(["bootstrap", "--check"]) == 0
+        assert "PHASE=READY_TO_ATTEMPT" in ready_check.getvalue()
+        assert "STATUS=ready-to-attempt" in ready_check.getvalue()
+        assert "CACHE=verified" in ready_check.getvalue()
+        assert "PREFIX=ready" in ready_check.getvalue()
+
+        public_snapshot = io.StringIO()
+        public_errors = io.StringIO()
+        with redirect_stdout(public_snapshot), redirect_stderr(public_errors):
+            assert cli_module.main(["snapshot"]) == 0
+        assert public_errors.getvalue() == ""
+        assert "[private local digest verified]" in public_snapshot.getvalue()
+        assert str(fixture.licensed) not in public_snapshot.getvalue()
+        assert sha256(fixture.licensed.read_bytes()) not in public_snapshot.getvalue()
+
+        evidence = fixture.root / "evidence"
+        evidence.mkdir(mode=0o700)
+        explicit = evidence / "current.json"
+        assert cli_module.main(["snapshot", "--output", str(explicit)]) == 0
+        assert read_snapshot(explicit) == after
+
+        comparison = io.StringIO()
+        with redirect_stdout(comparison):
+            assert cli_module.main(["compare"]) == 0
+        assert "result: ok" in comparison.getvalue()
+
         assert cli_module.main(["bootstrap"]) == 0
     assert fixture.managed_identity(after) == before_noop
 
@@ -563,6 +640,19 @@ def run_clean_start(root: Path, mode: str) -> dict[str, object]:
         ):
             assert not fixture.path_for(item.logical_path).exists()
     assert file_identity(fixture.sentinel) == fixture.sentinel_before
+    with (
+        patch.object(cli_module, "_prepare_context", return_value=fixture.context),
+        patch(
+            "forza_bootstrap.coordinator.inspect_fm",
+            return_value=ToolInspection(ToolDisposition.ABSENT, None, None),
+        ),
+    ):
+        terminal_check = io.StringIO()
+        with redirect_stdout(terminal_check):
+            assert cli_module.main(["bootstrap", "--check"]) == 0
+    assert "PHASE=ROLLED_BACK" in terminal_check.getvalue()
+    assert "STATUS=rolled-back" in terminal_check.getvalue()
+    assert "NEXT=./setup bootstrap" in terminal_check.getvalue()
     return {
         "records": tuple(
             (item.logical_path, item.state, item.mode, item.size, item.sha256)

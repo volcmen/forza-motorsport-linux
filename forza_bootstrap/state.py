@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
 import re
 import secrets
@@ -374,6 +375,90 @@ def load_unfinished_transaction(
         return _load_unfinished_transaction_locked(root)
     finally:
         os.close(lock_fd)
+
+
+def load_latest_transaction_read_only(
+    state_root: str | os.PathLike[str],
+) -> BootstrapState | None:
+    """Read the current transaction, or newest terminal one, without publishing state."""
+    root = Path(state_root)
+    try:
+        root_fd = open_owned_root(root)
+    except FileNotFoundError:
+        return None
+    lock_fd: int | None = None
+    try:
+        try:
+            initial_names = tuple(os.listdir(root_fd))
+        except OSError:
+            raise BootstrapError("cannot list bootstrap state root") from None
+        if not initial_names:
+            return None
+        try:
+            lock_fd = _open_private_regular(root_fd, BOOTSTRAP_LOCK_NAME)
+        except FileNotFoundError:
+            raise BootstrapError("bootstrap state lock is missing") from None
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise BootstrapError(
+                "another bootstrap operation holds the bootstrap lock"
+            ) from None
+        try:
+            names = sorted(os.listdir(root_fd))
+        except OSError:
+            raise BootstrapError("cannot list bootstrap state root") from None
+        states: list[tuple[int, BootstrapState]] = []
+        transaction_ids: set[str] = set()
+        for name in names:
+            if name == BOOTSTRAP_LOCK_NAME:
+                continue
+            if name == JOURNAL_LOCK_NAME:
+                journal_fd = _open_private_regular(root_fd, name)
+                os.close(journal_fd)
+                continue
+            if _PREPUBLICATION_DIRECTORY.fullmatch(name) is not None:
+                raise BootstrapError(
+                    "bootstrap state has an interrupted publication; run bootstrap recovery"
+                )
+            if _TRANSACTION_ID.fullmatch(name) is None:
+                raise BootstrapError(f"unsafe entry in bootstrap state root: {name}")
+            transaction_fd = _open_transaction(root_fd, name)
+            try:
+                state = _state_from_value(
+                    read_private_json(transaction_fd, "state.json"), root
+                )
+                state_fd = _open_private_regular(transaction_fd, "state.json")
+                try:
+                    modified = os.fstat(state_fd).st_mtime_ns
+                finally:
+                    os.close(state_fd)
+            finally:
+                os.close(transaction_fd)
+            if state.transaction_id != name:
+                raise BootstrapError(
+                    "transaction directory and state transaction id differ"
+                )
+            if state.transaction_id in transaction_ids:
+                raise BootstrapError("duplicate transaction id in bootstrap state")
+            transaction_ids.add(state.transaction_id)
+            states.append((modified, state))
+        unfinished = [
+            state
+            for _modified, state in states
+            if state.phase not in _TERMINAL_PHASES
+        ]
+        if len(unfinished) > 1:
+            raise BootstrapError("multiple unfinished bootstrap transactions")
+        if unfinished:
+            return unfinished[0]
+        if not states:
+            return None
+        return max(states, key=lambda item: (item[0], item[1].transaction_id))[1]
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+        os.close(root_fd)
 
 
 def load_transaction(

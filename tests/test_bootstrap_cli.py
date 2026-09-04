@@ -3,14 +3,16 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_bootstrap_prepare import PrepareFixture
 
 import forza_bootstrap.cli as cli_module
 from forza_bootstrap.cli import main, parse_args
-from forza_bootstrap.state import BootstrapPhase
+from forza_bootstrap.state import BootstrapPhase, load_transaction
 
 
 def test_cli_parses_bootstrap_modes_as_mutually_exclusive() -> None:
@@ -39,10 +41,104 @@ def test_cli_accepts_one_bootstrap_mode(mode: str) -> None:
     assert getattr(parsed, mode.removeprefix("--").replace("-", "_")) is True
 
 
-def test_cli_does_not_report_an_unimplemented_command_as_success(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["snapshot"]) == 1
+def test_cli_rejects_an_incomplete_explicit_compare(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["compare", "--before", "/tmp/before.json"]) == 1
 
-    assert "command is unavailable in this build" in capsys.readouterr().err
+    assert "requires both --before and --after" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("phase", "status", "next_action"),
+    (
+        (BootstrapPhase.AWAITING_STEAM_PREFIX, "waiting-for-steam-prefix", "./setup bootstrap --threading-dll /absolute/path/to/xgameruntime.dll"),
+        (BootstrapPhase.PLANNED_FINISH, "finish-interrupted", "./setup bootstrap --threading-dll /absolute/path/to/xgameruntime.dll"),
+        (BootstrapPhase.INSTALLING_FINISH, "finish-interrupted", "./setup bootstrap --threading-dll /absolute/path/to/xgameruntime.dll"),
+        (BootstrapPhase.READY_TO_ATTEMPT, "ready-to-attempt", "launch Forza manually from Steam"),
+        (BootstrapPhase.RECOVERY_REQUIRED, "recovery-required", "./setup bootstrap --rollback"),
+        (BootstrapPhase.ROLLING_BACK, "rollback-interrupted", "./setup bootstrap --rollback"),
+        (BootstrapPhase.ACCEPTED, "accepted", "none"),
+        (BootstrapPhase.ROLLED_BACK, "rolled-back", "./setup bootstrap"),
+    ),
+)
+def test_cli_check_reports_each_latest_durable_phase_without_recovery_owners(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    phase: BootstrapPhase,
+    status: str,
+    next_action: str,
+) -> None:
+    context = SimpleNamespace(host=SimpleNamespace(state_root=Path("/state")))
+    state = SimpleNamespace(phase=phase)
+    report = SimpleNamespace(
+        phase=phase,
+        status=status,
+        cache="verified",
+        prefix="ready",
+        managed_records=17,
+        next_action=next_action,
+    )
+    monkeypatch.setattr(cli_module, "_prepare_context", lambda _arguments: context)
+    monkeypatch.setattr(
+        cli_module,
+        "load_latest_transaction_read_only",
+        lambda state_root: state if state_root == Path("/state") else None,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "load_unfinished_transaction",
+        lambda _state_root: (_ for _ in ()).throw(
+            AssertionError("check must use the read-only latest-state resolver")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "inspect_bootstrap",
+        lambda actual_context, actual_state: (
+            report
+            if actual_context is context and actual_state is state
+            else (_ for _ in ()).throw(AssertionError("wrong check context"))
+        ),
+        raising=False,
+    )
+
+    assert main(["bootstrap", "--check"]) == 0
+
+    assert capsys.readouterr().out == (
+        f"PHASE={phase.value}\n"
+        f"STATUS={status}\n"
+        "CACHE=verified\n"
+        "PREFIX=ready\n"
+        "MANAGED_RECORDS=17\n"
+        f"NEXT={next_action}\n"
+    )
+
+
+def test_cli_check_reports_phase_before_a_real_inconsistency(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    context = SimpleNamespace(host=SimpleNamespace(state_root=Path("/state")))
+    state = SimpleNamespace(phase=BootstrapPhase.READY_TO_ATTEMPT)
+    monkeypatch.setattr(cli_module, "_prepare_context", lambda _arguments: context)
+    monkeypatch.setattr(
+        cli_module, "load_latest_transaction_read_only", lambda _state_root: state
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "inspect_bootstrap",
+        lambda _context, _state: (_ for _ in ()).throw(
+            cli_module.BootstrapError("current managed state differs from READY evidence")
+        ),
+        raising=False,
+    )
+
+    assert main(["bootstrap", "--check"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == "PHASE=READY_TO_ATTEMPT\n"
+    assert "current managed state differs from READY evidence" in captured.err
 
 
 def test_cli_routes_bootstrap_prepare_and_preserves_full_digest_confirmation(
@@ -281,3 +377,33 @@ def test_cli_ready_rollback_reconstructs_finish_context(
     monkeypatch.setattr(cli_module, "rollback", fake_rollback)
 
     assert main(["bootstrap", "--rollback"]) == 0
+
+
+def test_public_rollback_ignores_uncommitted_finish_plan_publication_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = PrepareFixture(tmp_path)
+    state = fixture.run()
+    transaction = fixture.state / state.transaction_id
+    prepare_plan = (transaction / "prepare-plan.json").read_bytes()
+    uncommitted_finish = {
+        "schema": 1,
+        "phase": "finish",
+        "manifest_sha256": state.manifest_sha256,
+        "transaction_id": state.transaction_id,
+    }
+    (transaction / "plan.json").write_text(
+        json.dumps(uncommitted_finish), encoding="ascii"
+    )
+    (transaction / "plan.json").chmod(0o600)
+    monkeypatch.setattr(cli_module, "_prepare_context", lambda _arguments: fixture.context)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "ROLLBACK")
+
+    assert main(["bootstrap", "--rollback"]) == 0
+
+    durable = load_transaction(fixture.state, state.transaction_id)
+    assert durable.phase is BootstrapPhase.ROLLED_BACK
+    assert durable.finish_plan_sha256 is None
+    assert (transaction / "prepare-plan.json").read_bytes() == prepare_plan
+    assert not (transaction / "recovery").exists()

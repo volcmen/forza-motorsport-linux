@@ -553,6 +553,26 @@ def canonical_snapshot_bytes(snapshot: Snapshot) -> bytes:
     return canonical_json(_snapshot_value(snapshot))
 
 
+def public_snapshot_bytes(snapshot: Snapshot) -> bytes:
+    """Serialize canonical stdout evidence while redacting private paths and digests."""
+    private, _ = _snapshot_privacy(snapshot)
+    try:
+        value = _snapshot_value(snapshot)
+    except BootstrapError:
+        if private:
+            raise BootstrapError(_PRIVATE_OUTPUT_ERROR) from None
+        raise
+    records = value["records"]
+    assert isinstance(records, list)
+    for record in records:
+        assert isinstance(record, dict)
+        if record["private"] is True:
+            record["logical_path"] = "[private local path]"
+            if record["sha256"] is not None:
+                record["sha256"] = "[private local digest verified]"
+    return canonical_json(value)
+
+
 def _native_snapshot_is_private(value: object) -> bool:
     """Pre-scan only native JSON containers, without trusting their schema."""
     if type(value) is not dict:
@@ -663,7 +683,7 @@ def read_snapshot(path: str | os.PathLike[str]) -> Snapshot:
 def output_snapshot(snapshot: Snapshot, path: str | os.PathLike[str] | None, stream: TextIO) -> None:
     """Print a snapshot by default, writing only when explicitly requested."""
     if path is None:
-        stream.write(canonical_snapshot_bytes(snapshot).decode("ascii") + "\n")
+        stream.write(public_snapshot_bytes(snapshot).decode("ascii") + "\n")
         return
     write_snapshot(path, snapshot)
 
