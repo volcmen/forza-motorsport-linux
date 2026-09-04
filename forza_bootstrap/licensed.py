@@ -295,7 +295,11 @@ def _open_record(
         fd = _open_regular(parent_fd, name, "licensed destination")
     except FileNotFoundError:
         return _absent_record(logical), None
-    record = _record_fd(fd, logical)
+    try:
+        record = _record_fd(fd, logical)
+    except BaseException:
+        os.close(fd)
+        raise
     return record, fd
 
 

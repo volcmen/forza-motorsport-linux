@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -453,6 +454,67 @@ def test_post_rename_record_binds_mode_and_hash_to_one_descriptor_generation(
     assert len(recoveries) == 1
     assert recoveries[0].read_bytes() == source.read_bytes()
     assert stat.S_IMODE(recoveries[0].stat().st_mode) == 0o777
+
+
+def test_open_record_closes_owned_descriptor_when_recording_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "xgameruntime.dll.threading"
+    destination.write_bytes(b"original")
+    original = destination.stat()
+    opened: list[int] = []
+
+    def fail_record(fd: int, logical: str) -> object:
+        opened.append(fd)
+        raise BootstrapError("simulated record failure")
+
+    monkeypatch.setattr(licensed_module, "_record_fd", fail_record)
+    parent_fd = os.open(tmp_path, licensed_module.DIRECTORY)
+    try:
+        with pytest.raises(BootstrapError, match="simulated record failure"):
+            licensed_module._open_record(
+                parent_fd, destination.name, os.fspath(destination)
+            )
+    finally:
+        os.close(parent_fd)
+
+    assert len(opened) == 1
+    closed = False
+    try:
+        os.fstat(opened[0])
+    except OSError as failure:
+        closed = failure.errno == errno.EBADF
+    finally:
+        if not closed:
+            os.close(opened[0])
+    assert closed
+    current = destination.stat()
+    assert destination.read_bytes() == b"original"
+    assert (current.st_dev, current.st_ino) == (original.st_dev, original.st_ino)
+    assert [path.name for path in tmp_path.iterdir()] == [destination.name]
+
+
+def test_open_record_transfers_owned_descriptor_to_caller_on_success(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "xgameruntime.dll.threading"
+    destination.write_bytes(b"original")
+    original = destination.stat()
+    parent_fd = os.open(tmp_path, licensed_module.DIRECTORY)
+    try:
+        record, destination_fd = licensed_module._open_record(
+            parent_fd, destination.name, os.fspath(destination)
+        )
+    finally:
+        os.close(parent_fd)
+
+    assert destination_fd is not None
+    try:
+        held = os.fstat(destination_fd)
+        assert (held.st_dev, held.st_ino) == (original.st_dev, original.st_ino)
+        assert record.mode == stat.S_IMODE(original.st_mode)
+    finally:
+        os.close(destination_fd)
 
 
 @pytest.mark.parametrize(
