@@ -1,13 +1,20 @@
-# v0.2.0 — hybrid bootstrap prerelease
+# v0.2.0 — an easier setup, ready for testing
 
-This prerelease adds a resumable bootstrap for the Steam edition of Forza
-Motorsport on Arch Linux x86_64 with native Steam. It remains experimental.
-The rebuilt artifacts require live acceptance; the earlier v0.1 gameplay
-results are not a substitute for testing these new binaries.
+This release is about making setup less of a project in itself. Instead of
+building and arranging every open-source component by hand, you can download
+the bundle and let `./setup bootstrap` walk you through the installation.
+If you stop partway through, you can resume it.
 
-Anonymous registry access and an unauthenticated download of the published
-bundle have passed verification. Bundle SHA-256:
-`68d7fc9e70a665c575f34432a5136e22bc07c840a028a52ec83b06f889c2b9b1`.
+**This is still an experimental prerelease.** The older v0.1 setup worked in
+the game on one machine. These rebuilt binaries haven't completed those game
+tests yet. Build, download, and recovery checks have passed, but that's not the
+same as testing a race or joining a friend. Keep your working setup for now.
+
+## Try it
+
+You'll need Arch Linux x86_64, native Steam, your Steam copy of Forza Motorsport,
+and a Microsoft threading DLL from a source you're licensed to use. That DLL
+is not included. Downloads don't require a GitHub login.
 
 Start in a separate checkout (do not replace a working installation blindly):
 
@@ -21,15 +28,14 @@ cd forza-motorsport-linux-v0.2.0
 The immutable tag retains its prepublication candidate documentation. These
 release notes record the later publication and public-download verification.
 
-## What is included
+## What's easier now
 
-- Pinned GE-Proton acquisition through the repository-local ProtonUp integration.
-- A dedicated `GE-Proton11-3-FM` layout, leaving other compatibility tools alone.
-- A hash-verified open-source Xodus/XGameRuntime component bundle.
-- Optional source builds in a pinned rootless Docker environment, with network
-  disabled during compilation.
-- Coordinated exact-build controller and AP702 patches, private snapshots,
-  interrupted-operation recovery, and composed rollback.
+- Setup downloads the selected GE-Proton version through ProtonUp and prepares
+  a separate `GE-Proton11-3-FM` tool, leaving your other Proton tools alone.
+- The Xodus/XGameRuntime bundle is checked against its expected hashes before use.
+- Controller and AP702 fixes are applied only to the exact supported builds.
+- Setup keeps backups and recovery records so you can resume or undo the work.
+- Prefer to build from source? The optional Docker build compiles offline.
 
 ## What remains manual
 
@@ -39,11 +45,15 @@ Bootstrap does not edit Steam launch options, launch the game, install system
 packages, or log into Microsoft. Use the generated Steam launch line.
 
 KDE Wallet can provide Secret Service; GNOME Keyring is not required. Xodus
-uses the per-game-session launcher lifecycle, not permanent startup enablement.
-Explicit Invite/Join is distinct from automatic incoming invite notifications,
-which are not supported.
+starts when you play and stops with that game session. You can open the social
+picker to Invite or Join; automatic incoming invite notifications aren't supported.
 
 ## Evidence and limits
+
+Two clean builds produced the same bundle. We also downloaded the public
+release without signing in and verified it against the shipped manifest.
+Bundle SHA-256:
+`68d7fc9e70a665c575f34432a5136e22bc07c840a028a52ec83b06f889c2b9b1`.
 
 The [build verification record](https://github.com/volcmen/forza-motorsport-linux/blob/feature/hybrid-bootstrap/docs/evidence/bootstrap-build.md) documents the
 real offline compilation, repeated archive comparison, binary loader/CLI smoke

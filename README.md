@@ -4,40 +4,64 @@
 [![Release](https://img.shields.io/github/v/release/volcmen/forza-motorsport-linux)](https://github.com/volcmen/forza-motorsport-linux/releases)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSES/GPL-3.0-or-later.txt)
 
-Guided, recoverable tools for running the **Steam edition of Forza Motorsport**
-(`AppID 2440510`) with the reviewed `GE-Proton11-3-FM` and Xodus stack.
+I bought Forza Motorsport to drive the Nürburgring and revisit memories of
+playing Forza Motorsport 4 with my cousin on Xbox 360. Getting there on Linux
+turned into a detour through Gaming Services, a controller the game couldn't
+see, an SSD warning, and Xbox invites.
+
+This project collects the setup tools and fixes that came out of that work.
+It's for the **Steam edition of Forza Motorsport** (`AppID 2440510`), using
+`GE-Proton11-3-FM` and Xodus. The aim is to make the next person's setup easier
+to follow—and possible to undo if something goes wrong.
 
 > [!IMPORTANT]
-> This is an **Experimental** integration for one documented component set,
-> not ordinary upstream Proton support or a compatibility guarantee. The v0.1
-> manual workflow is source-only; the v0.2.0 bootstrap prerelease includes a
-> verified open-source binary bundle and still requires live acceptance.
+> **Experimental:** the older v0.1 setup worked on my machine. The new v0.2.0
+> installer has passed build and recovery tests, but its rebuilt components
+> still need testing in the game. This is not ordinary upstream Proton support.
+> If you already have a working setup, there's no need to replace it yet.
 
-The friendly entry point is [`./setup`](#guided-setup). The detailed evidence,
-manual transaction controls, and source provenance remain available for anyone
-who wants to audit exactly what it does.
+Looking to try it? Start with the [bootstrap guide](docs/bootstrap.md).
+Already have the required local builds? Use the [manual setup](#guided-setup).
+For problems, see [troubleshooting](docs/troubleshooting.md).
 
 ### Bootstrap prerelease
 
-The [v0.2.0 prerelease](https://github.com/volcmen/forza-motorsport-linux/releases/tag/v0.2.0) adds `./setup bootstrap` for acquiring
-the reviewed components, preparing a dedicated Proton tool, and completing a
-recoverable installation. Its clean-start, repeated-run, and rollback tests
-pass with synthetic game inputs. The real component bundle now builds
-reproducibly, and anonymous registry access and the public bundle download
-have been verified. Live acceptance of these rebuilt binaries remains pending.
-The existing guided setup below remains available for the v0.1 manual workflow.
+The [v0.2.0 prerelease](https://github.com/volcmen/forza-motorsport-linux/releases/tag/v0.2.0)
+adds `./setup bootstrap`: it downloads the open-source components, prepares a
+separate Proton tool, and walks you through installation. You don't need to
+compile the bundle yourself, and its download doesn't require a GitHub login.
 
-Bootstrap requires two manual steps: creating the game's prefix through Steam
-and supplying your own licensed Microsoft threading DLL. It prints the Steam
-launch options and never launches the game automatically. Use `./setup --help`
-to inspect the available commands. `./setup bootstrap --rollback` rolls back
-the composed bootstrap; `./setup rollback` retains its original runtime-only
-meaning.
+```bash
+git clone --branch v0.2.0 --depth 1 https://github.com/volcmen/forza-motorsport-linux.git forza-motorsport-linux-v0.2.0
+cd forza-motorsport-linux-v0.2.0
+./setup bootstrap --check
+./setup bootstrap
+```
+
+Run these without `sudo`, in a separate checkout. The tagged README was written
+before publication; the [release notes](https://github.com/volcmen/forza-motorsport-linux/releases/tag/v0.2.0)
+have the latest download information. Repeat builds produced identical bundles,
+and public downloads passed verification. Those checks don't prove gameplay.
+
+You still need to let Steam create the game's Windows environment (its
+"prefix"), supply your own licensed Microsoft threading DLL, and paste the
+printed launch options into Steam. Setup never launches the game for you.
+Use `./setup bootstrap --rollback` to undo a bootstrap installation;
+`./setup rollback` is for the older runtime-only setup.
 
 See the [bootstrap prerelease guide](docs/bootstrap.md) for the manual
 checkpoints, acquisition choices, privacy boundary, and recovery commands.
 
 ## Status and tested matrix
+
+The results below belong to **v0.1**, not the rebuilt v0.2.0 bundle.
+
+On that setup, I could play online, drive with the controller, reconnect it,
+and invite or join a friend on Windows. The AP702 warning was gone.
+Incoming invite notifications are not supported.
+
+<details>
+<summary>Tested versions, results, and the experiment to avoid</summary>
 
 | State | Meaning |
 | --- | --- |
@@ -76,26 +100,32 @@ See the [v0.1.0 release evidence](docs/release-v0.1.0.md) and the complete
 [verification record](docs/verification.md) for the exact boundary behind those
 statements.
 
+</details>
+
 ## What this project does
 
-The project coordinates four existing pieces without pretending they are one
-ordinary package:
+Forza needs more than a different Proton version here. This project brings
+together:
 
 1. a dedicated `GE-Proton11-3-FM` compatibility-tool layout;
 2. a locally built, reviewed Xodus service, CLI, and social overlay;
 3. the matching locally built legacy XGameRuntime bridge; and
 4. one Microsoft threading runtime supplied by the user from a licensed source.
 
-The launcher starts Xodus on demand, waits for its Unix socket, runs Steam's
-actual game command, and stops only the service invocation it owns. Directly
-starting `xodus-forza.service` without a launcher reservation fails closed. The
-service is installed disabled and is never enabled as a permanent daemon.
+Xodus handles the Xbox side of the setup. The launcher starts it when you play
+and stops its session when you leave. It doesn't run permanently in the
+background. Start Forza through Steam with the generated launch options rather
+than starting `xodus-forza.service` yourself.
 
-`forza-doctor` is read-only. It reports whether the current environment is
-ready to attempt a launch; it does not prove gameplay compatibility. The exact
-ownership protocol is documented in [Architecture](docs/architecture.md).
+`forza-doctor` checks your setup without changing it. A clean report means
+you're ready to try launching, not that the game is guaranteed to work.
+The service details are in [Architecture](docs/architecture.md).
 
 ## Before you start
+
+The bootstrap targets **Arch Linux x86_64 with native Steam**. Follow its
+[guide](docs/bootstrap.md) for downloads and prerequisites. The list below is
+for the **v0.1 manual workflow**, where you provide the local builds yourself.
 
 You need all of the following:
 
@@ -110,16 +140,17 @@ You need all of the following:
   described below; and
 - KDE Wallet exposing the standard Secret Service D-Bus API.
 
-Every installation command is user-local. Do not use `sudo`. **Microsoft binaries are not distributed** by this repository, and the tools do not
-download credentials, game assets, Microsoft binaries, or third-party binaries.
-Do not obtain DLLs from download sites.
+Install as your regular user, without `sudo`. **Microsoft binaries are not distributed**
+by this project. You must supply the threading DLL from a source you're licensed
+to use; don't get it from a DLL download site. The v0.1 workflow is source-only;
+the v0.2.0 prerelease provides the open-source component bundle separately.
 
 KDE Wallet is supported through `org.freedesktop.secrets`. **Do not install GNOME Keyring** for this workflow or add a second daemon competing for the same
 D-Bus service.
 
 ## Guided setup
 
-Clone the current integration source and inspect the command before running it:
+For the manual workflow, clone the source and check the available commands:
 
 ```bash
 git clone https://github.com/volcmen/forza-motorsport-linux.git
@@ -128,14 +159,10 @@ cd forza-motorsport-linux
 ./setup
 ```
 
-`./setup` asks for the three reviewed local directories, runs a read-only user
-installation preflight, validates the exact source revisions, and prints the
-complete runtime transaction. Its first potentially persistent action is
-creating a private evidence manifest, and it asks before doing that. Installation
-then requires typing the complete printed `PLAN_SHA256`.
-
-The command is a thin conductor: existing tools still own every hash,
-destination, lock, backup, journal, mutation, and rollback decision.
+`./setup` asks where your three local builds are, checks them, and shows what it
+would install. It asks before saving the installation record, then requires you
+to type the printed `PLAN_SHA256` to confirm that exact plan. Backups and recovery
+records are kept so you can undo the installation later.
 
 ### What setup automates
 
@@ -156,7 +183,7 @@ destination, lock, backup, journal, mutation, and rollback decision.
 - accepting an installed transaction after live validation; and
 - deleting any retained recovery material.
 
-There is intentionally no `--yes`, smart repair, automatic patching, automatic
+In this manual workflow there is no `--yes`, smart repair, automatic patching, automatic
 rollback, Steam-file editing, binary download, or automatic game launch.
 
 Useful commands:
@@ -223,14 +250,12 @@ response for this build.
 
 ## Invite and join
 
-Explicit Microsoft/Xbox Invite and Join actions worked through the social
-picker in the live matrix. Forza must first publish a joinable multiplayer
-activity, which normally means entering a compatible multiplayer lobby before
-opening the picker.
+Invite and Join worked with a friend on Windows using the Xbox social picker,
+with both keyboard and controller navigation. Enter a compatible multiplayer
+lobby first: Forza needs to make that session available before friends can join.
 
-Steam invites do not replace this flow. Automatic incoming Xbox invite toasts
-remain unsupported because the Windows Xbox Game Bar notification path is not
-available here.
+These are Microsoft/Xbox invites, not Steam invites. Incoming invite
+notifications are not supported: you need to open the picker yourself.
 
 ## Recovery and Uninstall
 
@@ -282,10 +307,13 @@ The repository, not the story, is authoritative for the current technical state.
 
 ## Upstream branches and provenance
 
-This repository contains scripts, manifests, documentation, and synthetic test
-fixtures only. It redistributes no Wine, Proton, Xodus, Microsoft, Steam, or
-game binary. The source branches are public at the immutable revisions recorded
-in the [publication ledger](docs/upstream.md):
+<details>
+<summary>Source revisions and build references for contributors</summary>
+
+The Git repository contains source, scripts, documentation, and test fixtures.
+The v0.2.0 release separately offers an open-source Xodus/XGameRuntime bundle;
+it contains no Microsoft DLL or game files. The source branches are public at the immutable revisions
+recorded in the [publication ledger](docs/upstream.md):
 
 - legacy Xodus [`forza-social-invite-join-v0.1`](https://github.com/volcmen/xodus/tree/forza-social-invite-join-v0.1) at [`7b236772297b3475ea4f3cb830feb5b224f3064a`](https://github.com/volcmen/xodus/commit/7b236772297b3475ea4f3cb830feb5b224f3064a);
 - legacy XGameRuntime [`forza-xgameui-invite-join-v0.1`](https://github.com/volcmen/wine-forza-motorsport/tree/forza-xgameui-invite-join-v0.1) at [`a1548b1cf57371715d10b608bc81a77a188e40d4`](https://github.com/volcmen/wine-forza-motorsport/commit/a1548b1cf57371715d10b608bc81a77a188e40d4);
@@ -310,3 +338,5 @@ git -C winegdk switch --detach b03ba49c4f326c36aa6930fbe6cf72841ef3738c
 
 These bases are provenance references, not a claim that cloning them alone
 builds or installs the complete integration.
+
+</details>
