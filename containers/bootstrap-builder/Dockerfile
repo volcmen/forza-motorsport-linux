@@ -27,10 +27,10 @@ ARG LLVM_MINGW_SHA256=cee8d2ce3da5145ce4dc882e70d0b0719a783d53a99752c60948fc0659
 
 RUN printf 'Server = %s\n' "${ARCH_SNAPSHOT}" > /etc/pacman.d/mirrorlist \
     && pacman -Syu --noconfirm --needed \
-        autoconf automake bison clang cmake curl flex fontforge git \
+        autoconf automake bison clang cmake curl flex fontforge git gtk4 libadwaita \
         libtool libx11 libxcomposite libxcursor libxext libxfixes libxi \
         libxinerama libxkbcommon libxrandr libxrender libxcb make meson \
-        ninja python rust tar uv zstd \
+        ninja protobuf python rust sdl3 tar uv webkit2gtk-4.1 zstd \
     && pacman -Scc --noconfirm \
     && rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*
 
@@ -42,6 +42,18 @@ RUN curl --fail --location --proto '=https' --tlsv1.2 \
     && tar --extract --xz --file /tmp/llvm-mingw.tar.xz \
         --directory /opt/llvm-mingw --strip-components=1 \
     && rm /tmp/llvm-mingw.tar.xz
+
+RUN mkdir -p /opt/vulkan-registry \
+    && curl --fail --location --proto '=https' --tlsv1.2 \
+        https://raw.githubusercontent.com/KhronosGroup/Vulkan-Docs/v1.4.339/xml/vk.xml \
+        -o /opt/vulkan-registry/vk.xml \
+    && curl --fail --location --proto '=https' --tlsv1.2 \
+        https://raw.githubusercontent.com/KhronosGroup/Vulkan-Docs/v1.4.339/xml/video.xml \
+        -o /opt/vulkan-registry/video.xml \
+    && printf '%s\n' \
+        '5ebddf02358d937d8ce9bd997b20d2be9693e48320e1a060056c26b9cfe15438  /opt/vulkan-registry/vk.xml' \
+        '4480ab87c8ee6d561376fa83820af1071f85ff7fa1a26b21f521717fa04d5809  /opt/vulkan-registry/video.xml' \
+        | sha256sum --check --strict -
 
 COPY fetch-xodus-deps.sh /usr/local/bin/fetch-xodus-deps
 RUN chmod 0755 /usr/local/bin/fetch-xodus-deps \

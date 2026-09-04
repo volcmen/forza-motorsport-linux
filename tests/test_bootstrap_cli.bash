@@ -34,8 +34,11 @@ set_up() {
     ACTION_LOG="$WORK_ROOT/argv"
     mkdir -p -- "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/bin"
     cp -- "$SETUP" "$FIXTURE_ROOT/setup"
+    # The generated script expands these variables when it runs.
+    # shellcheck disable=SC2016
     write_stub "$FIXTURE_ROOT/scripts/forza-bootstrap" \
         'printf "%s\0" "$@" >"$ACTION_LOG"'
+    # shellcheck disable=SC2016
     write_stub "$FIXTURE_ROOT/scripts/install-runtime-components" \
         'printf "legacy-runtime\0%s\0" "$@" >"$ACTION_LOG"'
     write_stub "$FIXTURE_ROOT/scripts/print-steam-options" 'exit 0'

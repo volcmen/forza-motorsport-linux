@@ -174,30 +174,32 @@ def fixture_build(output: Path) -> Path:
 
 
 def clean_build(output: Path, builder_image: str) -> Path:
-    with tempfile.TemporaryDirectory(prefix="forza-source-build-") as temporary:
-        root = Path(temporary)
-        source_cache = root / "sources"
-        source_cache.mkdir(mode=0o700)
-        dependencies = prepare_container_stage(root, "dependencies")
-        container_output = prepare_container_stage(root, "output")
-        inputs = BuildInputs(
-            fetch_source(XODUS, source_cache),
-            fetch_source(XGAMERUNTIME, source_cache),
-            dependencies,
-            container_output,
-            builder_image,
-            XODUS.revision,
-            XGAMERUNTIME.revision,
-            root,
-        )
-        run(dependency_fetch_argv(inputs))
-        offline = validate_offline_build_argv(
-            offline_build_argv(inputs, container_output), inputs, container_output
-        )
-        run(offline)
-        archive = publish_container_output(
-            require_declared_output(container_output), output
-        )
+    # Retain source-build evidence, including rootless subuid-owned Cargo
+    # checkouts, so cleanup cannot mask a compiler failure.
+    root = Path(tempfile.mkdtemp(prefix="forza-source-build-"))
+    print(f"Build workspace retained at {root}", file=sys.stderr)
+    source_cache = root / "sources"
+    source_cache.mkdir(mode=0o700)
+    dependencies = prepare_container_stage(root, "dependencies")
+    container_output = prepare_container_stage(root, "output")
+    inputs = BuildInputs(
+        fetch_source(XODUS, source_cache),
+        fetch_source(XGAMERUNTIME, source_cache),
+        dependencies,
+        container_output,
+        builder_image,
+        XODUS.revision,
+        XGAMERUNTIME.revision,
+        root,
+    )
+    run(dependency_fetch_argv(inputs))
+    offline = validate_offline_build_argv(
+        offline_build_argv(inputs, container_output), inputs, container_output
+    )
+    run(offline)
+    archive = publish_container_output(
+        require_declared_output(container_output), output
+    )
     return archive
 
 

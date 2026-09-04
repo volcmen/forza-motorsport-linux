@@ -15,4 +15,4 @@ mkdir /deps/vendor
 mkdir /deps/cargo-home
 cd /src/xodus
 CARGO_HOME=/deps/cargo-home \
-    cargo vendor --locked --versioned-dirs /deps/vendor > /deps/cargo-config.toml
+    cargo vendor --locked --versioned-dirs /deps/vendor >/deps/cargo-config.toml

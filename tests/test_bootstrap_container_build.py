@@ -46,6 +46,12 @@ BUNDLE_TOOL = ROOT / "tools/build-bootstrap-bundle"
 BUILDER_TOOL = ROOT / "tools/build-bootstrap-builder"
 
 
+def test_builder_declares_native_xodus_build_dependencies() -> None:
+    dockerfile = (ROOT / "containers/bootstrap-builder/Dockerfile").read_text()
+    packages = dockerfile.split("pacman -Syu", 1)[1].split("&&", 1)[0].split()
+    assert {"gtk4", "libadwaita", "protobuf", "sdl3", "webkit2gtk-4.1"} <= set(packages)
+
+
 def run(*argv: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         argv,
@@ -421,6 +427,7 @@ def test_offline_build_has_only_declared_mounts_and_no_network(tmp_path: Path) -
     assert "--cap-drop=ALL" in argv
     assert "no-new-privileges" in joined
     assert "--user=builder" in argv
+    assert "--tmpfs=/tmp:rw,exec,nosuid,nodev,mode=1777" in argv
     assert "SOURCE_DATE_EPOCH=1756684800" in joined
     assert "LC_ALL=C.UTF-8" in joined
     assert "TZ=UTC" in joined

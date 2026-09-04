@@ -16,6 +16,25 @@ The friendly entry point is [`./setup`](#guided-setup). The detailed evidence,
 manual transaction controls, and source provenance remain available for anyone
 who wants to audit exactly what it does.
 
+### Bootstrap development status
+
+The `feature/hybrid-bootstrap` branch adds `./setup bootstrap` for acquiring
+the reviewed components, preparing a dedicated Proton tool, and completing a
+recoverable installation. Its clean-start, repeated-run, and rollback tests
+pass with synthetic game inputs. The production bundle is still undergoing
+real source-build verification; this branch is not yet a released one-command
+installer. The existing guided setup below remains the documented release path.
+
+Bootstrap requires two manual steps: creating the game's prefix through Steam
+and supplying your own licensed Microsoft threading DLL. It prints the Steam
+launch options and never launches the game automatically. Use `./setup --help`
+to inspect the available commands. `./setup bootstrap --rollback` rolls back
+the composed bootstrap; `./setup rollback` retains its original runtime-only
+meaning.
+
+See the [bootstrap candidate guide](docs/bootstrap.md) for the manual
+checkpoints, acquisition choices, privacy boundary, and recovery commands.
+
 ## Status and tested matrix
 
 | State | Meaning |

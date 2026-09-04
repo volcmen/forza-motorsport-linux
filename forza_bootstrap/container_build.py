@@ -442,7 +442,7 @@ def _sandbox_prefix(network: str) -> tuple[str, ...]:
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
         "--user=builder",
-        "--tmpfs=/tmp:rw,nosuid,nodev,mode=1777",
+        "--tmpfs=/tmp:rw,exec,nosuid,nodev,mode=1777",
     )
 
 
