@@ -29,6 +29,20 @@ def test_cli_rejects_combined_check_and_rollback() -> None:
     assert failure.value.code == 2
 
 
+@pytest.mark.parametrize("error, status", [(EOFError(), 1), (KeyboardInterrupt(), 130)])
+def test_cli_interruption_reports_recovery_without_traceback(monkeypatch, capsys, error, status):
+    def interrupted(_arguments):
+        raise error
+
+    monkeypatch.setattr(cli_module, "_run_bootstrap", interrupted)
+    assert main(["bootstrap"]) == status
+    captured = capsys.readouterr()
+    assert "./setup bootstrap --check" in captured.err
+    assert "Keep the installation journals and backups" in captured.err
+    assert "Traceback" not in captured.err
+    assert not captured.out
+
+
 @pytest.mark.parametrize("command", ("bootstrap", "snapshot", "compare"))
 def test_cli_exposes_each_bootstrap_command(command: str) -> None:
     assert parse_args([command]).command == command

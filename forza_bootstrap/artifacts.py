@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Literal
 from urllib.parse import urlsplit
-from urllib.request import urlopen
+from urllib.request import HTTPRedirectHandler, build_opener
 
 from .model import (
     ArtifactSpec,
@@ -288,10 +288,9 @@ def _validated_download(spec: DownloadSpec) -> DownloadSpec:
     return spec
 
 
-def _validated_response_url(response: object, allowed_hosts: tuple[str, ...]) -> None:
+def _validated_redirect_url(url: str, allowed_hosts: tuple[str, ...]) -> None:
     try:
-        final_url = response.geturl()  # type: ignore[attr-defined]
-        parsed = urlsplit(final_url)
+        parsed = urlsplit(url)
         port = parsed.port
     except (AttributeError, TypeError, ValueError):
         raise BootstrapError(
@@ -305,6 +304,24 @@ def _validated_response_url(response: object, allowed_hosts: tuple[str, ...]) ->
         or port is not None
     ):
         raise BootstrapError("download redirect is outside the HTTPS allowlist")
+
+
+def _validated_response_url(response: object, allowed_hosts: tuple[str, ...]) -> None:
+    try:
+        url = response.geturl()  # type: ignore[attr-defined]
+    except AttributeError:
+        raise BootstrapError("download redirect is outside the HTTPS allowlist") from None
+    _validated_redirect_url(url, allowed_hosts)
+
+
+class _AllowedRedirectHandler(HTTPRedirectHandler):
+    def __init__(self, allowed_hosts: tuple[str, ...]) -> None:
+        self.allowed_hosts = allowed_hosts
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Check each hop before urllib sends it, not just the final response.
+        _validated_redirect_url(newurl, self.allowed_hosts)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _verify_download_stage(
@@ -444,7 +461,7 @@ def _remove_published_bound_file(
 def download_once(
     spec: DownloadSpec,
     cache_root: str | os.PathLike[str],
-    opener: Callable[[str], object] = urlopen,
+    opener: Callable[[str], object] | None = None,
 ) -> Path:
     """Make one bounded download attempt and publish it without replacement."""
     spec = _validated_download(spec)
@@ -484,7 +501,11 @@ def download_once(
         total = 0
         digest = hashlib.sha256()
         try:
-            response_context = opener(spec.url)
+            if opener is None:
+                client = build_opener(_AllowedRedirectHandler(spec.allowed_redirect_hosts))
+                response_context = client.open(spec.url, timeout=30)
+            else:
+                response_context = opener(spec.url)
             with response_context as response:  # type: ignore[attr-defined]
                 _validated_response_url(response, spec.allowed_redirect_hosts)
                 while block := response.read(_READ_SIZE):  # type: ignore[attr-defined]

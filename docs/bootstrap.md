@@ -15,6 +15,10 @@ prepares a dedicated `GE-Proton11-3-FM`, verifies the open-source component
 bundle, and coordinates the existing recoverable installers and exact-build
 controller/AP702 patches. It does not replace your other Proton tools.
 
+Forza must be installed in the primary native Steam library. Additional Steam
+libraries and Flatpak Steam aren't supported by this installer yet. You'll
+also need Python 3.11 or newer, `uv`, `zstd`, and a working user systemd session.
+
 The host must provide the native libraries used by Xodus: GTK4, libadwaita,
 SDL3, and WebKitGTK 4.1 (Arch packages `gtk4`, `libadwaita`, `sdl3`, and
 `webkit2gtk-4.1`, with their dependencies). The bundle is not a statically
@@ -88,6 +92,8 @@ composed installation, use `./setup bootstrap --rollback`; do not substitute
 coordinator restore the recorded stages in reverse order. Do not manually
 delete transaction journals or backups to clear an error. Interrupted work
 must be inspected and resumed using the same checkout and recorded inputs.
+If you cancel a command or its input closes, run `./setup bootstrap --check`
+before continuing. Cancellation doesn't automatically undo completed steps.
 
 ## Acceptance is a game test
 

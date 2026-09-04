@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Self
+from urllib.request import Request
 
 import pytest
 
@@ -474,6 +475,56 @@ def test_verify_cached_file_rejects_hostile_cache_objects(
 
     with pytest.raises(BootstrapError, match="cached artifact"):
         verify_cached_file(cached, 8, sha256_bytes(b"accepted"))
+
+
+@pytest.mark.parametrize("destination", [
+    "https://untrusted.example.invalid/file",
+    "http://downloads.example.invalid/file",
+    "https://user:password@downloads.example.invalid/file",
+    "https://downloads.example.invalid:443/file",
+    "https://127.0.0.1/file",
+])
+def test_redirect_rejected_before_following(destination: str) -> None:
+    handler = artifacts_module._AllowedRedirectHandler(("downloads.example.invalid",))
+    request = Request("https://downloads.example.invalid/start")
+    with pytest.raises(BootstrapError, match="redirect is outside"):
+        handler.redirect_request(request, None, 302, "Found", {}, destination)
+
+
+def test_redirect_handler_allows_https_release_host() -> None:
+    handler = artifacts_module._AllowedRedirectHandler(
+        ("downloads.example.invalid", "cdn.example.invalid")
+    )
+    request = Request("https://downloads.example.invalid/start")
+    redirected = handler.redirect_request(
+        request, None, 302, "Found", {}, "https://cdn.example.invalid/file"
+    )
+    assert redirected.full_url == "https://cdn.example.invalid/file"
+    # An allowed intermediate host must not permit an untrusted next hop.
+    with pytest.raises(BootstrapError, match="redirect is outside"):
+        handler.redirect_request(
+            redirected, None, 302, "Found", {}, "https://untrusted.example.invalid/file"
+        )
+
+
+def test_default_download_uses_redirect_policy_and_timeout(tmp_path, monkeypatch):
+    payload = b"downloaded"
+    calls = []
+
+    class Client:
+        def open(self, url, *, timeout):
+            calls.append((url, timeout))
+            return FakeResponse(payload)
+
+    def client_factory(handler):
+        assert isinstance(handler, artifacts_module._AllowedRedirectHandler)
+        assert handler.allowed_hosts == ("downloads.example.invalid",)
+        return Client()
+
+    monkeypatch.setattr(artifacts_module, "build_opener", client_factory)
+    result = download_once(download_spec(payload), tmp_path / "cache")
+    assert result.read_bytes() == payload
+    assert calls == [("https://downloads.example.invalid/artifact.bin", 30)]
 
 
 def test_download_once_streams_one_attempt_into_private_cache(tmp_path: Path) -> None:

@@ -247,4 +247,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except BootstrapError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+    except (EOFError, KeyboardInterrupt) as error:
+        print(
+            "\nStopped. Run './setup bootstrap --check' before resuming or rolling back. "
+            "Keep the installation journals and backups.",
+            file=sys.stderr,
+        )
+        return 130 if isinstance(error, KeyboardInterrupt) else 1
     return 0
