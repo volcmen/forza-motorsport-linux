@@ -1,7 +1,7 @@
 # Hybrid bootstrap candidate verification
 
 Status: **release candidate, not published**. These checks do not replace live
-Forza acceptance. No installed game, Steam configuration, credentials, or
+Forza acceptance. No installed game, Steam configuration, Microsoft/Xodus credentials, or
 licensed threading DLL was changed during this verification.
 
 ## Source and recipe
@@ -26,9 +26,8 @@ This proves compilation only, not their integration with a running game.
 
 ## Automated checks
 
-- Python suite: **878 passed, 1 skipped, 1 deselected**. The deliberately
-  deferred check requires the final production manifest; no placeholder hashes
-  were supplied to make it pass.
+- Python suite: **883 passed, 1 skipped**, with no deselected tests. The
+  production-manifest check now passes using real release artifact hashes.
 - Launcher, doctor, setup, bootstrap CLI, Steam-options, and installation Bash
   suites passed, as did systemd unit validation.
 - ShellCheck, shfmt, Ruff, REUSE license checks, and `git diff --check` passed.
@@ -58,9 +57,32 @@ three Xodus executables, and successfully ran `xodus-cli --help`, including
 the Invite, Join, and social-picker commands. No Microsoft login or game was
 started by this smoke test.
 
+## Registry-bound release candidate
+
+The final builder recipe was rebuilt without cache and its declared package
+and script manifest matched the first image. That exact image was uploaded to
+GHCR and verified against its registry manifest. The publisher now checks both
+classic Docker configuration IDs and containerd-backed OCI manifest IDs;
+unrelated and malformed identities remain rejected by regression tests.
+
+Two additional `--clean` builds used the GHCR digest reference, each with fresh
+source and dependency directories. They produced identical archives:
+
+```text
+size: 13107039 bytes
+sha256: 68d7fc9e70a665c575f34432a5136e22bc07c840a028a52ec83b06f889c2b9b1
+builder: ghcr.io/volcmen/forza-motorsport-builder@sha256:3a4274c5913404e366163e23437101f64e59ccbe1b00c74d9d57378f4ac82ae5
+```
+
+The finalizer generated `manifests/bootstrap-v1.toml` from these verified
+archives. The public bundle-verifier command accepted the result. The internal
+artifact manifest remains identical to the earlier local candidate: all five
+binary hashes are unchanged; the archive now records the registry-qualified
+builder identity in its provenance.
+
 ## Release gate
 
-The local repeated-build comparison passed. The release still requires a public immutable GHCR
-builder reference, a finalized bundle trust manifest, verification through the
+The repeated-build comparison and trust-manifest finalization passed. The
+release still requires public package visibility, verification through the
 public download path, and live acceptance of the rebuilt artifacts. Passing
 synthetic tests or compiling a DLL is not evidence that these gates passed.

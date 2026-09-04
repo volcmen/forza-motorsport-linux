@@ -1,8 +1,8 @@
 # Bootstrap installation (release candidate)
 
 The hybrid bootstrap is **not released yet**. The local bundle builds
-reproducibly; public artifacts, the final trust manifest, and live acceptance
-are still pending before these commands become an installation path for users. For the existing
+reproducibly and the trust manifest is finalized; public download verification
+and live acceptance are still pending. For the existing
 release, use [the guided/manual installation guide](install.md).
 The [candidate verification record](evidence/bootstrap-build.md) separates
 automated checks, real compilation, and the remaining release gates.
