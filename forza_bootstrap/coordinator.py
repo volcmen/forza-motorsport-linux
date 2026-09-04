@@ -1321,6 +1321,47 @@ def inspect_bootstrap(
         if not compare_snapshots(after, current, unchanged).ok:
             raise BootstrapError("current managed state differs from READY evidence")
 
+    if phase is BootstrapPhase.ROLLED_BACK:
+        before = read_snapshot(transaction / "before.json")
+        rollback_baseline = before
+        if finish_plan is not None:
+            assert finish_context is not None
+            rollback_baseline = _validate_finish_snapshot(
+                read_snapshot(transaction / "pre-finish.json"),
+                finish_context,
+                label="pre-Finish",
+            )
+            pre_finish_sha256 = hashlib.sha256(
+                canonical_json(_private_snapshot_value(rollback_baseline))
+            ).hexdigest()
+            if pre_finish_sha256 != finish_plan.document["pre_finish_sha256"]:
+                raise BootstrapError("recorded pre-Finish snapshot is inconsistent")
+        if state.compatibility_tool_disposition == "created":
+            rollback_baseline = replace(
+                rollback_baseline,
+                records=tuple(
+                    FileRecord(
+                        item.logical_path,
+                        "absent",
+                        None,
+                        None,
+                        None,
+                        item.private,
+                    )
+                    if item.logical_path.startswith("compat/")
+                    else item
+                    for item in rollback_baseline.records
+                ),
+            )
+        unchanged = tuple(
+            ChangeRule(item.logical_path, "unchanged", item.sha256, item.mode)
+            for item in rollback_baseline.records
+        )
+        if not compare_snapshots(rollback_baseline, current, unchanged).ok:
+            raise BootstrapError(
+                "current managed state differs from rollback evidence"
+            )
+
     status, next_action = {
         BootstrapPhase.NEW: ("prepare-interrupted", "./setup bootstrap"),
         BootstrapPhase.PREPARING: ("prepare-interrupted", "./setup bootstrap"),
@@ -2593,7 +2634,17 @@ def _validate_patch_inspection(value: PatchInspection) -> PatchInspection:
     ):
         raise BootstrapError("patch state is unknown or mixed")
     _validate_planned_targets(value.targets, "patch plan")
-    return value
+    by_logical = dict(
+        zip((target.logical_path for target in value.targets), value.states)
+    )
+    targets_by_logical = {target.logical_path: target for target in value.targets}
+    if set(targets_by_logical) != set(_PATCH_LOGICAL_PATHS):
+        raise BootstrapError("patch plan targets are invalid")
+    return PatchInspection(
+        tuple(by_logical[path] for path in _PATCH_LOGICAL_PATHS),
+        tuple(targets_by_logical[path] for path in _PATCH_LOGICAL_PATHS),
+        value.disposition,
+    )
 
 
 def _validated_command_versions(
@@ -3764,9 +3815,10 @@ def _finish_plan_for_recovery(state: BootstrapState) -> FinishPlan:
         rules_by_logical[logical_path].after_sha256
         for logical_path in _PATCH_LOGICAL_PATHS
     )
-    if any(not isinstance(value, str) for value in planned_patch_hashes) or sorted(
-        planned_patch_hashes
-    ) != sorted(patch_hashes):
+    if (
+        any(not isinstance(value, str) for value in planned_patch_hashes)
+        or planned_patch_hashes != tuple(patch_hashes)
+    ):
         raise BootstrapError("Finish recovery plan is invalid")
     threading_rule = rules_by_logical["prefix/threading"]
     if (

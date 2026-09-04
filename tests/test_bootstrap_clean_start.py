@@ -653,6 +653,36 @@ def run_clean_start(root: Path, mode: str) -> dict[str, object]:
     assert "PHASE=ROLLED_BACK" in terminal_check.getvalue()
     assert "STATUS=rolled-back" in terminal_check.getvalue()
     assert "NEXT=./setup bootstrap" in terminal_check.getvalue()
+
+    rolled_back_evidence = {
+        path.relative_to(transaction): file_identity(path)
+        for path in transaction.rglob("*")
+        if path.is_file()
+    }
+    corrupted = fixture.steam / PATCH_PATHS["prefix/controller"]
+    corrupted.write_bytes(b"drift after rollback\n")
+    corrupted.chmod(0o644)
+    with (
+        patch.object(cli_module, "_prepare_context", return_value=fixture.context),
+        patch(
+            "forza_bootstrap.coordinator.inspect_fm",
+            return_value=ToolInspection(ToolDisposition.ABSENT, None, None),
+        ),
+    ):
+        drift_check = io.StringIO()
+        drift_errors = io.StringIO()
+        with redirect_stdout(drift_check), redirect_stderr(drift_errors):
+            assert cli_module.main(["bootstrap", "--check"]) == 1
+    assert "PHASE=ROLLED_BACK" in drift_check.getvalue()
+    assert "STATUS=rolled-back" not in drift_check.getvalue()
+    assert "current managed state differs from rollback evidence" in (
+        drift_errors.getvalue()
+    )
+    assert {
+        path.relative_to(transaction): file_identity(path)
+        for path in transaction.rglob("*")
+        if path.is_file()
+    } == rolled_back_evidence
     return {
         "records": tuple(
             (item.logical_path, item.state, item.mode, item.size, item.sha256)

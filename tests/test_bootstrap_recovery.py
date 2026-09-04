@@ -1040,6 +1040,34 @@ def test_resume_rejects_noncanonical_patch_coverage_before_any_owner(
     assert owner_calls == []
 
 
+def test_resume_rejects_patch_hashes_permuted_between_targets_before_any_owner(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    durable = _crashed_finish_for_plan_validation(fixture)
+    transaction = fixture.state_root / durable.transaction_id
+    document = json.loads((transaction / "plan.json").read_text())
+    distinct_hashes = [
+        hashlib.sha256(path.encode("ascii")).hexdigest()
+        for path in PATCH_LOGICAL_PATHS
+    ]
+    rules = {item["logical_path"]: item for item in document["snapshot_rules"]}
+    for logical_path, digest in zip(
+        PATCH_LOGICAL_PATHS, distinct_hashes, strict=True
+    ):
+        rules[logical_path]["after_sha256"] = digest
+    document["patch_after_sha256"] = distinct_hashes.copy()
+    document["patch_after_sha256"][0], document["patch_after_sha256"][2] = (
+        document["patch_after_sha256"][2],
+        document["patch_after_sha256"][0],
+    )
+    durable = _republish_validly_digested_finish_plan(fixture, durable, document)
+
+    owner_calls = _resume_rejecting_any_finish_owner(fixture, durable)
+
+    assert owner_calls == []
+
+
 @pytest.mark.parametrize(
     "mutation",
     ("missing", "duplicate", "extra", "threading-hash", "threading-mode"),
