@@ -424,6 +424,37 @@ def test_stage_mode_is_rechecked_at_the_immediate_pre_rename_boundary(
     assert not list(destination.parent.glob(f".{destination.name}.*.recovery"))
 
 
+def test_post_rename_record_binds_mode_and_hash_to_one_descriptor_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, destination = licensed_fixture(tmp_path, before=None)
+    action = plan_threading_copy(source, destination)
+    real_hash_fd = licensed_module._hash_fd
+    hash_calls = 0
+
+    def chmod_between_record_metadata_and_hash(
+        fd: int, *, capped: bool = False
+    ) -> object:
+        nonlocal hash_calls
+        hash_calls += 1
+        if hash_calls == 3:
+            os.fchmod(fd, 0o777)
+        return real_hash_fd(fd, capped=capped)
+
+    monkeypatch.setattr(
+        licensed_module, "_hash_fd", chmod_between_record_metadata_and_hash
+    )
+
+    with pytest.raises(BootstrapError, match="recovery"):
+        install_threading_copy(action, tmp_path / "journal")
+
+    assert not destination.exists()
+    recoveries = list(destination.parent.glob(f".{destination.name}.*.recovery"))
+    assert len(recoveries) == 1
+    assert recoveries[0].read_bytes() == source.read_bytes()
+    assert stat.S_IMODE(recoveries[0].stat().st_mode) == 0o777
+
+
 @pytest.mark.parametrize(
     ("rename_kind", "timing"),
     (

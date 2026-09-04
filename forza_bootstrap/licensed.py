@@ -273,12 +273,15 @@ def _absent_record(logical: str) -> FileRecord:
 
 
 def _record_fd(fd: int, logical: str) -> FileRecord:
-    info = os.fstat(fd)
+    before = os.fstat(fd)
     identity = _hash_fd(fd)
+    after = os.fstat(fd)
+    if _file_identity(before) != _file_identity(after):
+        raise BootstrapError("licensed file changed while recording")
     return FileRecord(
         logical,
         "regular",
-        stat.S_IMODE(info.st_mode),
+        stat.S_IMODE(after.st_mode),
         identity.size,
         identity.sha256,
         True,
@@ -751,23 +754,34 @@ def _publish_stage(parent_fd: int, journal_fd: int, journal: _Journal) -> _Journ
                 "licensed destination changed before publication"
             ) from None
         os.fsync(parent_fd)
-        destination, destination_fd = _open_record(
-            parent_fd, destination_name, journal.destination_logical
-        )
+        destination_fd: int | None = None
+        verification_error: BaseException | None = None
         try:
-            if (
-                destination_fd is None
-                or not _matches_staged_source(destination, journal)
-                or _file_identity(os.fstat(destination_fd))
-                != _file_identity(os.fstat(stage_fd))
-            ):
-                _quarantine_destination(parent_fd, journal_fd, journal)
-                raise BootstrapError(
-                    "licensed publication changed; recovery evidence preserved"
+            try:
+                destination, destination_fd = _open_record(
+                    parent_fd, destination_name, journal.destination_logical
                 )
+            except (BootstrapError, OSError) as error:
+                verification_error = error
+            else:
+                if (
+                    destination_fd is None
+                    or not _matches_staged_source(destination, journal)
+                    or stat.S_IMODE(os.fstat(stage_fd).st_mode) != _SOURCE_MODE
+                    or _file_identity(os.fstat(destination_fd))
+                    != _file_identity(os.fstat(stage_fd))
+                ):
+                    verification_error = BootstrapError(
+                        "licensed publication verification failed"
+                    )
         finally:
             if destination_fd is not None:
                 os.close(destination_fd)
+        if verification_error is not None:
+            _quarantine_destination(parent_fd, journal_fd, journal)
+            raise BootstrapError(
+                "licensed publication changed; recovery evidence preserved"
+            ) from verification_error
     finally:
         os.close(stage_fd)
     installed = _replace_status(journal, "installed")
