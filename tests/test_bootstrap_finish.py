@@ -29,6 +29,7 @@ from forza_bootstrap.coordinator import (
     build_finish_plan,
     default_finish_operations,
     finish,
+    finish_context_for_recovery,
     finish_context_from_prepare,
     validate_prefix,
 )
@@ -788,6 +789,16 @@ def test_finish_context_binds_prepare_record_to_original_plan(tmp_path: Path) ->
         prepare_context, fixture.state, fixture.licensed_source
     )
     assert result.bundle_root == fixture.bundle
+
+    interrupted = replace(
+        fixture.state,
+        phase=BootstrapPhase.INSTALLING_FINISH,
+    )
+    recovered = finish_context_for_recovery(
+        prepare_context, interrupted, fixture.licensed_source
+    )
+    assert recovered.bundle_root == fixture.bundle
+    assert recovered.state is interrupted
 
     prepare_plan["phase"] = "changed"
     (transaction / "plan.json").write_text(json.dumps(prepare_plan), encoding="ascii")

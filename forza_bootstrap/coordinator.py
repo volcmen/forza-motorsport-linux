@@ -2663,10 +2663,40 @@ def finish_context_from_prepare(
     threading_dll: Path | None,
 ) -> FinishContext:
     """Reconstruct only the private, digest-bound inputs recorded by Prepare."""
-    _validate_context(context)
     if (
         not isinstance(state, BootstrapState)
         or state.phase is not BootstrapPhase.AWAITING_STEAM_PREFIX
+    ):
+        raise BootstrapError("Finish requires the recorded Prepare checkpoint")
+    return _finish_context_from_prepare_checkpoint(context, state, threading_dll)
+
+
+def finish_context_for_recovery(
+    context: PrepareContext,
+    state: BootstrapState,
+    threading_dll: Path | None,
+) -> FinishContext:
+    """Reconstruct the recorded Finish inputs for coordinator recovery only."""
+    allowed = {
+        BootstrapPhase.PLANNED_FINISH,
+        BootstrapPhase.INSTALLING_FINISH,
+        BootstrapPhase.READY_TO_ATTEMPT,
+        BootstrapPhase.RECOVERY_REQUIRED,
+        BootstrapPhase.ROLLING_BACK,
+    }
+    if not isinstance(state, BootstrapState) or state.phase not in allowed:
+        raise BootstrapError("Finish recovery requires a durable Finish checkpoint")
+    return _finish_context_from_prepare_checkpoint(context, state, threading_dll)
+
+
+def _finish_context_from_prepare_checkpoint(
+    context: PrepareContext,
+    state: BootstrapState,
+    threading_dll: Path | None,
+) -> FinishContext:
+    _validate_context(context)
+    if (
+        not isinstance(state, BootstrapState)
         or state._state_root != context.host.state_root
         or state.manifest_sha256 != context.manifest.sha256
     ):

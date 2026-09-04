@@ -3,6 +3,7 @@ test:
     bash tests/test_launcher.bash
     bash tests/test_doctor.bash
     bash tests/test_setup.bash
+    bash tests/test_bootstrap_cli.bash
     bash tests/test_steam_options.bash
     bash tests/test_installation.bash
     systemd-analyze --user verify config/xodus-forza.service

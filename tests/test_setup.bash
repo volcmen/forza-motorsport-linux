@@ -366,8 +366,9 @@ test_help_is_successful_and_explains_mutating_and_read_only_modes() {
     }
     assert_contains "$output" './setup                 Guided installation' || return 1
     assert_contains "$output" './setup check           Read-only readiness check' || return 1
-    assert_contains "$output" './setup rollback        Explicit transaction rollback' || return 1
-    assert_contains "$output" 'does not download binaries, edit Steam, patch Wine, or launch the game' || return 1
+    assert_contains "$output" './setup bootstrap --rollback   Roll back the composed bootstrap transaction' || return 1
+    assert_contains "$output" './setup rollback        Roll back only the legacy runtime transaction' || return 1
+    assert_contains "$output" 'does not edit Steam or launch the game' || return 1
     assert_eq "$(<"$ACTION_LOG")" '' || return 1
     tear_down
 }

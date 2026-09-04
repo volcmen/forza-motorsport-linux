@@ -113,3 +113,171 @@ def test_cli_resumes_awaiting_prefix_through_finish_with_full_confirmation(
         ["bootstrap", "--threading-dll", "/licensed/runtime.dll"]
     ) == 0
     assert calls == ["finish"]
+
+
+def test_cli_routes_interrupted_prepare_through_state_derived_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_context = SimpleNamespace(host=SimpleNamespace(state_root=Path("/state")))
+    state = SimpleNamespace(phase=BootstrapPhase.PREPARING)
+    calls: list[str] = []
+    monkeypatch.setattr(cli_module, "_prepare_context", lambda _arguments: prepare_context)
+    monkeypatch.setattr(
+        cli_module, "load_unfinished_transaction", lambda _state_root: state
+    )
+
+    def fake_resume(context: object) -> object:
+        assert context.state is state  # type: ignore[attr-defined]
+        assert context.state_root == Path("/state")  # type: ignore[attr-defined]
+        assert context.prepare_context is prepare_context  # type: ignore[attr-defined]
+        assert context.finish_context is None  # type: ignore[attr-defined]
+        calls.append("resume-prepare")
+        return state
+
+    monkeypatch.setattr(cli_module, "resume", fake_resume)
+    monkeypatch.setattr(
+        cli_module,
+        "prepare",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must resume Prepare")),
+    )
+
+    assert main(["bootstrap"]) == 0
+    assert calls == ["resume-prepare"]
+
+
+def test_cli_routes_interrupted_finish_through_state_derived_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_context = SimpleNamespace(host=SimpleNamespace(state_root=Path("/state")))
+    state = SimpleNamespace(phase=BootstrapPhase.INSTALLING_FINISH)
+    finish_context = object()
+    calls: list[str] = []
+    monkeypatch.setattr(cli_module, "_prepare_context", lambda _arguments: prepare_context)
+    monkeypatch.setattr(
+        cli_module, "load_unfinished_transaction", lambda _state_root: state
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_finish_context_for_recovery",
+        lambda actual, arguments, durable: (
+            finish_context
+            if (
+                actual is prepare_context
+                and arguments.threading_dll == "/licensed/runtime.dll"
+                and durable is state
+            )
+            else None
+        ),
+    )
+
+    def fake_resume(context: object) -> object:
+        assert context.state is state  # type: ignore[attr-defined]
+        assert context.prepare_context is prepare_context  # type: ignore[attr-defined]
+        assert context.finish_context is finish_context  # type: ignore[attr-defined]
+        calls.append("resume-finish")
+        return state
+
+    monkeypatch.setattr(cli_module, "resume", fake_resume)
+    monkeypatch.setattr(
+        cli_module,
+        "finish",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must recover Finish")),
+    )
+
+    assert main(
+        ["bootstrap", "--threading-dll", "/licensed/runtime.dll"]
+    ) == 0
+    assert calls == ["resume-finish"]
+
+
+def test_cli_ready_rerun_is_noop_without_requiring_licensed_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_context = SimpleNamespace(host=SimpleNamespace(state_root=Path("/state")))
+    state = SimpleNamespace(
+        phase=BootstrapPhase.READY_TO_ATTEMPT,
+        finish_plan_sha256="c" * 64,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(cli_module, "_prepare_context", lambda _arguments: prepare_context)
+    monkeypatch.setattr(
+        cli_module, "load_unfinished_transaction", lambda _state_root: state
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_finish_context_for_recovery",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("READY no-op must not reconstruct licensed input")
+        ),
+    )
+
+    def fake_resume(context: object) -> object:
+        assert context.state is state  # type: ignore[attr-defined]
+        assert context.finish_context is None  # type: ignore[attr-defined]
+        calls.append("ready-noop")
+        return state
+
+    monkeypatch.setattr(cli_module, "resume", fake_resume)
+
+    assert main(["bootstrap"]) == 0
+    assert calls == ["ready-noop"]
+
+
+def test_cli_routes_composed_rollback_with_exact_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_context = SimpleNamespace(host=SimpleNamespace(state_root=Path("/state")))
+    state = SimpleNamespace(phase=BootstrapPhase.AWAITING_STEAM_PREFIX)
+    calls: list[str] = []
+    monkeypatch.setattr(cli_module, "_prepare_context", lambda _arguments: prepare_context)
+    monkeypatch.setattr(
+        cli_module, "load_unfinished_transaction", lambda _state_root: state
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "ROLLBACK")
+
+    def fake_rollback(context: object, confirmation: str) -> object:
+        assert context.state is state  # type: ignore[attr-defined]
+        assert context.prepare_context is prepare_context  # type: ignore[attr-defined]
+        assert context.finish_context is None  # type: ignore[attr-defined]
+        assert confirmation == "ROLLBACK"
+        calls.append("rollback")
+        return state
+
+    monkeypatch.setattr(cli_module, "rollback", fake_rollback)
+
+    assert main(["bootstrap", "--rollback"]) == 0
+    assert calls == ["rollback"]
+
+
+def test_cli_ready_rollback_reconstructs_finish_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_context = SimpleNamespace(host=SimpleNamespace(state_root=Path("/state")))
+    state = SimpleNamespace(
+        phase=BootstrapPhase.READY_TO_ATTEMPT,
+        finish_plan_sha256="d" * 64,
+    )
+    finish_context = object()
+    monkeypatch.setattr(cli_module, "_prepare_context", lambda _arguments: prepare_context)
+    monkeypatch.setattr(
+        cli_module, "load_unfinished_transaction", lambda _state_root: state
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "ROLLBACK")
+    monkeypatch.setattr(
+        cli_module,
+        "_finish_context_for_recovery",
+        lambda actual, _arguments, durable: (
+            finish_context
+            if actual is prepare_context and durable is state
+            else None
+        ),
+    )
+
+    def fake_rollback(context: object, confirmation: str) -> object:
+        assert context.finish_context is finish_context  # type: ignore[attr-defined]
+        assert confirmation == "ROLLBACK"
+        return state
+
+    monkeypatch.setattr(cli_module, "rollback", fake_rollback)
+
+    assert main(["bootstrap", "--rollback"]) == 0

@@ -12,12 +12,16 @@ from pathlib import Path
 from .coordinator import (
     FinishContext,
     PrepareContext,
+    RecoveryContext,
     build_prepare_plan,
     finish,
+    finish_context_for_recovery,
     finish_context_from_prepare,
     inspect_prepare,
     prepare,
     resolve_supported_host,
+    resume,
+    rollback,
 )
 from .manifest import load_bootstrap_manifest
 from .model import BootstrapError, canonical_json, plan_digest
@@ -99,19 +103,61 @@ def _finish_context(
     arguments: argparse.Namespace,
     state: BootstrapState,
 ) -> FinishContext:
-    threading = (
-        Path(arguments.threading_dll)
-        if arguments.threading_dll is not None
-        else None
-    )
+    threading = Path(arguments.threading_dll) if arguments.threading_dll is not None else None
     return finish_context_from_prepare(context, state, threading)
 
 
+def _finish_context_for_recovery(
+    context: PrepareContext,
+    arguments: argparse.Namespace,
+    state: BootstrapState,
+) -> FinishContext:
+    threading = Path(arguments.threading_dll) if arguments.threading_dll is not None else None
+    return finish_context_for_recovery(context, state, threading)
+
+
+def _recovery_context(
+    context: PrepareContext,
+    arguments: argparse.Namespace,
+    state: BootstrapState,
+) -> RecoveryContext:
+    finish_context = None
+    finish_phases = {
+        BootstrapPhase.PLANNED_FINISH,
+        BootstrapPhase.INSTALLING_FINISH,
+    }
+    if (
+        state.phase in finish_phases
+        or (
+            arguments.rollback
+            and getattr(state, "finish_plan_sha256", None) is not None
+        )
+    ):
+        finish_context = _finish_context_for_recovery(context, arguments, state)
+    return RecoveryContext(
+        state=state,
+        state_root=context.host.state_root,
+        output=sys.stdout,
+        prepare_context=context,
+        finish_context=finish_context,
+    )
+
+
+def _confirm_rollback() -> str:
+    return input("Type ROLLBACK to roll back the composed bootstrap transaction: ")
+
+
 def _run_bootstrap(arguments: argparse.Namespace) -> None:
-    if arguments.rollback:
-        raise BootstrapError("bootstrap rollback is unavailable in this build")
     context = _prepare_context(arguments)
     state = load_unfinished_transaction(context.host.state_root)
+    if arguments.rollback:
+        if state is None:
+            raise BootstrapError("no unfinished bootstrap transaction exists")
+        confirmation = _confirm_rollback()
+        rollback(_recovery_context(context, arguments, state), confirmation)
+        if confirmation != "ROLLBACK":
+            print("No changes made.")
+        return
     if arguments.check:
         if state is not None:
             raise BootstrapError(
@@ -123,11 +169,18 @@ def _run_bootstrap(arguments: argparse.Namespace) -> None:
         print(f"PLAN_SHA256={plan_digest(plan)}")
         return
     if state is not None:
-        if state.phase is not BootstrapPhase.AWAITING_STEAM_PREFIX:
+        if state.phase is BootstrapPhase.AWAITING_STEAM_PREFIX:
+            finish(_finish_context(context, arguments, state), _confirm_finish)
+            return
+        if state.phase in {
+            BootstrapPhase.RECOVERY_REQUIRED,
+            BootstrapPhase.ROLLING_BACK,
+        }:
             raise BootstrapError(
-                f"bootstrap transaction requires recovery from {state.phase.value}"
+                "bootstrap transaction requires './setup bootstrap --rollback' "
+                f"from {state.phase.value}"
             )
-        finish(_finish_context(context, arguments, state), _confirm_finish)
+        resume(_recovery_context(context, arguments, state))
         return
     prepare(context, _confirm_prepare)
 
