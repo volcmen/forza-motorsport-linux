@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import stat
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -222,6 +223,20 @@ def test_exact_existing_destination_is_a_noop(tmp_path: Path) -> None:
     assert not list(destination.parent.glob(f".{destination.name}.*"))
 
 
+def test_exact_existing_destination_keeps_its_nonstandard_mode(tmp_path: Path) -> None:
+    source, destination = licensed_fixture(tmp_path, before=None)
+    destination.write_bytes(source.read_bytes())
+    destination.chmod(0o777)
+    inode = destination.stat().st_ino
+    journal = tmp_path / "journal"
+
+    install_threading_copy(plan_threading_copy(source, destination), journal)
+    rollback_threading_copy(journal)
+
+    assert destination.stat().st_ino == inode
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o777
+
+
 def test_rollback_never_moves_a_changed_exact_existing_noop(tmp_path: Path) -> None:
     source, destination = licensed_fixture(tmp_path, before=None)
     destination.write_bytes(source.read_bytes())
@@ -317,6 +332,96 @@ def test_install_resumes_after_interruption_at_every_rename(
     assert not list(destination.parent.glob(f".{destination.name}.*.licensed-stage"))
     rollback_threading_copy(tmp_path / "journal")
     assert destination.read_bytes() == b"previous"
+
+
+def test_resume_refuses_a_chmodded_complete_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, destination = licensed_fixture(tmp_path, before=None)
+    action = plan_threading_copy(source, destination)
+    journal = tmp_path / "journal"
+    real_rename = licensed_module.rename_noreplace
+
+    def interrupt_before_publish(
+        source_fd: int,
+        source_name: str,
+        destination_fd: int,
+        destination_name: str,
+    ) -> None:
+        if (
+            source_name.endswith(".licensed-stage")
+            and destination_name == destination.name
+        ):
+            raise KeyboardInterrupt
+        real_rename(source_fd, source_name, destination_fd, destination_name)
+
+    monkeypatch.setattr(licensed_module, "rename_noreplace", interrupt_before_publish)
+    with pytest.raises(KeyboardInterrupt):
+        install_threading_copy(action, journal)
+    stage = next(destination.parent.glob(f".{destination.name}.*.licensed-stage"))
+    stage.chmod(0o777)
+    monkeypatch.setattr(licensed_module, "rename_noreplace", real_rename)
+
+    with pytest.raises(BootstrapError, match="stage"):
+        install_threading_copy(action, journal)
+
+    assert not destination.exists()
+    assert stat.S_IMODE(stage.stat().st_mode) == 0o777
+
+
+def test_post_publication_mode_change_is_quarantined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, destination = licensed_fixture(tmp_path, before=None)
+    action = plan_threading_copy(source, destination)
+    real_rename = licensed_module.rename_noreplace
+
+    def chmod_after_publish(
+        source_fd: int,
+        source_name: str,
+        destination_fd: int,
+        destination_name: str,
+    ) -> None:
+        real_rename(source_fd, source_name, destination_fd, destination_name)
+        if (
+            source_name.endswith(".licensed-stage")
+            and destination_name == destination.name
+        ):
+            os.chmod(destination, 0o777)
+
+    monkeypatch.setattr(licensed_module, "rename_noreplace", chmod_after_publish)
+
+    with pytest.raises(BootstrapError, match="recovery"):
+        install_threading_copy(action, tmp_path / "journal")
+
+    assert not destination.exists()
+    recoveries = list(destination.parent.glob(f".{destination.name}.*.recovery"))
+    assert len(recoveries) == 1
+    assert stat.S_IMODE(recoveries[0].stat().st_mode) == 0o777
+
+
+def test_stage_mode_is_rechecked_at_the_immediate_pre_rename_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, destination = licensed_fixture(tmp_path, before=None)
+    action = plan_threading_copy(source, destination)
+    real_same_named = licensed_module._same_named_file
+
+    def chmod_after_name_binding(parent_fd: int, name: str, held_fd: int) -> bool:
+        result = real_same_named(parent_fd, name, held_fd)
+        if name.endswith(".licensed-stage") and result:
+            os.chmod(destination.parent / name, 0o777)
+        return result
+
+    monkeypatch.setattr(licensed_module, "_same_named_file", chmod_after_name_binding)
+
+    with pytest.raises(BootstrapError, match="stage"):
+        install_threading_copy(action, tmp_path / "journal")
+
+    stage = next(destination.parent.glob(f".{destination.name}.*.licensed-stage"))
+    assert stat.S_IMODE(stage.stat().st_mode) == 0o777
+    assert not destination.exists()
+    assert not list(destination.parent.glob(f".{destination.name}.*.recovery"))
 
 
 @pytest.mark.parametrize(
@@ -570,6 +675,95 @@ def test_private_journal_rejects_nonexact_scalar_types(
         rollback_threading_copy(journal)
 
 
+def test_private_journal_rejects_disposition_incoherent_with_before(
+    tmp_path: Path,
+) -> None:
+    source, destination = licensed_fixture(tmp_path, before=b"previous")
+    journal = tmp_path / "journal"
+    install_threading_copy(plan_threading_copy(source, destination), journal)
+    state_path = journal / "licensed.json"
+    value = json.loads(state_path.read_text(encoding="ascii"))
+    value["disposition"] = "install"
+    state_path.write_text(json.dumps(value), encoding="ascii")
+    state_path.chmod(0o600)
+
+    with pytest.raises(BootstrapError, match="journal"):
+        rollback_threading_copy(journal)
+
+    assert destination.read_bytes() == source.read_bytes()
+    assert any(
+        path.read_bytes() == b"previous"
+        for path in destination.parent.glob(f".{destination.name}.*.licensed-backup")
+    )
+
+
+def test_private_journal_rejects_unbound_same_content_backup_name(
+    tmp_path: Path,
+) -> None:
+    source, destination = licensed_fixture(tmp_path, before=b"previous")
+    journal = tmp_path / "journal"
+    install_threading_copy(plan_threading_copy(source, destination), journal)
+    unrelated = (
+        destination.parent / ".unrelated.0123456789abcdef01234567.licensed-backup"
+    )
+    unrelated.write_bytes(b"previous")
+    unrelated.chmod(0o640)
+    state_path = journal / "licensed.json"
+    value = json.loads(state_path.read_text(encoding="ascii"))
+    value["backup_name"] = unrelated.name
+    state_path.write_text(json.dumps(value), encoding="ascii")
+    state_path.chmod(0o600)
+
+    with pytest.raises(BootstrapError, match="journal"):
+        rollback_threading_copy(journal)
+
+    assert destination.read_bytes() == source.read_bytes()
+    assert unrelated.read_bytes() == b"previous"
+
+
+def test_fresh_action_is_validated_before_journal_or_destination_mutation(
+    tmp_path: Path,
+) -> None:
+    source, destination = licensed_fixture(tmp_path, before=None)
+    action = plan_threading_copy(source, destination)
+    other_destination = tmp_path / "other-prefix" / destination.name
+    other_destination.parent.mkdir()
+    mismatched = replace(action, _destination=other_destination)
+    journal = tmp_path / "journal"
+
+    with pytest.raises(BootstrapError, match="action"):
+        install_threading_copy(mismatched, journal)
+
+    assert not journal.exists()
+    assert not destination.exists()
+    assert not other_destination.exists()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda action: replace(action, source_size=True),
+        lambda action: replace(action, source_sha256="A" * 64),
+        lambda action: replace(action, disposition=[]),
+        lambda action: replace(action, disposition="replace"),
+        lambda action: replace(action, before=replace(action.before, private=False)),
+        lambda action: replace(action, _source=Path("relative.dll")),
+    ),
+)
+def test_fresh_action_rejects_nonexact_or_incoherent_fields_before_writes(
+    tmp_path: Path, mutate: object
+) -> None:
+    source, destination = licensed_fixture(tmp_path, before=None)
+    action = mutate(plan_threading_copy(source, destination))  # type: ignore[operator]
+    journal = tmp_path / "journal"
+
+    with pytest.raises(BootstrapError, match="action"):
+        install_threading_copy(action, journal)
+
+    assert not journal.exists()
+    assert not destination.exists()
+
+
 def test_source_change_after_planning_fails_without_touching_destination(
     tmp_path: Path,
 ) -> None:
@@ -581,6 +775,38 @@ def test_source_change_after_planning_fails_without_touching_destination(
         install_threading_copy(action, tmp_path / "journal")
 
     assert destination.read_bytes() == b"previous"
+
+
+def test_partial_stage_is_preserved_and_resume_creates_a_fresh_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, destination = licensed_fixture(tmp_path, before=None)
+    action = plan_threading_copy(source, destination)
+    journal = tmp_path / "journal"
+    real_write_all = licensed_module.write_all
+    interrupted = False
+
+    def interrupt_partial_write(fd: int, data: bytes) -> None:
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            os.write(fd, data[:16])
+            raise KeyboardInterrupt
+        real_write_all(fd, data)
+
+    monkeypatch.setattr(licensed_module, "write_all", interrupt_partial_write)
+    with pytest.raises(KeyboardInterrupt):
+        install_threading_copy(action, journal)
+    monkeypatch.setattr(licensed_module, "write_all", real_write_all)
+
+    install_threading_copy(action, journal)
+
+    assert destination.read_bytes() == source.read_bytes()
+    partial_recoveries = list(
+        destination.parent.glob(f".{destination.name}.*.partial.recovery")
+    )
+    assert len(partial_recoveries) == 1
+    assert partial_recoveries[0].read_bytes() == source.read_bytes()[:16]
 
 
 def test_source_metadata_change_during_stage_copy_fails_closed(

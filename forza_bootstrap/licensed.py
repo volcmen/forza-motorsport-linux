@@ -8,6 +8,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import re
 import secrets
 import stat
 from dataclasses import dataclass, field
@@ -418,16 +419,49 @@ def _journal_from_value(value: object) -> _Journal:
     before = _record_from_value(value["before"])
     if before.logical_path != destination or not before.private:
         raise BootstrapError("licensed journal is invalid")
+    before_matches_source = (
+        before.state == "regular"
+        and before.size == source_size
+        and before.sha256 == source_sha256
+    )
+    if not (
+        (disposition == "install" and before.state == "absent")
+        or (disposition == "keep" and before_matches_source)
+        or (
+            disposition == "replace"
+            and before.state == "regular"
+            and not before_matches_source
+        )
+    ):
+        raise BootstrapError("licensed journal is invalid")
+    destination_name = Path(destination).name
+    stage_name = _safe_sibling_name(value["stage_name"], ".licensed-stage")
+    match = re.fullmatch(
+        rf"\.{re.escape(destination_name)}\.([0-9a-f]{{24}})\.licensed-stage",
+        stage_name,
+    )
+    if match is None:
+        raise BootstrapError("licensed journal is invalid")
+    stem = f".{destination_name}.{match.group(1)}"
+    backup_name = _safe_sibling_name(value["backup_name"], ".licensed-backup")
+    rollback_name = _safe_sibling_name(value["rollback_name"], ".rollback-held")
+    recovery_name = _safe_sibling_name(value["recovery_name"], ".recovery")
+    if (
+        backup_name != f"{stem}.licensed-backup"
+        or rollback_name != f"{stem}.rollback-held"
+        or recovery_name != f"{stem}.recovery"
+    ):
+        raise BootstrapError("licensed journal is invalid")
     return _Journal(
         destination,
         source_size,
         source_sha256,
         before,
         disposition,  # type: ignore[arg-type]
-        _safe_sibling_name(value["stage_name"], ".licensed-stage"),
-        _safe_sibling_name(value["backup_name"], ".licensed-backup"),
-        _safe_sibling_name(value["rollback_name"], ".rollback-held"),
-        _safe_sibling_name(value["recovery_name"], ".recovery"),
+        stage_name,
+        backup_name,
+        rollback_name,
+        recovery_name,
         status,  # type: ignore[arg-type]
     )
 
@@ -476,6 +510,10 @@ def _matches_source(record: FileRecord, journal: _Journal) -> bool:
     )
 
 
+def _matches_staged_source(record: FileRecord, journal: _Journal) -> bool:
+    return _matches_source(record, journal) and record.mode == _SOURCE_MODE
+
+
 def _same_named_file(parent_fd: int, name: str, held_fd: int) -> bool:
     try:
         named_fd = _open_regular(parent_fd, name, "licensed transaction file")
@@ -487,24 +525,64 @@ def _same_named_file(parent_fd: int, name: str, held_fd: int) -> bool:
         os.close(named_fd)
 
 
+def _preserve_partial_stage(parent_fd: int, journal: _Journal) -> None:
+    held_fd = _open_regular(parent_fd, journal.stage_name, "licensed partial stage")
+    try:
+        if not _same_named_file(parent_fd, journal.stage_name, held_fd):
+            raise BootstrapError("licensed partial stage changed before recovery")
+        destination_name = Path(journal.destination_logical).name
+        for _ in range(100):
+            recovery_name = (
+                f".{destination_name}.{secrets.token_hex(12)}.partial.recovery"
+            )
+            try:
+                rename_noreplace(
+                    parent_fd,
+                    journal.stage_name,
+                    parent_fd,
+                    recovery_name,
+                )
+            except FileExistsError:
+                continue
+            os.fsync(parent_fd)
+            recovered_fd = _open_regular(
+                parent_fd, recovery_name, "licensed partial recovery"
+            )
+            try:
+                if _file_identity(os.fstat(recovered_fd)) != _file_identity(
+                    os.fstat(held_fd)
+                ):
+                    raise BootstrapError("licensed partial recovery evidence changed")
+            finally:
+                os.close(recovered_fd)
+            return
+        raise BootstrapError("licensed partial recovery name conflicts")
+    finally:
+        os.close(held_fd)
+
+
 def _copy_stage(source_fd: int, parent_fd: int, journal: _Journal) -> None:
     source_generation = _file_identity(os.fstat(source_fd))
-    try:
-        stage_fd = os.open(
-            journal.stage_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            _SOURCE_MODE,
-            dir_fd=parent_fd,
-        )
-    except FileExistsError:
-        record, existing_fd = _open_record(
-            parent_fd, journal.stage_name, journal.destination_logical
-        )
-        if existing_fd is not None:
-            os.close(existing_fd)
-        if not _matches_source(record, journal):
-            raise BootstrapError("licensed stage conflicts") from None
-        return
+    while True:
+        try:
+            stage_fd = os.open(
+                journal.stage_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                _SOURCE_MODE,
+                dir_fd=parent_fd,
+            )
+            break
+        except FileExistsError:
+            record, existing_fd = _open_record(
+                parent_fd, journal.stage_name, journal.destination_logical
+            )
+            if existing_fd is not None:
+                os.close(existing_fd)
+            if _matches_staged_source(record, journal):
+                return
+            if _matches_source(record, journal):
+                raise BootstrapError("licensed stage conflicts") from None
+            _preserve_partial_stage(parent_fd, journal)
     try:
         os.fchmod(stage_fd, _SOURCE_MODE)
         digest = hashlib.sha256()
@@ -590,17 +668,81 @@ def _load_or_create_journal(action: LicensedAction, journal_fd: int) -> _Journal
     return journal
 
 
+def _validate_fresh_action(action: LicensedAction) -> tuple[int, Path]:
+    if not isinstance(action, LicensedAction):
+        raise BootstrapError("licensed action is invalid")
+    try:
+        destination = _absolute_path(
+            action.destination_logical, "licensed action destination"
+        )
+        source = _absolute_path(action._source, "licensed action source")
+    except BootstrapError:
+        raise BootstrapError("licensed action is invalid") from None
+    if (
+        not isinstance(action._destination, Path)
+        or action._destination != destination
+        or type(action.source_size) is not int
+        or not 0 <= action.source_size <= MAX_LICENSED_SIZE
+        or not isinstance(action.source_sha256, str)
+        or len(action.source_sha256) != 64
+        or any(
+            character not in "0123456789abcdef" for character in action.source_sha256
+        )
+        or not isinstance(action.before, FileRecord)
+        or action.before.logical_path != action.destination_logical
+        or not action.before.private
+        or not isinstance(action.disposition, str)
+        or action.disposition not in {"install", "replace", "keep"}
+    ):
+        raise BootstrapError("licensed action is invalid")
+    try:
+        before = _record_from_value(_record_value(action.before))
+    except (AttributeError, BootstrapError):
+        raise BootstrapError("licensed action is invalid") from None
+    before_matches_source = (
+        before.state == "regular"
+        and before.size == action.source_size
+        and before.sha256 == action.source_sha256
+    )
+    if not (
+        (action.disposition == "install" and before.state == "absent")
+        or (action.disposition == "keep" and before_matches_source)
+        or (
+            action.disposition == "replace"
+            and before.state == "regular"
+            and not before_matches_source
+        )
+    ):
+        raise BootstrapError("licensed action is invalid")
+    try:
+        source_fd, source_identity = _open_validated_source(source)
+    except BootstrapError as error:
+        raise BootstrapError("licensed input validation failed") from error
+    except OSError:
+        raise BootstrapError("licensed input validation failed") from None
+    if (
+        source_identity.size != action.source_size
+        or source_identity.sha256 != action.source_sha256
+    ):
+        os.close(source_fd)
+        raise BootstrapError("licensed input changed after planning")
+    return source_fd, destination
+
+
 def _publish_stage(parent_fd: int, journal_fd: int, journal: _Journal) -> _Journal:
     stage_record, stage_fd = _open_record(
         parent_fd, journal.stage_name, journal.destination_logical
     )
-    if stage_fd is None or not _matches_source(stage_record, journal):
+    if stage_fd is None or not _matches_staged_source(stage_record, journal):
         if stage_fd is not None:
             os.close(stage_fd)
         raise BootstrapError("licensed stage conflicts")
     destination_name = Path(journal.destination_logical).name
     try:
-        if not _same_named_file(parent_fd, journal.stage_name, stage_fd):
+        if (
+            not _same_named_file(parent_fd, journal.stage_name, stage_fd)
+            or stat.S_IMODE(os.fstat(stage_fd).st_mode) != _SOURCE_MODE
+        ):
             raise BootstrapError("licensed stage changed before publication")
         try:
             rename_noreplace(parent_fd, journal.stage_name, parent_fd, destination_name)
@@ -615,7 +757,7 @@ def _publish_stage(parent_fd: int, journal_fd: int, journal: _Journal) -> _Journ
         try:
             if (
                 destination_fd is None
-                or not _matches_source(destination, journal)
+                or not _matches_staged_source(destination, journal)
                 or _file_identity(os.fstat(destination_fd))
                 != _file_identity(os.fstat(stage_fd))
             ):
@@ -637,33 +779,22 @@ def install_threading_copy(
     action: LicensedAction, journal: str | os.PathLike[str]
 ) -> None:
     """Install or resume one private licensed-file transaction."""
-    if not isinstance(action, LicensedAction):
-        raise BootstrapError("licensed action is invalid")
-    journal_path = _absolute_path(journal, "licensed journal")
-    ensure_private_directory(journal_path)
-    journal_fd = open_owned_root(journal_path)
     parent_fd: int | None = None
     source_fd: int | None = None
+    journal_fd: int | None = None
     try:
+        source_fd, destination = _validate_fresh_action(action)
+        journal_path = _absolute_path(journal, "licensed journal")
+        ensure_private_directory(journal_path)
+        journal_fd = open_owned_root(journal_path)
         state = _load_or_create_journal(action, journal_fd)
         if state.status == "recovery_required":
             raise BootstrapError("licensed transaction requires recovery")
         if state.status == "rolled_back":
             raise BootstrapError("licensed transaction was already rolled back")
-        try:
-            source_fd, source_identity = _open_validated_source(action._source)
-        except BootstrapError as error:
-            if "changed" in str(error):
-                raise
-            raise BootstrapError("licensed input validation failed") from error
-        if (
-            source_identity.size != state.source_size
-            or source_identity.sha256 != state.source_sha256
-        ):
-            raise BootstrapError("licensed input changed after planning")
-        parent_fd = _open_parent(action._destination, "licensed destination")
+        parent_fd = _open_parent(destination, "licensed destination")
         current, current_fd = _open_record(
-            parent_fd, action._destination.name, state.destination_logical
+            parent_fd, destination.name, state.destination_logical
         )
         if current_fd is not None:
             os.close(current_fd)
@@ -674,7 +805,7 @@ def install_threading_copy(
                 _write_journal(journal_fd, _replace_status(state, "installed"))
             return
 
-        if _matches_source(current, state):
+        if _matches_staged_source(current, state):
             if state.disposition == "replace":
                 backup, backup_fd = _open_record(
                     parent_fd, state.backup_name, state.destination_logical
@@ -686,6 +817,11 @@ def install_threading_copy(
             if state.status != "installed":
                 _write_journal(journal_fd, _replace_status(state, "installed"))
             return
+        if _matches_source(current, state):
+            _quarantine_destination(parent_fd, journal_fd, state)
+            raise BootstrapError(
+                "licensed publication mode changed; recovery evidence preserved"
+            )
 
         _copy_stage(source_fd, parent_fd, state)
         if state.disposition == "replace":
@@ -695,27 +831,25 @@ def install_threading_copy(
             if backup_fd is not None:
                 os.close(backup_fd)
             current, current_fd = _open_record(
-                parent_fd, action._destination.name, state.destination_logical
+                parent_fd, destination.name, state.destination_logical
             )
             if current_fd is not None:
                 os.close(current_fd)
             if backup.state == "absent" and current == state.before:
                 held_fd = _open_regular(
-                    parent_fd, action._destination.name, "licensed destination"
+                    parent_fd, destination.name, "licensed destination"
                 )
                 try:
                     held_info = os.fstat(held_fd)
                     held_inode = (held_info.st_dev, held_info.st_ino)
-                    if not _same_named_file(
-                        parent_fd, action._destination.name, held_fd
-                    ):
+                    if not _same_named_file(parent_fd, destination.name, held_fd):
                         raise BootstrapError(
                             "licensed destination changed before backup"
                         )
                     try:
                         rename_noreplace(
                             parent_fd,
-                            action._destination.name,
+                            destination.name,
                             parent_fd,
                             state.backup_name,
                         )
@@ -754,14 +888,19 @@ def install_threading_copy(
                 raise BootstrapError("licensed backup or destination conflicts")
 
         current, current_fd = _open_record(
-            parent_fd, action._destination.name, state.destination_logical
+            parent_fd, destination.name, state.destination_logical
         )
         if current_fd is not None:
             os.close(current_fd)
-        if _matches_source(current, state):
+        if _matches_staged_source(current, state):
             if state.status != "installed":
                 _write_journal(journal_fd, _replace_status(state, "installed"))
             return
+        if _matches_source(current, state):
+            _quarantine_destination(parent_fd, journal_fd, state)
+            raise BootstrapError(
+                "licensed publication mode changed; recovery evidence preserved"
+            )
         if current.state != "absent":
             raise BootstrapError("licensed destination changed before publication")
         _publish_stage(parent_fd, journal_fd, state)
@@ -774,7 +913,8 @@ def install_threading_copy(
             os.close(source_fd)
         if parent_fd is not None:
             os.close(parent_fd)
-        os.close(journal_fd)
+        if journal_fd is not None:
+            os.close(journal_fd)
 
 
 def _move_bound(
