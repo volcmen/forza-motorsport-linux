@@ -652,9 +652,10 @@ def test_download_once_preserves_concurrent_replacement_after_rename(
             destination_parent_fd,
             destination_name,
         )
-        destination = cache / destination_name
-        destination.unlink()
-        write_private_cache(destination, b"parallel")
+        if destination_name == "artifact.bin" and not source_name.endswith(".recovery"):
+            destination = cache / destination_name
+            destination.unlink()
+            write_private_cache(destination, b"parallel")
 
     monkeypatch.setattr(artifacts_module, "rename_noreplace", replace_after_rename)
 
@@ -666,6 +667,157 @@ def test_download_once_preserves_concurrent_replacement_after_rename(
         )
 
     assert (cache / "artifact.bin").read_bytes() == b"parallel"
+
+
+def test_download_cleanup_never_unlinks_a_replacement_racing_the_final_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    real_rename = artifacts_module.rename_noreplace
+    real_unlink = artifacts_module.os.unlink
+    injected = False
+
+    def mutate_then_rename(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        (cache / source_name).write_bytes(b"corrupt!")
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+
+    def replace_public_at_delete(
+        path: str | bytes, *, dir_fd: int | None = None
+    ) -> None:
+        nonlocal injected
+        name = os.fsdecode(path)
+        is_cleanup_delete = name == "artifact.bin" or (
+            name.startswith(".artifact.bin.") and name.endswith(".recovery")
+        )
+        if not injected and is_cleanup_delete:
+            assert dir_fd is not None
+            try:
+                real_unlink("artifact.bin", dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+            replacement_fd = os.open(
+                "artifact.bin",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=dir_fd,
+            )
+            try:
+                os.write(replacement_fd, b"parallel")
+            finally:
+                os.close(replacement_fd)
+            injected = True
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(artifacts_module, "rename_noreplace", mutate_then_rename)
+    monkeypatch.setattr(artifacts_module.os, "unlink", replace_public_at_delete)
+
+    with pytest.raises(
+        BootstrapError, match="download publication verification failed"
+    ):
+        download_once(
+            download_spec(b"accepted"), cache, lambda _url: FakeResponse(b"accepted")
+        )
+
+    assert injected is True
+    assert (cache / "artifact.bin").read_bytes() == b"parallel"
+
+
+def test_download_cleanup_preserves_quarantined_foreign_file_when_restore_races(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    real_rename = artifacts_module.rename_noreplace
+    restore_collision = False
+
+    def replace_and_collide_restore(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        nonlocal restore_collision
+        if source_name.endswith(".recovery") and destination_name == "artifact.bin":
+            restore_collision = True
+            write_private_cache(cache / destination_name, b"new")
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+        if destination_name == "artifact.bin" and source_name.startswith(
+            ".artifact.bin."
+        ):
+            destination = cache / destination_name
+            destination.unlink()
+            write_private_cache(destination, b"foreign")
+
+    monkeypatch.setattr(
+        artifacts_module, "rename_noreplace", replace_and_collide_restore
+    )
+
+    with pytest.raises(
+        BootstrapError, match="download publication verification failed"
+    ):
+        download_once(
+            download_spec(b"accepted"), cache, lambda _url: FakeResponse(b"accepted")
+        )
+
+    recoveries = list(cache.glob(".artifact.bin.*.recovery"))
+    assert restore_collision is True
+    assert (cache / "artifact.bin").read_bytes() == b"new"
+    assert len(recoveries) == 1
+    assert recoveries[0].read_bytes() == b"foreign"
+
+
+def test_download_cleanup_preserves_a_recreated_stage_name_after_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    real_rename = artifacts_module.rename_noreplace
+    recreated_stage: Path | None = None
+
+    def mutate_publish_and_recreate_stage(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        nonlocal recreated_stage
+        if destination_name == "artifact.bin":
+            (cache / source_name).write_bytes(b"corrupt!")
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+        if destination_name == "artifact.bin":
+            recreated_stage = write_private_cache(cache / source_name, b"foreign-stage")
+
+    monkeypatch.setattr(
+        artifacts_module, "rename_noreplace", mutate_publish_and_recreate_stage
+    )
+
+    with pytest.raises(
+        BootstrapError, match="download publication verification failed"
+    ):
+        download_once(
+            download_spec(b"accepted"), cache, lambda _url: FakeResponse(b"accepted")
+        )
+
+    assert recreated_stage is not None
+    assert recreated_stage.read_bytes() == b"foreign-stage"
 
 
 def test_download_once_refuses_hostile_existing_cache_without_network(
@@ -1286,9 +1438,10 @@ def test_extract_bundle_preserves_concurrent_destination_replacement_after_renam
             destination_parent_fd,
             destination_name,
         )
-        os.replace(destination, displaced)
-        destination.mkdir(mode=0o700)
-        (destination / "concurrent").write_bytes(b"preserve")
+        if destination_name == "published" and source_name.endswith(".stage"):
+            os.replace(destination, displaced)
+            destination.mkdir(mode=0o700)
+            (destination / "concurrent").write_bytes(b"preserve")
 
     monkeypatch.setattr(artifacts_module, "rename_noreplace", replace_after_rename)
 
@@ -1296,6 +1449,101 @@ def test_extract_bundle_preserves_concurrent_destination_replacement_after_renam
         extract_bundle(archive, destination, manifest)
 
     assert (destination / "concurrent").read_bytes() == b"preserve"
+    assert (displaced / "bin/tool").read_bytes() == b"tool"
+
+
+def test_extract_cleanup_never_rmdirs_a_replacement_racing_the_final_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    destination = tmp_path / "published"
+    displaced = tmp_path / ".displaced-at-delete"
+    real_rename = artifacts_module.rename_noreplace
+    real_rmdir = artifacts_module.os.rmdir
+    replacement_inode: int | None = None
+
+    def mutate_then_rename(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        (tmp_path / source_name / "bin/tool").write_bytes(b"evil")
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+
+    def replace_public_at_rmdir(
+        path: str | bytes, *, dir_fd: int | None = None
+    ) -> None:
+        nonlocal replacement_inode
+        name = os.fsdecode(path)
+        is_cleanup_delete = name == "published" or (
+            name.startswith(".published.") and name.endswith(".recovery")
+        )
+        if replacement_inode is None and is_cleanup_delete:
+            if destination.exists():
+                os.replace(destination, displaced)
+            destination.mkdir(mode=0o700)
+            replacement_inode = destination.stat().st_ino
+        real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(artifacts_module, "rename_noreplace", mutate_then_rename)
+    monkeypatch.setattr(artifacts_module.os, "rmdir", replace_public_at_rmdir)
+
+    with pytest.raises(BootstrapError, match="archive publication verification failed"):
+        extract_bundle(archive, destination, manifest)
+
+    assert replacement_inode is not None
+    assert destination.stat().st_ino == replacement_inode
+
+
+def test_extract_cleanup_preserves_quarantined_foreign_tree_when_restore_races(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    destination = tmp_path / "published"
+    displaced = tmp_path / ".displaced-before-quarantine"
+    real_rename = artifacts_module.rename_noreplace
+    restore_collision = False
+
+    def replace_and_collide_restore(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        nonlocal restore_collision
+        if source_name.endswith(".recovery") and destination_name == "published":
+            restore_collision = True
+            destination.mkdir(mode=0o700)
+            (destination / "new").write_bytes(b"preserve")
+        real_rename(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+        if destination_name == "published" and source_name.endswith(".stage"):
+            os.replace(destination, displaced)
+            destination.mkdir(mode=0o700)
+            (destination / "foreign").write_bytes(b"preserve")
+
+    monkeypatch.setattr(
+        artifacts_module, "rename_noreplace", replace_and_collide_restore
+    )
+
+    with pytest.raises(BootstrapError, match="archive publication verification failed"):
+        extract_bundle(archive, destination, manifest)
+
+    recoveries = list(tmp_path.glob(".published.*.recovery"))
+    assert restore_collision is True
+    assert (destination / "new").read_bytes() == b"preserve"
+    assert len(recoveries) == 1
+    assert (recoveries[0] / "foreign").read_bytes() == b"preserve"
     assert (displaced / "bin/tool").read_bytes() == b"tool"
 
 

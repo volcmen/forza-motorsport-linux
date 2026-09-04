@@ -392,20 +392,50 @@ def _verify_published_download(
             os.close(published_fd)
 
 
-def _unlink_if_bound_file(parent_fd: int, name: str, binding: _BoundRegular) -> None:
+def _quarantine_public_name(parent_fd: int, name: str) -> str | None:
+    for _ in range(100):
+        recovery_name = f".{name}.{secrets.token_hex(12)}.recovery"
+        try:
+            rename_noreplace(parent_fd, name, parent_fd, recovery_name)
+        except FileExistsError:
+            continue
+        except FileNotFoundError:
+            return None
+        os.fsync(parent_fd)
+        return recovery_name
+    raise BootstrapError("cannot reserve artifact recovery name")
+
+
+def _restore_quarantined_name(
+    parent_fd: int, recovery_name: str, public_name: str
+) -> None:
+    try:
+        rename_noreplace(parent_fd, recovery_name, parent_fd, public_name)
+    except (FileExistsError, FileNotFoundError):
+        return
+    os.fsync(parent_fd)
+
+
+def _remove_published_bound_file(
+    parent_fd: int, name: str, binding: _BoundRegular
+) -> None:
+    recovery_name = _quarantine_public_name(parent_fd, name)
+    if recovery_name is None:
+        return
     candidate_fd: int | None = None
     try:
-        candidate_fd = _open_cached(parent_fd, name)
+        try:
+            candidate_fd = _open_cached(parent_fd, recovery_name)
+        except (FileNotFoundError, BootstrapError):
+            _restore_quarantined_name(parent_fd, recovery_name, name)
+            return
         candidate = os.fstat(candidate_fd)
         held = os.fstat(binding.fd)
         if (candidate.st_dev, candidate.st_ino) != (held.st_dev, held.st_ino):
+            _restore_quarantined_name(parent_fd, recovery_name, name)
             return
-        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) == (held.st_dev, held.st_ino):
-            os.unlink(name, dir_fd=parent_fd)
-            os.fsync(parent_fd)
-    except (FileNotFoundError, BootstrapError):
-        return
+        os.unlink(recovery_name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
     finally:
         if candidate_fd is not None:
             os.close(candidate_fd)
@@ -492,8 +522,8 @@ def download_once(
         finally:
             try:
                 if renamed and not published and binding is not None:
-                    _unlink_if_bound_file(parent_fd, spec.filename, binding)
-                if not published:
+                    _remove_published_bound_file(parent_fd, spec.filename, binding)
+                if not published and not renamed:
                     try:
                         os.unlink(temporary, dir_fd=parent_fd)
                     except FileNotFoundError:
@@ -1738,13 +1768,32 @@ def _name_matches_directory(parent_fd: int, name: str, directory_fd: int) -> boo
             os.close(named_fd)
 
 
-def _remove_if_bound_directory(parent_fd: int, name: str, directory_fd: int) -> None:
+def _remove_isolated_bound_directory(
+    parent_fd: int, name: str, directory_fd: int
+) -> None:
     if not _name_matches_directory(parent_fd, name, directory_fd):
         return
     _remove_directory_contents(directory_fd)
     if _name_matches_directory(parent_fd, name, directory_fd):
         os.rmdir(name, dir_fd=parent_fd)
         os.fsync(parent_fd)
+
+
+def _remove_published_bound_directory(
+    parent_fd: int, name: str, directory_fd: int
+) -> None:
+    recovery_name = _quarantine_public_name(parent_fd, name)
+    if recovery_name is None:
+        return
+    try:
+        matches = _name_matches_directory(parent_fd, recovery_name, directory_fd)
+    except OSError:
+        _restore_quarantined_name(parent_fd, recovery_name, name)
+        raise
+    if not matches:
+        _restore_quarantined_name(parent_fd, recovery_name, name)
+        return
+    _remove_isolated_bound_directory(parent_fd, recovery_name, directory_fd)
 
 
 def _destination(path: str | os.PathLike[str]) -> Path:
@@ -1836,8 +1885,14 @@ def _extract_and_publish(
             if not published and stage_name:
                 try:
                     if stage_fd is not None:
-                        cleanup_name = destination.name if renamed else stage_name
-                        _remove_if_bound_directory(parent_fd, cleanup_name, stage_fd)
+                        if renamed:
+                            _remove_published_bound_directory(
+                                parent_fd, destination.name, stage_fd
+                            )
+                        else:
+                            _remove_isolated_bound_directory(
+                                parent_fd, stage_name, stage_fd
+                            )
                     elif not renamed:
                         os.rmdir(stage_name, dir_fd=parent_fd)
                         os.fsync(parent_fd)
