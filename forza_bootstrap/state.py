@@ -48,6 +48,7 @@ _STATE_KEYS = frozenset(
         "child_runtime_transaction",
         "patch_backup_manifest",
         "compatibility_tool_disposition",
+        "finish_plan_sha256",
     }
 )
 
@@ -75,6 +76,7 @@ class BootstrapState:
     child_runtime_transaction: str | None
     patch_backup_manifest: str | None
     compatibility_tool_disposition: Literal["created", "adopted"] | None
+    finish_plan_sha256: str | None
     _state_root: Path | None = field(default=None, repr=False, compare=False)
 
 
@@ -124,12 +126,14 @@ _UPDATABLE_FIELDS = frozenset(
         "child_runtime_transaction",
         "patch_backup_manifest",
         "compatibility_tool_disposition",
+        "finish_plan_sha256",
     }
 )
 _WRITE_ONCE_FIELDS = (
     "child_runtime_transaction",
     "patch_backup_manifest",
     "compatibility_tool_disposition",
+    "finish_plan_sha256",
 )
 
 
@@ -195,6 +199,9 @@ def _state_from_value(value: object, state_root: Path) -> BootstrapState:
         raise BootstrapError("state compatibility_tool_disposition is invalid")
     if disposition not in {None, "created", "adopted"}:
         raise BootstrapError("state compatibility_tool_disposition is invalid")
+    finish_plan_sha256 = value["finish_plan_sha256"]
+    if finish_plan_sha256 is not None:
+        finish_plan_sha256 = _require_sha256(finish_plan_sha256, "finish_plan_sha256")
     return BootstrapState(
         version=version,
         transaction_id=transaction_id,
@@ -204,6 +211,7 @@ def _state_from_value(value: object, state_root: Path) -> BootstrapState:
         child_runtime_transaction=child,
         patch_backup_manifest=backup,
         compatibility_tool_disposition=disposition,
+        finish_plan_sha256=finish_plan_sha256,
         _state_root=state_root,
     )
 
@@ -218,6 +226,7 @@ def _state_value(state: BootstrapState) -> dict[str, object]:
         "child_runtime_transaction": state.child_runtime_transaction,
         "patch_backup_manifest": state.patch_backup_manifest,
         "compatibility_tool_disposition": state.compatibility_tool_disposition,
+        "finish_plan_sha256": state.finish_plan_sha256,
     }
 
 
@@ -418,6 +427,7 @@ def create_transaction(
                         child_runtime_transaction=None,
                         patch_backup_manifest=None,
                         compatibility_tool_disposition=None,
+                        finish_plan_sha256=None,
                         _state_root=root,
                     )
                     atomic_write_private_json(

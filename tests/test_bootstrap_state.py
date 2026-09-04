@@ -40,12 +40,15 @@ def state_value(transaction_id: str, **updates: object) -> dict[str, object]:
         "child_runtime_transaction": None,
         "patch_backup_manifest": None,
         "compatibility_tool_disposition": None,
+        "finish_plan_sha256": None,
     }
     value.update(updates)
     return value
 
 
-def write_transaction(root: Path, directory_name: str, value: dict[str, object]) -> None:
+def write_transaction(
+    root: Path, directory_name: str, value: dict[str, object]
+) -> None:
     transaction = root / directory_name
     transaction.mkdir(mode=0o700)
     transaction.chmod(0o700)
@@ -118,7 +121,10 @@ def test_state_reader_rejects_symlink_and_wrong_mode(tmp_path: Path, kind: str) 
         (b"{", "JSON"),
         (json.dumps(state_value("b" * 24, version=2)).encode("ascii"), "state schema"),
         (json.dumps(state_value("b" * 24, extra=True)).encode("ascii"), "state schema"),
-        (json.dumps(state_value("b" * 24, completed_boundaries=[1])).encode("ascii"), "completed_boundaries"),
+        (
+            json.dumps(state_value("b" * 24, completed_boundaries=[1])).encode("ascii"),
+            "completed_boundaries",
+        ),
     ),
 )
 def test_unfinished_state_rejects_corrupt_or_nonexact_schema(
@@ -153,13 +159,17 @@ def test_state_root_rejects_wrong_mode(tmp_path: Path) -> None:
         create_transaction(state_root, "1" * 64)
 
 
-def test_open_owned_root_rejects_foreign_uid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_open_owned_root_rejects_foreign_uid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from forza_bootstrap import safeio
 
     monkeypatch.setattr(
         safeio.os,
         "fstat",
-        lambda _fd: SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=os.getuid() + 1),
+        lambda _fd: SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700, st_uid=os.getuid() + 1
+        ),
     )
 
     with pytest.raises(BootstrapError, match="ownership"):
@@ -251,7 +261,9 @@ def test_transition_requires_last_durable_phase(tmp_path: Path) -> None:
     state = create_transaction(tmp_path, "2" * 64)
 
     with pytest.raises(BootstrapError, match="expected NEW"):
-        transition(state, BootstrapPhase.PREPARING, BootstrapPhase.AWAITING_STEAM_PREFIX)
+        transition(
+            state, BootstrapPhase.PREPARING, BootstrapPhase.AWAITING_STEAM_PREFIX
+        )
 
 
 def test_transition_persists_only_allowed_typed_updates(tmp_path: Path) -> None:
@@ -363,8 +375,12 @@ def test_transition_locked_serializes_callers_sharing_root_lock_description(
             pass
         real_write(*args, **kwargs)
 
-    monkeypatch.setattr(state_module, "_assert_bootstrap_lock", synchronize_root_validation)
-    monkeypatch.setattr(state_module, "atomic_write_private_json", synchronize_stale_writers)
+    monkeypatch.setattr(
+        state_module, "_assert_bootstrap_lock", synchronize_root_validation
+    )
+    monkeypatch.setattr(
+        state_module, "atomic_write_private_json", synchronize_stale_writers
+    )
 
     def invoke(boundary: str, lock_fd: int) -> None:
         try:
@@ -393,9 +409,13 @@ def test_transition_locked_serializes_callers_sharing_root_lock_description(
     assert not first.is_alive()
     assert not second.is_alive()
     successes = [
-        outcome for outcome in outcomes.values() if not isinstance(outcome, BootstrapError)
+        outcome
+        for outcome in outcomes.values()
+        if not isinstance(outcome, BootstrapError)
     ]
-    failures = [outcome for outcome in outcomes.values() if isinstance(outcome, BootstrapError)]
+    failures = [
+        outcome for outcome in outcomes.values() if isinstance(outcome, BootstrapError)
+    ]
     assert len(successes) == 1
     assert len(failures) == 1
     assert isinstance(failures[0], BootstrapError)
@@ -430,7 +450,9 @@ def test_transition_locked_reuses_coordinator_lock_without_self_deadlock(
     assert load_unfinished_transaction(tmp_path) == prepared
 
 
-def test_same_phase_transition_appends_multiple_durable_checkpoints(tmp_path: Path) -> None:
+def test_same_phase_transition_appends_multiple_durable_checkpoints(
+    tmp_path: Path,
+) -> None:
     state = create_transaction(tmp_path, "c" * 64)
     state = transition(state, BootstrapPhase.NEW, BootstrapPhase.PREPARING)
     state = transition(
@@ -524,6 +546,7 @@ def test_transition_completed_boundaries_only_append_to_existing_order(
             "/private/forza-backups/forza-patch-20260903T120001Z.json",
         ),
         ("compatibility_tool_disposition", "created", "adopted"),
+        ("finish_plan_sha256", "1" * 64, "2" * 64),
     ),
 )
 def test_transition_recovery_evidence_is_write_once_or_idempotently_equal(
@@ -577,7 +600,9 @@ def test_create_recovers_from_crash_before_initial_state_publication(
     assert load_unfinished_transaction(tmp_path) == resumed
 
 
-def test_patch_backup_manifest_accepts_exact_patcher_manifest_reference(tmp_path: Path) -> None:
+def test_patch_backup_manifest_accepts_exact_patcher_manifest_reference(
+    tmp_path: Path,
+) -> None:
     transaction_id = "e" * 24
     reference = "/private/forza-backups/forza-patch-20260903T123456Z.1.json"
     write_transaction(
@@ -650,7 +675,7 @@ def test_concurrent_transaction_creators_do_not_both_succeed(
 
 
 def test_bootstrap_lock_closes_existing_file_after_validation_failure(
-    monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from forza_bootstrap import safeio
 
@@ -679,7 +704,9 @@ def test_bootstrap_lock_closes_existing_file_after_validation_failure(
     assert 20 in closes
 
 
-def test_bootstrap_lock_closes_file_after_flock_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bootstrap_lock_closes_file_after_flock_oserror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from forza_bootstrap import safeio
 
     closes: list[int] = []
@@ -750,7 +777,9 @@ def test_journal_lock_closes_file_after_flock_failure(
         lambda *_args: (_ for _ in ()).throw(OSError("flock failed")),
     )
 
-    with pytest.raises(BootstrapError, match="journal lock descriptor cannot be locked"):
+    with pytest.raises(
+        BootstrapError, match="journal lock descriptor cannot be locked"
+    ):
         safeio._acquire_journal_lock("/private/runtime")
 
     assert 20 in closes
@@ -766,7 +795,9 @@ def test_open_transaction_rejects_invalid_id_before_filesystem_access(
     monkeypatch.setattr(
         state_module.os,
         "open",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("filesystem accessed")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("filesystem accessed")
+        ),
     )
 
     with pytest.raises(BootstrapError, match="transaction_id"):
@@ -886,7 +917,9 @@ def test_staging_temp_fifo_is_rejected_before_it_can_block(tmp_path: Path) -> No
     staging.chmod(0o700)
     os.mkfifo(staging / f".state.json.{'b' * 24}.tmp", 0o600)
 
-    assert_rejects_hostile_special_file_promptly(lambda: load_unfinished_transaction(tmp_path))
+    assert_rejects_hostile_special_file_promptly(
+        lambda: load_unfinished_transaction(tmp_path)
+    )
 
 
 def test_root_lock_fifo_is_rejected_before_it_can_block(tmp_path: Path) -> None:
@@ -966,7 +999,9 @@ def test_private_json_unix_socket_is_a_prompt_bootstrap_error(tmp_path: Path) ->
 def test_bootstrap_lock_directory_is_a_prompt_bootstrap_error(tmp_path: Path) -> None:
     (tmp_path / "bootstrap.lock").mkdir(mode=0o700)
 
-    assert_rejects_hostile_special_file_promptly(lambda: acquire_bootstrap_lock(tmp_path))
+    assert_rejects_hostile_special_file_promptly(
+        lambda: acquire_bootstrap_lock(tmp_path)
+    )
 
 
 @pytest.mark.parametrize("kind", ("fifo", "socket", "directory"))

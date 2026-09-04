@@ -16,6 +16,8 @@ from test_bootstrap_prepare import PrepareFixture
 
 import forza_bootstrap.coordinator as coordinator_module
 from forza_bootstrap.coordinator import (
+    PatchInspection,
+    PrefixInspection,
     RecoveryContext,
     RecoveryOperations,
     default_recovery_operations,
@@ -218,6 +220,35 @@ def test_resume_ambiguity_enters_recovery_required_with_private_journal(
     assert str(fixture.root / durable.transaction_id) in fixture.output.getvalue()
 
 
+def test_resume_marks_latest_owner_checkpoint_without_masking_original_error(
+    tmp_path: Path,
+) -> None:
+    fixture = RecoveryFixture(tmp_path, BootstrapPhase.PREPARING)
+
+    def checkpoint_then_fail(
+        _context: RecoveryContext, state: BootstrapState
+    ) -> BootstrapState:
+        transition(
+            state,
+            BootstrapPhase.PREPARING,
+            BootstrapPhase.AWAITING_STEAM_PREFIX,
+        )
+        raise BootstrapError("original owner recovery failure")
+
+    fixture.operations = replace(
+        fixture.operations,
+        resume_prepare=checkpoint_then_fail,
+    )
+    fixture.context = replace(fixture.context, operations=fixture.operations)
+
+    with pytest.raises(BootstrapError, match="original owner recovery failure"):
+        resume(fixture.context)
+
+    durable = load_unfinished_transaction(fixture.root)
+    assert durable is not None and durable.phase is BootstrapPhase.RECOVERY_REQUIRED
+    assert str(fixture.root / durable.transaction_id) in fixture.output.getvalue()
+
+
 def test_finish_plan_replacement_window_keeps_prepare_plan_reconstructable(
     tmp_path: Path,
 ) -> None:
@@ -410,6 +441,138 @@ def test_prepare_resume_refuses_same_content_tool_at_a_replaced_inode(
 
     with pytest.raises(BootstrapError, match="compatibility tool changed"):
         resume(context)
+
+
+@pytest.mark.parametrize("damage", ("missing", "malformed"))
+def test_prepare_resume_never_recreates_baseline_after_tool_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    fixture = PrepareFixture(tmp_path)
+    original_publish = fixture.context.operations.publish_fm
+
+    def publish(*args: object):
+        record = original_publish(*args)  # type: ignore[arg-type]
+        record.destination.mkdir()
+        info = record.destination.stat()
+        return replace(record, root_device=info.st_dev, root_inode=info.st_ino)
+
+    def interrupt(boundary: str) -> None:
+        if boundary == "publish-fm-tool":
+            raise KeyboardInterrupt
+
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(
+            fixture.context.operations,
+            publish_fm=publish,
+            boundary=interrupt,
+        ),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        fixture.run()
+    durable = load_unfinished_transaction(fixture.state)
+    assert durable is not None
+    before_path = fixture.state / durable.transaction_id / "before.json"
+    if damage == "missing":
+        before_path.unlink()
+        damaged = None
+    else:
+        before_path.write_text("{}", encoding="ascii")
+        before_path.chmod(0o600)
+        damaged = before_path.read_bytes()
+    captures = 0
+
+    def capture(*args: object):
+        nonlocal captures
+        captures += 1
+        return fixture.context.operations.capture_before(*args)
+
+    monkeypatch.setattr(
+        coordinator_module,
+        "inspect_fm",
+        lambda *_args: type(
+            "Inspection",
+            (),
+            {
+                "disposition": ToolDisposition.ADOPTED,
+                "identity": fixture.identity,
+                "tree_sha256": "d" * 64,
+            },
+        )(),
+    )
+    resume_operations = replace(
+        fixture.context.operations,
+        capture_before=capture,
+        boundary=lambda _name: None,
+    )
+    context = RecoveryContext(
+        durable,
+        fixture.state,
+        fixture.stdout,
+        prepare_context=replace(fixture.context, operations=resume_operations),
+    )
+    context = replace(context, operations=default_recovery_operations(context))
+
+    with pytest.raises(BootstrapError, match="before snapshot"):
+        resume(context)
+
+    assert captures == 0
+    assert before_path.exists() is (damage == "malformed")
+    if damaged is not None:
+        assert before_path.read_bytes() == damaged
+
+
+def test_prepare_resume_refuses_planned_absent_tool_without_ownership_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = PrepareFixture(tmp_path)
+
+    def interrupt(boundary: str) -> None:
+        if boundary == "acquire-bundle":
+            raise KeyboardInterrupt
+
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(fixture.context.operations, boundary=interrupt),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        fixture.run()
+    durable = load_unfinished_transaction(fixture.state)
+    assert durable is not None
+    destination = fixture.compatibility / "GE-Proton11-3-FM"
+    destination.mkdir()
+    monkeypatch.setattr(
+        coordinator_module,
+        "inspect_fm",
+        lambda *_args: type(
+            "Inspection",
+            (),
+            {
+                "disposition": ToolDisposition.ADOPTED,
+                "identity": fixture.identity,
+                "tree_sha256": "d" * 64,
+            },
+        )(),
+    )
+    context = RecoveryContext(
+        durable,
+        fixture.state,
+        fixture.stdout,
+        prepare_context=replace(
+            fixture.context,
+            operations=replace(fixture.context.operations, boundary=lambda _name: None),
+        ),
+    )
+    context = replace(context, operations=default_recovery_operations(context))
+
+    with pytest.raises(
+        BootstrapError, match="compatibility-tool recovery is ambiguous"
+    ):
+        resume(context)
+
+    assert not (
+        fixture.state / durable.transaction_id / "compatibility-tool.json"
+    ).exists()
 
 
 def test_default_rollback_from_interrupted_prepare_reaches_created_tool(
@@ -662,6 +825,243 @@ def test_default_resume_completes_interrupted_finish_from_actual_records(
     assert fixture.actions.count("runtime-install") == 1
 
 
+def test_finish_persists_confirmed_plan_digest_write_once(tmp_path: Path) -> None:
+    fixture = FinishFixture(tmp_path)
+    expected = fixture.finish_plan.sha256
+
+    state = fixture.run()
+
+    assert state.finish_plan_sha256 == expected
+    with pytest.raises(BootstrapError, match="write-once"):
+        transition(
+            state,
+            BootstrapPhase.READY_TO_ATTEMPT,
+            BootstrapPhase.ACCEPTED,
+            finish_plan_sha256="7" * 64,
+        )
+
+
+def test_resume_rejects_invalid_nested_finish_plan_before_any_owner(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    crashed = False
+
+    def interrupt(boundary: str) -> None:
+        nonlocal crashed
+        if boundary == "runtime-status" and not crashed:
+            crashed = True
+            raise KeyboardInterrupt
+
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(fixture.operations, boundary=interrupt),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        fixture.run()
+    durable = load_unfinished_transaction(fixture.state_root)
+    assert durable is not None
+    plan_path = fixture.state_root / durable.transaction_id / "plan.json"
+    plan = json.loads(plan_path.read_text())
+    plan["patch"]["disposition"] = 17
+    plan_path.write_text(json.dumps(plan), encoding="ascii")
+    plan_path.chmod(0o600)
+    owner_calls: list[str] = []
+
+    def plan_threading(_context: object):
+        owner_calls.append("licensed")
+        return fixture.licensed_action
+
+    operations = replace(
+        fixture.context.operations,
+        plan_threading=plan_threading,
+        boundary=lambda _name: None,
+    )
+    context = RecoveryContext(
+        durable,
+        fixture.state_root,
+        fixture.stdout,
+        finish_context=replace(
+            fixture.context,
+            state=durable,
+            operations=operations,
+        ),
+    )
+    context = replace(context, operations=default_recovery_operations(context))
+
+    with pytest.raises(BootstrapError, match="Finish recovery plan is invalid"):
+        resume(context)
+
+    assert owner_calls == []
+
+
+def test_resume_revalidates_recorded_prefix_identity_before_owner_mutation(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    crashed = False
+
+    def interrupt(boundary: str) -> None:
+        nonlocal crashed
+        if boundary == "runtime-status" and not crashed:
+            crashed = True
+            raise KeyboardInterrupt
+
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(fixture.operations, boundary=interrupt),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        fixture.run()
+    durable = load_unfinished_transaction(fixture.state_root)
+    assert durable is not None
+    owner_calls: list[str] = []
+
+    def plan_threading(_context: object):
+        owner_calls.append("licensed")
+        return fixture.licensed_action
+
+    operations = replace(
+        fixture.context.operations,
+        validate_prefix=lambda _context: PrefixInspection("9:90", "9:91"),
+        plan_threading=plan_threading,
+        boundary=lambda _name: None,
+    )
+    context = RecoveryContext(
+        durable,
+        fixture.state_root,
+        fixture.stdout,
+        finish_context=replace(
+            fixture.context,
+            state=durable,
+            operations=operations,
+        ),
+    )
+    context = replace(context, operations=default_recovery_operations(context))
+
+    with pytest.raises(BootstrapError, match="prefix identity changed"):
+        resume(context)
+
+    assert owner_calls == []
+
+
+def test_licensed_resume_reconstructs_original_action_without_replanning_destination(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    crashed = False
+
+    def interrupt(boundary: str) -> None:
+        nonlocal crashed
+        if boundary == "install-threading" and not crashed:
+            crashed = True
+            raise KeyboardInterrupt
+
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(fixture.operations, boundary=interrupt),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        fixture.run()
+    durable = load_unfinished_transaction(fixture.state_root)
+    assert durable is not None
+    resumed_actions: list[dict[str, object]] = []
+
+    def refuse_replan(_context: object):
+        raise BootstrapError("replanned against mutated licensed destination")
+
+    def resume_licensed(_context: object, action: object, _journal: Path) -> None:
+        resumed_actions.append(action.private_json())  # type: ignore[union-attr]
+
+    operations = replace(
+        fixture.context.operations,
+        plan_threading=refuse_replan,
+        install_threading=resume_licensed,
+        boundary=lambda _name: None,
+    )
+    context = RecoveryContext(
+        durable,
+        fixture.state_root,
+        fixture.stdout,
+        finish_context=replace(
+            fixture.context,
+            state=durable,
+            operations=operations,
+        ),
+    )
+    context = replace(context, operations=default_recovery_operations(context))
+
+    result = resume(context)
+
+    assert result.phase is BootstrapPhase.READY_TO_ATTEMPT
+    assert resumed_actions == [fixture.licensed_action.private_json()]
+
+
+def test_licensed_resume_uses_journal_owner_to_verify_durable_keep_action(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    private_record = next(
+        item
+        for item in fixture.after.records
+        if item.logical_path == "prefix/threading"
+    )
+    fixture.pre_finish = replace(
+        fixture.pre_finish,
+        records=tuple(
+            private_record if item.logical_path == "prefix/threading" else item
+            for item in fixture.pre_finish.records
+        ),
+    )
+    fixture.licensed_action = replace(
+        fixture.licensed_action,
+        before=private_record,
+        disposition="keep",
+    )
+    crashed = False
+
+    def interrupt(boundary: str) -> None:
+        nonlocal crashed
+        if boundary == "install-threading" and not crashed:
+            crashed = True
+            raise KeyboardInterrupt
+
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(fixture.operations, boundary=interrupt),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        fixture.run()
+    durable = load_unfinished_transaction(fixture.state_root)
+    assert durable is not None
+    verified: list[dict[str, object]] = []
+
+    def verify_licensed(_context: object, action: object, _journal: Path) -> None:
+        verified.append(action.private_json())  # type: ignore[union-attr]
+
+    resumed_operations = replace(
+        fixture.context.operations,
+        install_threading=verify_licensed,
+        boundary=lambda _name: None,
+    )
+    context = RecoveryContext(
+        durable,
+        fixture.state_root,
+        fixture.stdout,
+        finish_context=replace(
+            fixture.context,
+            state=durable,
+            operations=resumed_operations,
+        ),
+    )
+    context = replace(context, operations=default_recovery_operations(context))
+
+    result = resume(context)
+
+    assert result.phase is BootstrapPhase.READY_TO_ATTEMPT
+    assert verified == [fixture.licensed_action.private_json()]
+
+
 def test_default_resume_rechecks_completed_patch_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -716,6 +1116,112 @@ def test_default_resume_rechecks_completed_patch_publication(
     recovered = load_unfinished_transaction(fixture.state_root)
     assert recovered is not None
     assert recovered.phase is BootstrapPhase.RECOVERY_REQUIRED
+
+
+def test_default_patch_recovery_accepts_exact_adopted_patches_without_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    patched_record = next(
+        item for item in fixture.after.records if item.logical_path == "patch"
+    )
+    fixture.pre_finish = replace(
+        fixture.pre_finish,
+        records=tuple(
+            patched_record if item.logical_path == "patch" else item
+            for item in fixture.pre_finish.records
+        ),
+    )
+    fixture.patch_plan = PatchInspection(
+        states=("patched",),
+        targets=fixture.patch_plan.targets,
+        disposition="keep",
+    )
+    state = fixture.run()
+    monkeypatch.setattr(
+        coordinator_module,
+        "_run_finish_child",
+        lambda _context, argv, _label, **_kwargs: subprocess.CompletedProcess(
+            argv, 0, "patched\n", ""
+        ),
+    )
+    context = RecoveryContext(
+        state,
+        fixture.state_root,
+        fixture.stdout,
+        finish_context=replace(fixture.context, state=state),
+    )
+    operations = default_recovery_operations(context)
+
+    assert operations.inspect_patches(context, state) == "not_applicable"
+
+
+def test_resume_binds_published_patch_backup_without_applying_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    crashed = False
+
+    def interrupt(boundary: str) -> None:
+        nonlocal crashed
+        if boundary == "runtime-status" and not crashed:
+            crashed = True
+            raise KeyboardInterrupt
+
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(fixture.operations, boundary=interrupt),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        fixture.run()
+    durable = load_unfinished_transaction(fixture.state_root)
+    assert durable is not None and durable.patch_backup_manifest is None
+    fixture.patch_backup.parent.mkdir(parents=True, exist_ok=True)
+    fixture.patch_backup.parent.chmod(0o700)
+    fixture.patch_backup.write_text("{}", encoding="ascii")
+    fixture.patch_backup.chmod(0o600)
+    patch_publications = 0
+
+    def apply_patches(*_args: object) -> Path:
+        nonlocal patch_publications
+        patch_publications += 1
+        return fixture.patch_backup
+
+    resumed_operations = replace(
+        fixture.context.operations,
+        apply_patches=apply_patches,
+        boundary=lambda _name: None,
+    )
+    finish_context = replace(
+        fixture.context,
+        state=durable,
+        operations=None,
+    )
+    context = RecoveryContext(
+        durable,
+        fixture.state_root,
+        fixture.stdout,
+        finish_context=finish_context,
+    )
+    context = replace(context, operations=default_recovery_operations(context))
+    monkeypatch.setattr(
+        coordinator_module,
+        "_finish_operations",
+        lambda _context: resumed_operations,
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "_run_finish_child",
+        lambda _context, argv, _label, **_kwargs: subprocess.CompletedProcess(
+            argv, 0, "patched\n", ""
+        ),
+    )
+
+    result = resume(context)
+
+    assert result.phase is BootstrapPhase.READY_TO_ATTEMPT
+    assert result.patch_backup_manifest == str(fixture.patch_backup)
+    assert patch_publications == 0
 
 
 @pytest.mark.parametrize(
@@ -951,6 +1457,47 @@ def test_default_runtime_rollback_discovers_child_after_install_return_crash(
     assert operations.inspect_runtime(context, state) == "pending"
 
 
+def test_runtime_gap_discovery_ignores_prior_matching_terminal_child(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    state = fixture.run()
+    transaction = fixture.state_root / state.transaction_id
+    state_value = json.loads((transaction / "state.json").read_text())
+    state_value["child_runtime_transaction"] = None
+    (transaction / "state.json").write_text(json.dumps(state_value), encoding="ascii")
+    (transaction / "state.json").chmod(0o600)
+    state = replace(state, child_runtime_transaction=None)
+    runtime_root = (
+        fixture.user / ".local/state/forza-motorsport-linux/runtime-transactions"
+    )
+    for child, status in (("a" * 24, "rolled_back"), ("c" * 24, "installed")):
+        child_root = runtime_root / child
+        child_root.mkdir(parents=True)
+        child_root.chmod(0o700)
+        journal = child_root / "journal.json"
+        journal.write_text(
+            json.dumps(
+                {
+                    "transaction_id": child,
+                    "plan_sha256": fixture.runtime_plan.sha256,
+                    "state": status,
+                }
+            ),
+            encoding="ascii",
+        )
+        journal.chmod(0o600)
+    context = RecoveryContext(
+        state,
+        fixture.state_root,
+        fixture.stdout,
+        finish_context=replace(fixture.context, state=state),
+    )
+    operations = default_recovery_operations(context)
+
+    assert operations.inspect_runtime(context, state) == "pending"
+
+
 def test_default_patch_rollback_refuses_patched_targets_without_backup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1058,6 +1605,31 @@ def test_rollback_is_reverse_dependency_order_and_second_run_is_idempotent(
     assert result.phase is BootstrapPhase.ROLLED_BACK
     assert again == result
     assert fixture.actions.count("patch-restore") == 1
+
+
+def test_rollback_preflights_accepted_runtime_before_any_mutation(
+    tmp_path: Path,
+) -> None:
+    fixture = RecoveryFixture(tmp_path, BootstrapPhase.READY_TO_ATTEMPT)
+    state_path = fixture.root / fixture.state.transaction_id / "state.json"
+    before = state_path.read_bytes()
+
+    def accepted_runtime(_context: RecoveryContext, _state: BootstrapState) -> str:
+        return "accepted"
+
+    fixture.operations = replace(
+        fixture.operations,
+        inspect_runtime=accepted_runtime,
+    )
+    fixture.context = replace(fixture.context, operations=fixture.operations)
+
+    with pytest.raises(BootstrapError, match="accepted runtime child"):
+        rollback(fixture.context, confirm="ROLLBACK")
+
+    assert fixture.patch == "applied"
+    assert "patch-restore" not in fixture.actions
+    assert state_path.read_bytes() == before
+    assert load_unfinished_transaction(fixture.root) == fixture.state
 
 
 def test_declined_confirmation_is_an_exact_noop(tmp_path: Path) -> None:
