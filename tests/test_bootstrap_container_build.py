@@ -529,8 +529,13 @@ def test_mount_input_rejects_symlinks_and_overlapping_roots(tmp_path: Path) -> N
         offline_build_argv(overlapping, nested_output)
 
 
-def test_mount_input_rejects_home_and_docker_mount_delimiters(tmp_path: Path) -> None:
+def test_mount_input_rejects_home_and_docker_mount_delimiters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     inputs = build_inputs(tmp_path)
+    fixture_home = tmp_path / "user-home"
+    (fixture_home / "Development").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fixture_home))
     with pytest.raises(BootstrapError, match="forbidden host root"):
         dependency_fetch_argv(
             BuildInputs(
