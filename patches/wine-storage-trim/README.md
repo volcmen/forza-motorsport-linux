@@ -197,6 +197,6 @@ prefix was removed and no default Wine prefix or Wine process remained.
 
 The separately observed AP702-absent game result passed through the reviewed
 exact-build fallback recorded in
-[`v0.1-live-validation.md`](../../docs/evidence/v0.1-live-validation.md). That
+[`v0.1-live-validation.md`](../../evidence/v0.1-live-validation.md). That
 game result does not claim that this standalone source branch was installed or
 that the compatibility policy is ready for canonical Wine.

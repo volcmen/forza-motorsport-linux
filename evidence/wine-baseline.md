@@ -5,7 +5,7 @@ Date: 2026-08-31
 This document is the historical snapshot captured by Task 1. Statements about
 branch distance, worktree cleanliness, and unconfigured build directories are
 bound to that baseline capture; they do not describe later task state. See
-[Verification](../verification.md) for the current recorded status.
+[Verification](https://github.com/volcmen/forza-motorsport-linux/blob/bf12d7e7f22c8ebb910f68162af1caf0e00b0a5c/docs/verification.md) for the current recorded status.
 
 ## Canonical source and branch state
 

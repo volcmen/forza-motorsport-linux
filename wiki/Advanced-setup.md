@@ -1,4 +1,9 @@
-# Installation and recovery
+# Advanced setup
+
+[Home](Home.md) · [Install with bootstrap](Install.md) · [Recovery](Recovery.md)
+
+**Most players should use [Install](Install.md).** This page is for users who
+already have the reviewed local builds and contributors inspecting transactions.
 
 This guide is the auditable, manual counterpart to the top-level `./setup`
 wizard. Both paths delegate to the same installers and enforce the same exact
@@ -36,18 +41,22 @@ Prepare these before installation:
    `7b236772297b3475ea4f3cb830feb5b224f3064a`; the supplied path must be the
    direct `target/release` directory containing `xodus-service`, `xodus-cli`,
    and `xodus-overlay`. See the
-   [v0.1 Xodus evidence](evidence/v0.1-xodus.md) for the exact source/build
+   [v0.1 Xodus evidence](../evidence/v0.1-xodus.md) for the exact source/build
    record.
 4. A clean out-of-tree build of legacy XGameRuntime commit
    `a1548b1cf57371715d10b608bc81a77a188e40d4` containing the reviewed PE and
    Unix artifacts. See the
-   [v0.1 XGameRuntime evidence](evidence/v0.1-xgameruntime.md) for the exact
+   [v0.1 XGameRuntime evidence](../evidence/v0.1-xgameruntime.md) for the exact
    source/build boundary.
 5. A licensed Microsoft `xgameruntime.dll` from your own Windows installation.
 
-The repository downloads none of those artifacts.
+This manual workflow downloads none of those artifacts. The separate bootstrap
+workflow can acquire the open-source components.
 
 ## Place the separately licensed threading runtime
+
+Let Steam create the game prefix first by starting and closing Forza with the
+reviewed compatibility tool selected.
 
 The Microsoft threading runtime is intentionally outside the repository's
 transaction and evidence manifests:
@@ -197,7 +206,9 @@ Generate rather than hand-edit the launch line:
 ./setup steam-options
 ```
 
-Paste the single output line into Forza's Steam launch options. It selects the
+Paste the single output line into Forza's Steam launch options. Select
+`GE-Proton11-3-FM` under Compatibility and keep Steam Input disabled for the
+tested controller path. It selects the
 reviewed native XGameRuntime override, VKD3D settings, Xodus socket exposure,
 and the installed launcher before literal `%command%`. It does not edit Steam.
 
@@ -211,6 +222,7 @@ online profile/content, controller navigation and driving, hotplug, AP702
 absence, explicit Invite and Join, social-picker keyboard/controller input,
 clean exit, and a second launch without rebooting.
 
+Use the [first-session checklist](Play.md#verify-your-first-session).
 Readiness checks and automated tests are not substitutes for that live matrix.
 
 ## Accept or restore

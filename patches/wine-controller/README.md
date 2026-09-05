@@ -180,5 +180,5 @@ prefixes were removed and no default Wine prefix or Wine process remained.
 
 The separately observed Forza controller and hotplug matrix passed through the
 reviewed exact-build fallback recorded in
-[`v0.1-live-validation.md`](../../docs/evidence/v0.1-live-validation.md). That
+[`v0.1-live-validation.md`](../../evidence/v0.1-live-validation.md). That
 game result does not claim that this standalone source branch was installed.
