@@ -9,9 +9,9 @@ playing Forza Motorsport 4 with my cousin on Xbox 360. Getting there on Linux
 led to this collection of setup tools, controller and storage fixes, and Xbox
 service integration.
 
-**[Open the wiki →](wiki/Home.md)**
+**[Open the wiki →](https://github.com/volcmen/forza-motorsport-linux/wiki)**
 
-Start with **[Install](wiki/Install.md)**, then **[Play and verify](wiki/Play.md)**.
+Start with **[Install](https://github.com/volcmen/forza-motorsport-linux/wiki/Install)**, then **[Play and verify](https://github.com/volcmen/forza-motorsport-linux/wiki/Play-and-verify)**.
 The wiki walks through one recommended setup path with checkpoints and recovery
 instructions. The code and exact-version manifests stay in this repository.
 
@@ -21,7 +21,7 @@ instructions. The code and exact-version manifests stay in this repository.
 - **Bootstrap target:** Arch Linux x86_64, native Steam, game in the primary library.
 - **Recommended route:** the experimental v0.2.0 bootstrap with a dedicated `GE-Proton11-3-FM`.
 - **Bring your own licensed Microsoft threading DLL.** Microsoft binaries are not distributed.
-- **Tested in-game:** the maintainer confirmed v0.2.0 on one system. The detailed dated matrix covers v0.1; see [Evidence](wiki/Evidence.md).
+- **Tested in-game:** the maintainer confirmed v0.2.0 on one system. The detailed dated matrix covers v0.1; see [Evidence](https://github.com/volcmen/forza-motorsport-linux/wiki/Evidence-and-history).
 - **Incoming invite notifications are not supported.** Explicit Xbox Invite/Join is a separate feature.
 
 This is a community compatibility setup, not official Proton support or a
@@ -31,13 +31,13 @@ guarantee for every system. Follow the wiki's requirements before running setup.
 
 | Task | Guide |
 | --- | --- |
-| Install and configure Steam | [Install](wiki/Install.md) |
-| Drive, invite, and check a session | [Play and verify](wiki/Play.md) |
-| Diagnose a problem | [Troubleshooting](wiki/Troubleshooting.md) |
-| Resume, roll back, or uninstall | [Recovery](wiki/Recovery.md) |
-| Work with local builds and transactions | [Advanced setup](wiki/Advanced-setup.md) |
-| Understand the components | [How it works](wiki/How-it-works.md) |
-| Review test claims, sources, and history | [Evidence and history](wiki/Evidence.md) |
+| Install and configure Steam | [Install](https://github.com/volcmen/forza-motorsport-linux/wiki/Install) |
+| Drive, invite, and check a session | [Play and verify](https://github.com/volcmen/forza-motorsport-linux/wiki/Play-and-verify) |
+| Diagnose a problem | [Troubleshooting](https://github.com/volcmen/forza-motorsport-linux/wiki/Troubleshooting) |
+| Resume, roll back, or uninstall | [Recovery](https://github.com/volcmen/forza-motorsport-linux/wiki/Recovery) |
+| Work with local builds and transactions | [Advanced setup](https://github.com/volcmen/forza-motorsport-linux/wiki/Advanced-setup) |
+| Understand the components | [How it works](https://github.com/volcmen/forza-motorsport-linux/wiki/How-it-works) |
+| Review test claims, sources, and history | [Evidence and history](https://github.com/volcmen/forza-motorsport-linux/wiki/Evidence-and-history) |
 
 [Downloads](https://github.com/volcmen/forza-motorsport-linux/releases) ·
 [Report an issue](https://github.com/volcmen/forza-motorsport-linux/issues) ·

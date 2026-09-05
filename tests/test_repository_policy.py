@@ -1,4 +1,3 @@
-import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -256,70 +255,6 @@ def test_live_validation_evidence_backs_every_required_claim():
     assert (ROOT / evidence_path).is_file()
 
 
-
-
-def test_wiki_preserves_release_and_runtime_boundaries():
-    readme = (ROOT / "README.md").read_text()
-    home = (ROOT / "wiki/Home.md").read_text()
-    evidence = (ROOT / "wiki/Evidence.md").read_text()
-    assert "wiki/Home.md" in readme
-    for text in (readme, home):
-        assert "Incoming invite notifications are not supported" in text
-        assert "v0.2.0" in text and "v0.1" in text
-        assert "Arch Linux x86_64" in text
-    assert "2026-09-02" in evidence
-    assert "not be relabeled as a v0.2 result" in evidence
-    assert "**REJECTED LIVE:**" in evidence
-    for name, (_, _, revision) in PUBLIC_COMPONENTS.items():
-        assert revision in evidence, name
-    assert "installable profile is **`legacy-v0.1`**" in evidence
-
-
-def test_wiki_preserves_manual_inputs_and_distinct_recovery_scopes():
-    install = (ROOT / "wiki/Install.md").read_text()
-    recovery = (ROOT / "wiki/Recovery.md").read_text()
-    assert "Microsoft binaries are not distributed" in install
-    assert "Do not install GNOME Keyring" in install
-    assert "--threading-dll /absolute/path/to/licensed/xgameruntime.dll" in install
-    assert (
-        "steamapps/compatdata/2440510/pfx/drive_c/windows/system32/"
-        "xgameruntime.dll.threading"
-    ) in install
-    for command in (
-        "./setup bootstrap --rollback", "./setup rollback", "./setup uninstall"
-    ):
-        assert command in recovery
-    assert "already-missing paths are left absent" in recovery
-    assert "The two rollback commands have different scopes" in recovery
-
-
-def test_wiki_links_and_heading_anchors_resolve():
-    from urllib.parse import unquote, urlsplit
-
-    documents = [ROOT / "README.md", *sorted((ROOT / "wiki").glob("*.md"))]
-    failures = []
-    for document in documents:
-        # Ignore shell examples when looking for Markdown links and headings.
-        text = re.sub(r"```.*?```", "", document.read_text(), flags=re.DOTALL)
-        for target in re.findall(r"\[[^]\n]+\]\(([^)]+)\)", text):
-            url = urlsplit(target)
-            if url.scheme or url.netloc:
-                continue
-            destination = (document.parent / unquote(url.path)).resolve() if url.path else document
-            if not destination.exists():
-                failures.append(f"{document.name}: missing {target}")
-                continue
-            if url.fragment and destination.suffix == ".md":
-                headings = re.findall(r"^#{1,6} +(.+)$", destination.read_text(), re.MULTILINE)
-                anchors = {
-                    re.sub(r"[^\w\- ]", "", heading.lower()).replace(" ", "-")
-                    for heading in headings
-                }
-                if unquote(url.fragment) not in anchors:
-                    failures.append(f"{document.name}: missing anchor {target}")
-    assert not failures, "\n".join(failures)
-
-
 def test_publication_evidence_paths_remain_local_and_resolve():
     data = load_publication_manifest()
     for record in [*data["components"].values(), *data["claims"]]:
@@ -328,3 +263,17 @@ def test_publication_evidence_paths_remain_local_and_resolve():
             path = ROOT / evidence
             assert path.is_relative_to(ROOT)
             assert path.is_file(), evidence
+
+
+def test_readme_routes_readers_to_github_wiki():
+    readme = (ROOT / "README.md").read_text()
+    base = "https://github.com/volcmen/forza-motorsport-linux/wiki"
+    assert f"[Open the wiki →]({base})" in readme
+    for page in (
+        "Install", "Play-and-verify", "Troubleshooting", "Recovery",
+        "Advanced-setup", "How-it-works", "Evidence-and-history",
+    ):
+        assert f"({base}/{page})" in readme
+    assert "](wiki/" not in readme
+    assert "Incoming invite notifications are not supported" in readme
+    assert "v0.2.0" in readme and "v0.1" in readme
