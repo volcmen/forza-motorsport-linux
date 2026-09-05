@@ -158,8 +158,8 @@ def test_declared_licenses_exist():
 
 def test_verify_workflow_installs_just_before_running_the_gate():
     workflow = (ROOT / ".github/workflows/verify.yml").read_text()
-    setup = "uses: extractions/setup-just@v3"
-    python_tools = "uv sync --group dev"
+    setup = "uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b"
+    python_tools = "uv sync --locked --group dev"
     gate = "run: just verify"
     assert setup in workflow
     assert python_tools in workflow
@@ -277,3 +277,32 @@ def test_readme_routes_readers_to_github_wiki():
     assert "](wiki/" not in readme
     assert "Incoming invite notifications are not supported" in readme
     assert "v0.2.0" in readme and "v0.1" in readme
+
+
+def test_ci_actions_use_immutable_references_and_read_only_checkout():
+    import re
+
+    for path in (ROOT / ".github/workflows").glob("*.yml"):
+        workflow = path.read_text()
+        references = re.findall(r"uses:\s+([^\s]+)", workflow)
+        assert references, path
+        assert all(re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", ref) for ref in references)
+        assert "permissions:\n  contents: read" in workflow
+        assert "persist-credentials: false" in workflow
+        assert "pull_request_target" not in workflow
+        assert "timeout-minutes:" in workflow
+
+
+def test_development_lock_excludes_vulnerable_pytest_versions():
+    from packaging.version import Version
+
+    lock = tomllib.loads((ROOT / "uv.lock").read_text())
+    package = next(item for item in lock["package"] if item["name"] == "pytest")
+    assert Version(package["version"]) >= Version("9.0.3")
+    assert "uv sync --locked --group dev" in (ROOT / ".github/workflows/verify.yml").read_text()
+
+
+def test_security_reporting_and_license_are_discoverable():
+    policy = (ROOT / ".github/SECURITY.md").read_text()
+    assert "https://github.com/volcmen/forza-motorsport-linux/security/advisories/new" in policy
+    assert (ROOT / "LICENSE").read_bytes() == (ROOT / "LICENSES/GPL-3.0-or-later.txt").read_bytes()

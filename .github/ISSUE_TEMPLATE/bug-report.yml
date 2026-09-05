@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a reproducible setup, recovery, or game-integration problem.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check the Wiki's troubleshooting page first. Redact personal paths
+        and account data. Never attach credentials, Microsoft DLLs, or game files.
+        Report security vulnerabilities through the private Security tab.
+  - type: input
+    id: version
+    attributes:
+      label: Release or commit
+      placeholder: v0.2.0, or an exact commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Distribution, native or Flatpak Steam, primary or additional game library, selected Proton tool, and relevant hardware.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps and observed result
+      description: Which command or game action fails? What did you expect, and what happened?
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks performed
+      description: Relevant doctor output or a short redacted error excerpt. State which game-session checks you actually completed.

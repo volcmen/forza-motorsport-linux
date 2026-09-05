@@ -42,3 +42,7 @@ guarantee for every system. Follow the wiki's requirements before running setup.
 [Downloads](https://github.com/volcmen/forza-motorsport-linux/releases) ·
 [Report an issue](https://github.com/volcmen/forza-motorsport-linux/issues) ·
 [Read the story](https://blog.volc.men/blog/forza-motorsport-linux/)
+
+[Contributing](.github/CONTRIBUTING.md) ·
+[Security policy](.github/SECURITY.md) ·
+[Repository security review](evidence/security-audit-2026-09-05.md)
