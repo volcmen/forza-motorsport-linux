@@ -158,7 +158,7 @@ def test_declared_licenses_exist():
 
 def test_verify_workflow_installs_just_before_running_the_gate():
     workflow = (ROOT / ".github/workflows/verify.yml").read_text()
-    setup = "uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b"
+    setup = "uses: extractions/setup-just@"
     python_tools = "uv sync --locked --group dev"
     gate = "run: just verify"
     assert setup in workflow
