@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      github-actions:
+        patterns: ["*"]
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      development-tools:
+        patterns: ["*"]
+  - package-ecosystem: uv
+    directory: /tools/protonup
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    # ProtonUp itself is a reviewed compatibility input; upgrades need a
+    # deliberate manifest/source review rather than an automatic version bump.
+    ignore:
+      - dependency-name: protonup

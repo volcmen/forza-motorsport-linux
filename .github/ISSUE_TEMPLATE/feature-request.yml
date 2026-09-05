@@ -1,0 +1,17 @@
+name: Improvement request
+description: Suggest a focused improvement to setup, usability, or documentation.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe your use case and the current obstacle.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the behavior you would like, including alternatives you considered.
+    validations:
+      required: true

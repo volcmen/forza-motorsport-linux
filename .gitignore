@@ -6,7 +6,5 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-/uv.lock
-!tools/protonup/uv.lock
 runtime/
 .local/

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Installation and troubleshooting
+    url: https://github.com/volcmen/forza-motorsport-linux/wiki
+    about: Start with the installation checkpoints and known symptoms.
+  - name: Report a security vulnerability privately
+    url: https://github.com/volcmen/forza-motorsport-linux/security/advisories/new
+    about: Do not publish exploits, credentials, or account data in an issue.

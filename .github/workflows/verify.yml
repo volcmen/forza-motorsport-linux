@@ -4,13 +4,27 @@ on:
   pull_request:
   push:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      - uses: extractions/setup-just@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.12.9"
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3
+        with:
+          just-version: "1.58.0"
       - name: Install shell tools
         run: |
           sudo apt-get update
@@ -18,6 +32,6 @@ jobs:
       - name: Provide executable target for unit verification
         run: install -Dm755 /bin/true "$HOME/.local/libexec/xodus-forza/xodus-service"
       - name: Install Python verification tools
-        run: uv sync --group dev
+        run: uv sync --locked --group dev
       - name: Verify repository
         run: just verify
