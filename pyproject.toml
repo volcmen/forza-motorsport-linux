@@ -11,4 +11,4 @@ target-version = "py311"
 pythonpath = ["."]
 
 [dependency-groups]
-dev = ["pytest>=9.0.3,<10", "reuse>=5,<6", "ruff>=0.12,<1"]
+dev = ["pytest>=9.0.3,<10", "reuse>=6.2.0,<7", "ruff>=0.16.6,<1"]
