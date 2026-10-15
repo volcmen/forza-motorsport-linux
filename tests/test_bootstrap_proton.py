@@ -505,6 +505,59 @@ def test_supported_installed_runtime_and_patched_targets_are_adopted(
     )
 
 
+def test_installed_runtime_is_checked_against_install_modes_not_archive_modes(
+    tmp_path: Path,
+) -> None:
+    # The real bundle declares the PE DLL as 0644 inside the archive, while
+    # install-runtime-components installs it as 0755.
+    manifest = fixture_manifest(tmp_path)
+    manifest = replace(
+        manifest,
+        artifacts=tuple(
+            replace(artifact, mode=0o644)
+            if artifact.relative_path == "runtime/xgameruntime.dll"
+            else artifact
+            for artifact in manifest.artifacts
+        ),
+    )
+    source = extracted_ge_fixture(tmp_path)
+    destination = tmp_path / FM_NAME
+    prepare_fm_tree(source, destination)
+    (destination / ".forza-bootstrap.json").unlink()
+    (destination / RUNTIME_DLL_PATH).write_bytes(RUNTIME_DLL)
+    (destination / RUNTIME_DLL_PATH).chmod(0o755)
+    (destination / RUNTIME_SO_PATH).write_bytes(RUNTIME_SO)
+    (destination / RUNTIME_SO_PATH).chmod(0o755)
+
+    assert inspect_existing_fm(destination, manifest) is ToolDisposition.ADOPTED
+
+    (destination / RUNTIME_DLL_PATH).chmod(0o644)
+    with pytest.raises(BootstrapError, match="existing compatibility tool conflicts"):
+        inspect_existing_fm(destination, manifest)
+
+
+def test_runtime_install_modes_match_the_runtime_installer_roles() -> None:
+    import importlib.machinery
+    import importlib.util
+
+    tool = Path(__file__).resolve().parents[1] / "scripts/install-runtime-components"
+    loader = importlib.machinery.SourceFileLoader("runtime_installer_modes", str(tool))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    installer = importlib.util.module_from_spec(spec)
+    loader.exec_module(installer)
+    installed = {
+        role["destination_relative"]: role["target_mode"]
+        for role in installer.ROLES.values()
+        if role["destination_root"] == "compat-tool"
+    }
+
+    assert {
+        proton_module._MANAGED_RUNTIME_TARGETS[bundle_path]: mode
+        for bundle_path, mode in proton_module._RUNTIME_INSTALL_MODES.items()
+    } == installed
+
+
 def test_unknown_existing_tool_is_preserved(tmp_path: Path) -> None:
     destination = tmp_path / FM_NAME
     destination.mkdir()

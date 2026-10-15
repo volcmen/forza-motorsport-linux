@@ -393,6 +393,60 @@ def test_finish_binds_and_executes_all_children_in_order(tmp_path: Path) -> None
         assert stat.S_IMODE((transaction / name).stat().st_mode) == 0o600
 
 
+def test_finish_validates_later_boundaries_with_its_own_runtime_child(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    seen: list[str | None] = []
+    validate = fixture.operations.validate_prefix
+
+    def recording(context: FinishContext) -> PrefixInspection:
+        seen.append(context.state.child_runtime_transaction)
+        return validate(context)
+
+    fixture.context = replace(
+        fixture.context,
+        operations=replace(fixture.operations, validate_prefix=recording),
+    )
+
+    state = fixture.run()
+
+    assert state.phase is BootstrapPhase.READY_TO_ATTEMPT
+    assert seen[-2:] == ["b" * 24, "b" * 24]
+    assert None in seen[:-2]
+
+
+def _write_runtime_child(host_root: Path, transaction_id: str, state: str) -> None:
+    transaction = (
+        host_root
+        / ".local/state/forza-motorsport-linux/runtime-transactions"
+        / transaction_id
+    )
+    transaction.mkdir(parents=True)
+    journal = transaction / "journal.json"
+    journal.write_text(
+        json.dumps({"transaction_id": transaction_id, "state": state}),
+        encoding="ascii",
+    )
+    journal.chmod(0o600)
+
+
+def test_runtime_child_probe_allows_only_the_named_unfinished_child(
+    tmp_path: Path,
+) -> None:
+    fixture = FinishFixture(tmp_path)
+    own = "b" * 24
+    _write_runtime_child(fixture.host.user_root, own, "installed")
+
+    coordinator_module._probe_runtime_children(fixture.host, own)
+    with pytest.raises(BootstrapError, match="unfinished runtime child"):
+        coordinator_module._probe_runtime_children(fixture.host)
+
+    _write_runtime_child(fixture.host.user_root, "c" * 24, "installed")
+    with pytest.raises(BootstrapError, match="unfinished runtime child"):
+        coordinator_module._probe_runtime_children(fixture.host, own)
+
+
 def test_finish_doctor_failure_retains_recovery_and_never_claims_ready(
     tmp_path: Path,
 ) -> None:

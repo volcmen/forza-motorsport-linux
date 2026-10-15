@@ -706,10 +706,17 @@ def _valid_tar_checksum(header: bytes) -> bool:
     return expected in {unsigned, signed}
 
 
-def _validate_raw_tar_name(header: bytes, typeflag: bytes) -> None:
-    name = header[0:100].split(b"\0", 1)[0]
-    prefix = header[345:500].split(b"\0", 1)[0]
-    raw = prefix + b"/" + name if prefix else name
+def _validate_raw_tar_name(
+    header: bytes, typeflag: bytes, long_name: bytes | None = None
+) -> None:
+    if long_name is not None:
+        # GNU tar truncates the header name to 100 bytes after a long-name
+        # record; the record holds the real name, which may cut after a "/".
+        raw = long_name
+    else:
+        name = header[0:100].split(b"\0", 1)[0]
+        prefix = header[345:500].split(b"\0", 1)[0]
+        raw = prefix + b"/" + name if prefix else name
     if typeflag == tarfile.DIRTYPE and raw.endswith(b"/"):
         raw = raw[:-1]
     parts = raw.split(b"/")
@@ -741,6 +748,7 @@ class _TarGuard:
         self._extension_payload_remaining = 0
         self._extension_kind: bytes | None = None
         self._extension_payload = bytearray()
+        self._long_name: bytes | None = None
         self._extension_total = 0
         self._extension_count = 0
         self._extension_depth = 0
@@ -814,7 +822,8 @@ class _TarGuard:
         if typeflag == tarfile.GNUTYPE_SPARSE:
             raise BootstrapError("sparse archive metadata is forbidden")
         if typeflag not in _TAR_EXTENSION_TYPES:
-            _validate_raw_tar_name(header, typeflag)
+            _validate_raw_tar_name(header, typeflag, self._long_name)
+            self._long_name = None
         size = _tar_number(header[124:136])
         padded_size = (
             (size + _TAR_BLOCK_SIZE - 1) // _TAR_BLOCK_SIZE
@@ -845,6 +854,8 @@ class _TarGuard:
             payload = bytes(self._extension_payload)
             if b"GNU.sparse." in payload or b"SCHILY.realsize" in payload:
                 raise BootstrapError("sparse archive metadata is forbidden")
+        elif self._extension_kind == b"L":
+            self._long_name = bytes(self._extension_payload).split(b"\0", 1)[0]
         self._extension_kind = None
         self._extension_payload_remaining = 0
         self._extension_payload.clear()
@@ -1768,8 +1779,14 @@ def verify_bundle_root(root: Path, manifest: BootstrapManifest) -> VerifiedBundl
 
 
 def _remove_directory_contents(directory_fd: int) -> None:
-    with os.scandir(directory_fd) as entries:
-        names = [entry.name for entry in entries]
+    # As in _walk_tree, list through a new open description: a staging
+    # descriptor held since before extraction can miss later entries on Btrfs.
+    scan_fd = os.open(".", _DIRECTORY_FLAGS, dir_fd=directory_fd)
+    try:
+        with os.scandir(scan_fd) as entries:
+            names = [entry.name for entry in entries]
+    finally:
+        os.close(scan_fd)
     for name in names:
         info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         if stat.S_ISDIR(info.st_mode):
@@ -1830,6 +1847,45 @@ def _destination(path: str | os.PathLike[str]) -> Path:
     return Path("/", *parts)
 
 
+def _reuse_published_extraction(
+    parent_fd: int,
+    destination: Path,
+    scan: _ArchiveScan,
+    bundle_manifest: BootstrapManifest | None,
+) -> VerifiedBundle | Path:
+    """Reuse a tree published by an earlier run only if it still matches the archive."""
+    try:
+        root_fd = os.open(destination.name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except OSError:
+        raise BootstrapError("archive destination already exists") from None
+    try:
+        try:
+            binding = _verify_extracted_tree(root_fd, scan)
+            if bundle_manifest is None:
+                result: VerifiedBundle | Path = destination
+            else:
+                verified = verify_bundle_root(destination, bundle_manifest)
+                result = VerifiedBundle(
+                    destination,
+                    verified.manifest_sha256,
+                    verified.artifacts,
+                )
+            rebound = _verify_extracted_tree(root_fd, scan)
+        except (BootstrapError, OSError):
+            raise BootstrapError(
+                f"archive destination already exists and does not match the archive: {destination}"
+            ) from None
+        if (
+            rebound.root_identity[:6] != binding.root_identity[:6]
+            or rebound.member_identities != binding.member_identities
+            or not _name_matches_directory(parent_fd, destination.name, root_fd)
+        ):
+            raise BootstrapError("archive destination changed during verification")
+        return result
+    finally:
+        os.close(root_fd)
+
+
 def _extract_and_publish(
     archive: _BoundArchive,
     destination: Path,
@@ -1850,7 +1906,12 @@ def _extract_and_publish(
         except FileNotFoundError:
             pass
         else:
-            raise BootstrapError("archive destination already exists")
+            # A published tree is only ever renamed into place after full
+            # verification, so an earlier run's tree that still verifies is
+            # the same tree this extraction would publish.
+            return _reuse_published_extraction(
+                parent_fd, destination, first_scan, bundle_manifest
+            )
         for _ in range(100):
             candidate = f".{destination.name}.{secrets.token_hex(12)}.stage"
             try:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import io
 import os
 import subprocess
@@ -1044,6 +1045,79 @@ def test_archive_rejects_excessive_extension_depth(tmp_path: Path) -> None:
         inspect_tar(archive, policy(total=2 * 1024 * 1024))
 
 
+def _exhaust_directory_offset(directory_fd: int) -> None:
+    """Leave the shared directory offset at end, as a stale Btrfs view would."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.fdopendir.argtypes = (ctypes.c_int,)
+    libc.fdopendir.restype = ctypes.c_void_p
+    libc.readdir.argtypes = (ctypes.c_void_p,)
+    libc.readdir.restype = ctypes.c_void_p
+    libc.closedir.argtypes = (ctypes.c_void_p,)
+    stream = libc.fdopendir(os.dup(directory_fd))
+    assert stream
+    try:
+        while libc.readdir(stream):
+            pass
+    finally:
+        libc.closedir(stream)
+
+
+def test_remove_directory_contents_sees_entries_added_after_open(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    descriptor = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        (stage / "item").write_bytes(b"payload")
+        (stage / "nested").mkdir()
+        (stage / "nested/item").write_bytes(b"payload")
+        _exhaust_directory_offset(descriptor)
+        assert os.listdir(descriptor) == []
+        # CPython rewinds a descriptor after listing it, so go stale again.
+        _exhaust_directory_offset(descriptor)
+
+        artifacts_module._remove_directory_contents(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert list(stage.iterdir()) == []
+
+
+def make_gnu_long_name_tar(tmp_path: Path, name: str) -> Path:
+    directory = tarfile.TarInfo("root")
+    directory.type = tarfile.DIRTYPE
+    directory.mode = 0o755
+    member = tarfile.TarInfo(name)
+    member.mode = 0o644
+    member.size = 7
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w", format=tarfile.GNU_FORMAT) as archive:
+        archive.addfile(directory)
+        archive.addfile(member, io.BytesIO(b"payload"))
+    path = tmp_path / "gnu-long-name.tar"
+    path.write_bytes(output.getvalue())
+    return path
+
+
+def test_archive_validates_gnu_long_name_not_its_truncated_header(
+    tmp_path: Path,
+) -> None:
+    # The 100-byte header copy ends at a "/", as in GE-Proton11-3's wine-mono gac.
+    directory = "root/" + "d" * 94 + "/"
+    assert len(directory) == 100
+    archive = make_gnu_long_name_tar(tmp_path, directory + "item.dll")
+
+    inspect_tar(archive, policy())
+
+
+def test_archive_rejects_unsafe_gnu_long_name(tmp_path: Path) -> None:
+    archive = make_gnu_long_name_tar(tmp_path, "root/" + "d" * 100 + "/../item")
+
+    with pytest.raises(BootstrapError, match="unsafe archive member"):
+        inspect_tar(archive, policy())
+
+
 def test_archive_rejects_raw_directory_alias_before_tarfile_normalizes_it(
     tmp_path: Path,
 ) -> None:
@@ -1170,6 +1244,41 @@ def test_extract_bundle_verifies_then_atomically_publishes(tmp_path: Path) -> No
         "bundle.tar.zst",
         "published",
     ]
+
+
+def test_extract_bundle_reuses_a_matching_tree_from_an_earlier_run(
+    tmp_path: Path,
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    destination = tmp_path / "published"
+    first = extract_bundle(archive, destination, manifest)
+    identity = (destination / "bin/tool").stat().st_ino
+
+    second = extract_bundle(archive, destination, manifest)
+
+    assert second == first
+    assert (destination / "bin/tool").stat().st_ino == identity
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "bundle.tar.zst",
+        "published",
+    ]
+
+
+def test_extract_bundle_preserves_a_mismatched_tree_from_an_earlier_run(
+    tmp_path: Path,
+) -> None:
+    archive, manifest, _manifest_data = bundle_archive(tmp_path)
+    destination = tmp_path / "published"
+    extract_bundle(archive, destination, manifest)
+    tool = destination / "bin/tool"
+    tool.chmod(0o755 | 0o200)
+    tool.write_bytes(b"tampered")
+    tool.chmod(0o755)
+
+    with pytest.raises(BootstrapError, match="does not match the archive"):
+        extract_bundle(archive, destination, manifest)
+
+    assert tool.read_bytes() == b"tampered"
 
 
 @pytest.mark.parametrize(
@@ -1702,6 +1811,27 @@ def test_extract_ge_accepts_declared_relative_contained_links(
         assert (destination / "lib/link").stat().st_ino == (
             destination / "bin/target"
         ).stat().st_ino
+
+
+def test_extract_ge_reuses_a_matching_tree_from_an_earlier_run(
+    tmp_path: Path,
+) -> None:
+    root = "GE-Proton11-3"
+    archive = make_tar(
+        tmp_path,
+        [
+            TarEntry(root, "directory", mode=0o755),
+            TarEntry(f"{root}/bin", "directory", mode=0o755),
+            TarEntry(f"{root}/bin/target", "file", b"target", 0o755),
+            TarEntry(f"{root}/bin/link", "symlink", link_target="target"),
+        ],
+        suffix=".tar.gz",
+    )
+    destination = tmp_path / "ge"
+    assert extract_ge(archive, destination, root) == destination
+
+    assert extract_ge(archive, destination, root) == destination
+    assert (destination / "bin/link").read_bytes() == b"target"
 
 
 @pytest.mark.parametrize(

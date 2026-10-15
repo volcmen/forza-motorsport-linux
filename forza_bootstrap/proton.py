@@ -59,6 +59,12 @@ _MANAGED_RUNTIME_TARGETS = {
     "runtime/xgameruntime.dll": ("files/lib/wine/x86_64-windows/xgameruntime.dll"),
     "runtime/xgameruntime.so": "files/lib/wine/x86_64-unix/xgameruntime.so",
 }
+# Modes install-runtime-components writes for the runtime targets (its ROLES
+# table). The bundle manifest's modes describe the archive members instead.
+_RUNTIME_INSTALL_MODES = {
+    "runtime/xgameruntime.dll": 0o755,
+    "runtime/xgameruntime.so": 0o755,
+}
 _TREE_EXCLUDES = frozenset(
     {
         _MARKER,
@@ -597,7 +603,7 @@ def _validate_managed_targets(root_fd: int, manifest: BootstrapManifest | None) 
             not isinstance(artifact.sha256, str)
             or digest != artifact.sha256
             or size != artifact.size
-            or mode != artifact.mode
+            or mode != _RUNTIME_INSTALL_MODES[bundle_path]
         ):
             raise BootstrapError("managed compatibility-tool target is unsupported")
 

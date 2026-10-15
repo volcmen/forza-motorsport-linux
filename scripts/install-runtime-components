@@ -1144,7 +1144,9 @@ def require_service_and_game_inactive() -> None:
     )
     if result.returncode == 0:
         raise RuntimeInstallError("xodus-forza.service is active")
-    if result.returncode != 3:
+    # 3 is inactive and 4 is no such unit, as on a fresh install before this
+    # installer adds it; Prepare's preflight accepts the same pair.
+    if result.returncode not in {3, 4}:
         raise RuntimeInstallError("cannot prove xodus-forza.service is inactive")
     patterns = (
         b"forza_steamworks_release_final.exe",

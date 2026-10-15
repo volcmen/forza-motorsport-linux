@@ -1357,6 +1357,27 @@ def test_mutation_refuses_the_launcher_lock_and_active_service(tmp_path: Path):
     assert "service is active" in failed.stderr.lower()
 
 
+@pytest.mark.parametrize(("status", "installs"), ((4, True), (1, False), (5, False)))
+def test_install_treats_only_a_missing_service_unit_as_inactive(
+    tmp_path: Path, status: int, installs: bool
+):
+    fixture = setup_fixture(tmp_path)
+    plan_digest = lock_and_plan(fixture)
+    fixture["fake_systemctl"].write_text(  # type: ignore[union-attr]
+        f'#!/bin/sh\n[ "${{2:-}}" = daemon-reload ] && exit 0\nexit {status}\n',
+        encoding="ascii",
+    )
+
+    result = run_tool(fixture, "install", "--plan-sha256", plan_digest, check=False)
+
+    if installs:
+        assert result.returncode == 0, result.stderr
+        assert "state=installed" in run_tool(fixture, "status").stdout
+    else:
+        assert result.returncode != 0
+        assert "cannot prove xodus-forza.service is inactive" in result.stderr
+
+
 def test_uninstall_user_holds_the_launcher_lock_and_service_safety_gate(
     tmp_path: Path,
 ):

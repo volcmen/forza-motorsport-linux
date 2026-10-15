@@ -48,7 +48,12 @@ from forza_bootstrap.proton import (
     ToolInspection,
 )
 from forza_bootstrap.snapshot import FileRecord, Snapshot
-from forza_bootstrap.state import BootstrapPhase, load_unfinished_transaction
+from forza_bootstrap.state import (
+    BootstrapPhase,
+    create_transaction,
+    load_unfinished_transaction,
+    transition,
+)
 
 
 def sha256(data: bytes) -> str:
@@ -1218,6 +1223,22 @@ def test_preflight_fails_closed_on_systemctl_errors(
         inspect_prepare(context)
 
     assert tree_manifest(tmp_path) == before
+
+
+@pytest.mark.parametrize("rolled_back", (False, True))
+def test_preflight_accepts_state_root_left_by_a_rolled_back_transaction(
+    tmp_path: Path, rolled_back: bool
+) -> None:
+    context, _calls = production_preflight_fixture(tmp_path)
+    state = create_transaction(context.host.state_root, "a" * 64)
+    if rolled_back:
+        state = transition(state, BootstrapPhase.NEW, BootstrapPhase.ROLLING_BACK)
+        transition(state, BootstrapPhase.ROLLING_BACK, BootstrapPhase.ROLLED_BACK)
+        inspection = inspect_prepare(context)
+        assert inspection.tool_disposition is ToolDisposition.ABSENT
+    else:
+        with pytest.raises(BootstrapError, match="requires resume support"):
+            inspect_prepare(context)
 
 
 @pytest.mark.parametrize("kind", ("state", "cache"))

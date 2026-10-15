@@ -71,6 +71,7 @@ from .state import (
     BootstrapPhase,
     BootstrapState,
     create_transaction,
+    load_latest_transaction_read_only,
     load_transaction,
     load_unfinished_transaction,
     transition,
@@ -715,7 +716,8 @@ def _probe_forza_processes(probe: HostProbe) -> None:
             raise BootstrapError("Forza Motorsport process is active")
 
 
-def _probe_runtime_children(host: ResolvedHost) -> None:
+def _probe_runtime_children(host: ResolvedHost, allowed: str | None = None) -> None:
+    """Reject unfinished runtime children other than *allowed*, this bootstrap's own."""
     root = host.user_root / ".local/state/forza-motorsport-linux/runtime-transactions"
     try:
         root_fd = os.open(root, _DIRECTORY)
@@ -742,7 +744,7 @@ def _probe_runtime_children(host: ResolvedHost) -> None:
             raise BootstrapError("cannot inspect runtime child transactions")
 
         for name in entries:
-            if name == "artifact-evidence.json":
+            if name == "artifact-evidence.json" or name == allowed:
                 continue
             transaction_fd: int | None = None
             journal_fd: int | None = None
@@ -805,16 +807,15 @@ def _probe_existing_bootstrap_state(
         info = os.fstat(descriptor)
         if stat.S_IMODE(info.st_mode) != 0o700:
             raise OSError
-        entries = tuple(os.listdir(descriptor))
     except (OSError, BootstrapError):
         raise BootstrapError("bootstrap state root is unsafe") from None
     finally:
         if descriptor is not None:
             os.close(descriptor)
-    significant = [
-        entry for entry in entries if entry not in {".bootstrap.lock", ".journal.lock"}
-    ]
-    if significant:
+    # Lock files and a rolled-back transaction leave a fresh Prepare valid,
+    # matching the "./setup bootstrap" next action reported for ROLLED_BACK.
+    latest = load_latest_transaction_read_only(host.state_root)
+    if latest is not None and latest.phase is not BootstrapPhase.ROLLED_BACK:
         raise BootstrapError("unfinished bootstrap transaction requires resume support")
 
 
@@ -1988,7 +1989,7 @@ def validate_prefix(context: FinishContext) -> PrefixInspection:
     _validate_app_manifest(context.host.app_manifest)
     _probe_xodus_service(context.probe)
     _probe_forza_processes(context.probe)
-    _probe_runtime_children(context.host)
+    _probe_runtime_children(context.host, context.state.child_runtime_transaction)
     inspection = _validate_prefix_tree(context)
     tool = inspect_fm(context.host.compatibility_tools / _FM_NAME, context.manifest)
     if (
@@ -3187,6 +3188,9 @@ def _finish_under_lease(
         "runtime-installed",
         **({"child_runtime_transaction": child} if child is not None else {}),
     )
+    # Later prefix validation must accept this bootstrap's own child, which
+    # stays unfinished until acceptance; resume binds its state the same way.
+    context = replace(context, state=state)
     _record(operations, "runtime-install")
     _require_finish_lease(context)
     operations.runtime_status(context, inputs.runtime, child)
