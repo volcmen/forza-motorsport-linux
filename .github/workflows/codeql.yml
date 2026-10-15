@@ -40,7 +40,6 @@ jobs:
       - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           category: /language:${{ matrix.language }}
-          # Analyze before migration, then enable uploads after disabling default
-          # setup. GitHub rejects advanced uploads while default setup is active.
-          # Required CodeQL results remain a merge gate throughout the transition.
-          upload: ${{ vars.CODEQL_ADVANCED_ENABLED == 'true' }}
+          # Default setup is disabled. Fork PRs do not receive repository vars,
+          # so uploads must not depend on a repository-variable migration gate.
+          upload: true
