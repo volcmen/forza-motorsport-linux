@@ -12,15 +12,15 @@ service integration.
 **[Open the wiki →](https://github.com/volcmen/forza-motorsport-linux/wiki)**
 
 Start with **[Install](https://github.com/volcmen/forza-motorsport-linux/wiki/Install)**, then **[Play and verify](https://github.com/volcmen/forza-motorsport-linux/wiki/Play-and-verify)**.
-The wiki tracks installation status, SteamOS investigation, checkpoints, and
+The wiki tracks the experimental preview, SteamOS qualification, checkpoints, and
 recovery. The code and exact-version manifests stay in this repository.
 
 ## Before you start
 
 - **Steam edition only:** Forza Motorsport, AppID 2440510.
-- **Bootstrap target:** Arch Linux x86_64, native Steam, game in the primary library.
-- **Fresh installs are currently blocked:** v0.2.0 downloads stock GE-Proton, which lacks required FM Wine fixes. See [issue #7](https://github.com/volcmen/forza-motorsport-linux/issues/7) and the [Install status](https://github.com/volcmen/forza-motorsport-linux/wiki/Install).
-- **SteamOS / Steam Deck:** support is in development. Run `./setup platform-check` for read-only native Steam diagnostics, including additional libraries. See [Steam Deck](https://github.com/volcmen/forza-motorsport-linux/wiki/Steam-Deck) for current limits and validation status.
+- **Preview target:** Arch Linux or SteamOS x86_64 with native Steam; one unambiguous primary or additional game library.
+- **Experimental v0.3 preview:** a complete custom Proton tool, separate user bundle, SteamOS Flatpak login/overlay, and recoverable `./setup composed` workflow. Follow [Install](https://github.com/volcmen/forza-motorsport-linux/wiki/Install). The old v0.2.0 fresh-download path remains blocked.
+- **SteamOS / Steam Deck:** installer and runtime qualification use an installed QEMU SteamOS guest. Physical Deck gameplay is unverified. Run `./setup platform-check` for read-only diagnostics and read the [evidence and limits](https://github.com/volcmen/forza-motorsport-linux/wiki/Steam-Deck).
 - **Bring your own licensed Microsoft threading DLL.** Microsoft binaries are not distributed.
 - **Tested in-game:** the maintainer's existing custom FM setup worked on one desktop. That historical result does not establish fresh v0.2 bootstrap or Steam Deck success. The detailed dated matrix covers v0.1; see [Evidence](https://github.com/volcmen/forza-motorsport-linux/wiki/Evidence-and-history).
 - **Incoming invite notifications are not supported.** Explicit Xbox Invite/Join is a separate feature.

@@ -28,8 +28,18 @@ protection or scanner check was bypassed to merge the contributor work.
 
 This review does not constitute an exhaustive vulnerability audit of Wine,
 Proton, all native/transitive dependencies, the SDK base image, or proprietary
-Microsoft binaries. The experimental custom Proton archive is not published as
-an approved release. Its remaining integration and device checks are explicit.
+Microsoft binaries. Later work on the same date qualified an experimental composed
+preview; its [build](composed-preview-build-2026-10-15.md) and
+[validation record](composed-preview-validation-2026-10-15.md) supersede the initial
+artifact-readiness status. Real account/game and physical-device checks remain open.
+
+The preview also includes the owned-fork
+[Xodus dependency fixes](https://github.com/volcmen/xodus/pull/1).
+The [683-package Rust registry audit](composed-xodus-osv-2026-10-15.json) retains
+the RSA timing advisory and a compile-time maintenance advisory. Private RSA
+signing now uses OpenSSL; the RSA crate itself is not claimed patched. GLib's
+affected string iterator has a reviewed source backport with optimized regression
+tests. These results must not be confused with the zero-findings Python audit.
 
 The fresh-download and fingerprint issues remain tracked in
 [#7](https://github.com/volcmen/forza-motorsport-linux/issues/7) and

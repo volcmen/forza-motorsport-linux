@@ -1,5 +1,7 @@
 # Custom Proton build and async regression — 2026-10-15
 
+Later work: [composed preview build and packaging](composed-preview-build-2026-10-15.md) and [SteamOS lifecycle qualification](composed-preview-validation-2026-10-15.md). This record remains historical.
+
 **Experimental build completed; not an approved installer artifact or gameplay result.**
 The build is retained locally under the distinct name `GE-Proton11-3-FM-test`.
 No installed compatibility tool or game prefix was replaced. No binary release or
