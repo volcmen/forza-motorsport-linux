@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from forza_bootstrap.manifest import load_bootstrap_manifest
+from forza_bootstrap.manifest import (
+    load_bootstrap_manifest,
+    load_composed_bundle_manifest,
+)
 from forza_bootstrap.model import (
     BootstrapError,
     canonical_json,
@@ -234,3 +237,23 @@ def test_canonical_plan_digest_is_stable_for_key_order() -> None:
 def test_canonical_json_rejects_nonfinite_numbers(value: float) -> None:
     with pytest.raises(ValueError):
         canonical_json({"value": value})
+
+
+def test_composed_bundle_is_separate_from_the_legacy_recovery_profile():
+    root = Path(__file__).resolve().parents[1] / "manifests"
+    composed = root / "composed-bundle-v1.toml"
+    legacy = root / "bootstrap-v1.toml"
+    assert load_composed_bundle_manifest(composed).profile == "composed-preview-v1"
+    assert load_bootstrap_manifest(legacy).profile == "legacy-v0.1"
+    with pytest.raises(BootstrapError, match="profile"):
+        load_bootstrap_manifest(composed)
+    with pytest.raises(BootstrapError, match="profile"):
+        load_composed_bundle_manifest(legacy)
+
+
+def test_composed_bundle_rejects_an_unreviewed_source(tmp_path):
+    root = Path(__file__).resolve().parents[1] / "manifests"
+    value = tomllib.loads((root / "composed-bundle-v1.toml").read_text())
+    value["sources"][0]["revision"] = "0" * 40
+    with pytest.raises(BootstrapError, match="sources disagree"):
+        load_composed_bundle_manifest(write_toml_fixture(tmp_path, value))

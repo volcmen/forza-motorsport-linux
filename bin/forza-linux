@@ -151,6 +151,7 @@ if [[ ${FORZA_RUNTIME_TESTING:-} == 1 && -n ${FORZA_RUNTIME_TEST_USER_ROOT:-} ]]
     transaction_user_root=$FORZA_RUNTIME_TEST_USER_ROOT
 fi
 python3 - "$transaction_user_root/.local/state/forza-motorsport-linux/runtime-transactions" <<'PY' || exit $?
+import hashlib
 import json
 import os
 import stat
@@ -160,6 +161,117 @@ state_path = sys.argv[1]
 directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 blocking_states = {"prepared", "installing", "rolling_back", "recovery_required"}
 known_states = blocking_states | {"installed", "accepted", "rolled_back", "runtime_restored"}
+
+def private_parent_json(path):
+    root = os.open("/", directory_flags)
+    try:
+        parts = path.split("/")[1:]
+        for part in parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=root)
+            os.close(root)
+            root = next_fd
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 65536):
+                raise RuntimeError("composed parent record is unsafe")
+            data = os.read(fd, 65537)
+            def unique(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise RuntimeError("composed parent contains duplicate keys")
+                    result[key] = value
+                return result
+            return json.loads(data, object_pairs_hook=unique)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(root)
+
+def require_composed_parent(parent, journal):
+    base = state_path.rsplit("/", 1)[0] + "/bootstrap-v2"
+    active = private_parent_json(base + "/active.json")
+    if (not isinstance(active, dict) or set(active) != {"schema", "transaction_id"}
+        or type(active["schema"]) is not int or active["schema"] != 2
+        or active["transaction_id"] != parent["transaction_id"]):
+        raise RuntimeError("composed parent identity mismatch")
+    state = private_parent_json(base + "/" + parent["transaction_id"] + "/state.json")
+    if (not isinstance(state, dict)
+        or set(state) != {"schema", "transaction_id", "manifest_sha256", "prepare_plan_sha256", "finish_plan_sha256", "phase"}
+        or type(state["schema"]) is not int or state["schema"] != 2
+        or state["transaction_id"] != parent["transaction_id"]
+        or state["manifest_sha256"] != parent["manifest_sha256"]
+        or state["phase"] != "READY_TO_ATTEMPT"
+        or any(not isinstance(state[key], str) or len(state[key]) != 64
+               or any(char not in "0123456789abcdef" for char in state[key])
+               for key in ("prepare_plan_sha256", "finish_plan_sha256"))):
+        raise RuntimeError("composed parent has not completed Finish")
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")).hexdigest()
+    transaction = base + "/" + parent["transaction_id"]
+    prepare = private_parent_json(transaction + "/prepare-plan.json")
+    finish = private_parent_json(transaction + "/finish-plan.json")
+    runtime = finish["runtime"]["document"]
+    if (digest(prepare) != state["prepare_plan_sha256"]
+        or digest(finish) != state["finish_plan_sha256"]
+        or finish["transaction_id"] != parent["transaction_id"]
+        or finish["manifest_sha256"] != parent["manifest_sha256"]
+        or runtime.get("version") != 3 or runtime.get("scope") != "user"
+        or runtime.get("parent") != parent or runtime.get("roots") != journal["roots"]
+        or digest(runtime) != finish["runtime"]["sha256"]
+        or digest(runtime) != journal.get("plan_sha256")):
+        raise RuntimeError("composed parent and child plans differ")
+    if journal["state"] not in {"installed", "accepted"}:
+        return
+    paths = {
+        "launcher-gate": ".local/bin/forza-linux",
+        "doctor": ".local/bin/forza-doctor",
+        "known-build-patcher": ".local/libexec/forza-motorsport-linux/patch-known-build",
+        "supported-builds": ".local/share/forza-motorsport-linux/supported-builds.toml",
+        "xodus-service": ".local/libexec/xodus-forza/xodus-service",
+        "xodus-cli": ".local/libexec/xodus-forza/xodus-cli",
+        "xodus-overlay": ".local/libexec/xodus-forza/xodus-overlay",
+        "systemd-unit": ".config/systemd/user/xodus-forza.service",
+    }
+    records = runtime["artifacts"]
+    if len(records) != len(paths) or {item["role"] for item in records} != set(paths):
+        raise RuntimeError("composed user role set differs")
+    expected = {}
+    for item in records:
+        role = item["role"]
+        mode = 0o644 if role in {"supported-builds", "systemd-unit"} else 0o755
+        if item["destination_root"] != "user" or item["destination_relative"] != paths[role] or item["target_mode"] != mode:
+            raise RuntimeError("composed user target differs")
+        expected[role] = (item["source_sha256"], mode)
+    paths["user-install-manifest"] = ".local/state/forza-motorsport-linux/install-manifest"
+    expected["user-install-manifest"] = (runtime["user_manifest"]["installed_sha256"], 0o600)
+    if len(journal["artifacts"]) != len(expected) or {
+        item["role"]: (item["installed_sha256"], item["installed_mode"]) for item in journal["artifacts"]
+    } != expected:
+        raise RuntimeError("composed installed records differ")
+    for role, relative in paths.items():
+        path = journal["roots"]["user"] + "/" + relative
+        fd = os.open("/", directory_flags)
+        try:
+            for part in path.split("/")[1:-1]:
+                child_fd = os.open(part, directory_flags, dir_fd=fd)
+                os.close(fd)
+                fd = child_fd
+            file_fd = os.open(path.split("/")[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            try:
+                info = os.fstat(file_fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != expected[role][1] or info.st_size > 128 * 1024 * 1024):
+                    raise RuntimeError("composed installed file has unsafe metadata")
+                with os.fdopen(os.dup(file_fd), "rb") as stream:
+                    if hashlib.file_digest(stream, "sha256").hexdigest() != expected[role][0]:
+                        raise RuntimeError("composed installed file changed")
+            finally:
+                os.close(file_fd)
+        finally:
+            os.close(fd)
 
 if not os.path.isabs(state_path):
     print("error: runtime transaction path is not absolute", file=sys.stderr)
@@ -205,11 +317,11 @@ try:
             version = journal.get("version")
             if (
                 type(version) is not int
-                or version not in {1, 2}
+                or version not in {1, 2, 3}
                 or journal.get("transaction_id") != transaction
             ):
                 raise RuntimeError("runtime transaction journal identity mismatch")
-            if version == 2:
+            if version in {2, 3}:
                 revisions = journal.get("source_revisions")
                 if (
                     not isinstance(journal.get("runtime_profile"), str)
@@ -229,6 +341,28 @@ try:
                     )
                 ):
                     raise RuntimeError("runtime transaction journal v2 schema is invalid")
+            if version == 3:
+                parent = journal.get("parent")
+                roots = journal.get("roots")
+                if (
+                    journal.get("scope") != "user"
+                    or not isinstance(parent, dict)
+                    or set(parent) != {"transaction_id", "manifest_sha256"}
+                    or any(
+                        not isinstance(parent[key], str)
+                        or len(parent[key]) != size
+                        or any(char not in "0123456789abcdef" for char in parent[key])
+                        for key, size in (("transaction_id", 24), ("manifest_sha256", 64))
+                    )
+                    or not isinstance(roots, dict)
+                    or set(roots) != {"user"}
+                    or roots["user"] != sys.argv[1].removesuffix(
+                        "/.local/state/forza-motorsport-linux/runtime-transactions"
+                    )
+                ):
+                    raise RuntimeError("runtime transaction journal v3 schema is invalid")
+                if journal.get("state") not in {"rolled_back"}:
+                    require_composed_parent(parent, journal)
             state = journal.get("state")
             if state not in known_states:
                 raise RuntimeError("runtime transaction journal has an unknown state")
@@ -240,7 +374,7 @@ try:
                 raise SystemExit(1)
         finally:
             os.close(transaction_fd)
-except (OSError, UnicodeDecodeError, json.JSONDecodeError, RuntimeError) as error:
+except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
     print(f"error: cannot validate runtime transaction state: {error}", file=sys.stderr)
     raise SystemExit(1)
 finally:

@@ -688,7 +688,7 @@ def _marker_value(root_fd: int, identity: ToolIdentity) -> dict[str, object]:
     }
 
 
-def _valid_recorded_targets(value: object) -> bool:
+def _valid_recorded_targets(value: object, *, composed: bool = False) -> bool:
     if not isinstance(value, dict):
         return False
     keys = set(value)
@@ -706,6 +706,8 @@ def _valid_recorded_targets(value: object) -> bool:
         for digest in value.values()
     ):
         return False
+    if composed:
+        return keys == patch_paths | runtime_paths
     supported = _supported_patch_hashes()
     return all(
         value[relative] in supported[name]
@@ -714,7 +716,7 @@ def _valid_recorded_targets(value: object) -> bool:
 
 
 def _read_identity(
-    root_fd: int, *, require_recorded_targets: bool = True
+    root_fd: int, *, require_recorded_targets: bool = True, allow_composed: bool = True
 ) -> ToolIdentity:
     vdf, _info = _read_regular_at(
         root_fd, _VDF, "compatibility-tool VDF", maximum_size=_MAX_VDF_SIZE
@@ -735,7 +737,18 @@ def _read_identity(
         "schema",
         "vdf_sha256",
     }
-    if not isinstance(value, dict) or set(value) != expected_keys:
+    if not isinstance(value, dict):
+        raise BootstrapError("compatibility-tool marker is invalid")
+    schema = value.get("schema")
+    if type(schema) is not int or schema not in {1, 2}:
+        raise BootstrapError("compatibility-tool marker is invalid")
+    if schema == 2:
+        if not allow_composed:
+            raise BootstrapError("legacy bootstrap cannot adopt a composed tool")
+        expected_keys.add("composition_profile")
+        if value.get("composition_profile") != "fm-composed-v1":
+            raise BootstrapError("compatibility-tool composition profile is invalid")
+    if set(value) != expected_keys:
         raise BootstrapError("compatibility-tool marker is invalid")
     identity = ToolIdentity(
         name=value.get("name"),
@@ -750,8 +763,7 @@ def _read_identity(
         identity.marker_sha256,
     )
     if (
-        value.get("schema") != 1
-        or identity.name != _FM_NAME
+        identity.name != _FM_NAME
         or identity.base_release != _BASE_RELEASE
         or any(
             not isinstance(digest, str)
@@ -761,8 +773,12 @@ def _read_identity(
         )
         or identity.vdf_sha256 != sha256_bytes(vdf)
         or identity.managed_tree_sha256
-        != _tree_digest(root_fd, excludes=_TREE_EXCLUDES)
-        or not _valid_recorded_targets(value.get("managed_targets"))
+        != _tree_digest(
+            root_fd, excludes=frozenset({_MARKER}) if schema == 2 else _TREE_EXCLUDES
+        )
+        or not _valid_recorded_targets(
+            value.get("managed_targets"), composed=schema == 2
+        )
         or (
             require_recorded_targets
             and value.get("managed_targets") != _managed_target_hashes(root_fd)
@@ -771,6 +787,120 @@ def _read_identity(
     ):
         raise BootstrapError("compatibility-tool marker is invalid")
     return identity
+
+
+def inspect_composed_fm(
+    path: Path, payload_sha256: str, marker_sha256: str
+) -> ToolInspection:
+    """Bind an approved complete tool, never interpreting it as a legacy build.
+
+    Both expected digests come from a reviewed release manifest, not from the
+    tool's self-described marker. No executable caches are excluded.
+    """
+    destination = _absolute_path(path, "composed compatibility tool")
+    for digest in (payload_sha256, marker_sha256):
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+        ):
+            raise BootstrapError("approved composed tool identity is invalid")
+    fd = _open_directory(destination, "composed compatibility tool")
+    try:
+        identity = _read_identity(fd)
+        marker, _ = _read_regular_at(fd, _MARKER, "composed marker", maximum_size=65536)
+        if (
+            json.loads(marker)["schema"] != 2
+            or identity.managed_tree_sha256 != payload_sha256
+            or identity.marker_sha256 != marker_sha256
+        ):
+            raise BootstrapError("composed tool does not match the approved release")
+        records = _scan_tree(fd)
+        if any(
+            "__pycache__" in str(record["path"]).split("/")
+            or str(record["path"]).endswith((".pyc", ".pyo"))
+            for record in records
+        ):
+            raise BootstrapError("composed tool contains executable bytecode caches")
+        tree_sha256 = sha256_bytes(canonical_json(records))
+        if _read_identity(fd) != identity or _tree_digest(fd) != tree_sha256:
+            raise BootstrapError("composed tool changed during inspection")
+        parent = _open_directory(destination.parent, "composed tool parent")
+        try:
+            if not _name_matches_directory(parent, destination.name, fd):
+                raise BootstrapError("composed tool changed during inspection")
+        finally:
+            os.close(parent)
+        return ToolInspection(ToolDisposition.ADOPTED, identity, tree_sha256)
+    finally:
+        os.close(fd)
+
+
+def prepare_composed_fm_tree(
+    extracted_tool: Path, stage: Path, payload_sha256: str, marker_sha256: str
+) -> ToolIdentity:
+    """Copy a complete approved artifact into independent destination staging.
+
+    Runtime and controller/storage fixes must already be composed into the
+    release artifact. This function never adopts, repairs or rehashes a tool.
+    """
+    source = _absolute_path(extracted_tool, "composed tool source")
+    destination = _absolute_path(stage, "composed tool stage")
+    if source == destination:
+        raise BootstrapError("composed tool staging paths conflict")
+    before = inspect_composed_fm(source, payload_sha256, marker_sha256)
+    parent_fd = _open_directory(destination.parent, "composed stage parent")
+    try:
+        if stat.S_IMODE(os.fstat(parent_fd).st_mode) != 0o700:
+            raise BootstrapError("composed stage parent is not private")
+        try:
+            os.stat(destination.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise BootstrapError("composed tool stage already exists")
+        # Keep the destination anchored to the opened private parent even if
+        # another process renames that directory while the copy is in progress.
+        anchored = Path(f"/proc/self/fd/{parent_fd}") / destination.name
+        shutil.copytree(source, anchored, symlinks=True, copy_function=shutil.copy2)
+        stage_fd = os.open(destination.name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+        try:
+            _sync_composed_tree(stage_fd)
+        finally:
+            os.close(stage_fd)
+        after = inspect_composed_fm(destination, payload_sha256, marker_sha256)
+        if (
+            after != before
+            or inspect_composed_fm(source, payload_sha256, marker_sha256) != before
+        ):
+            raise BootstrapError("composed tool changed while staging")
+        os.fsync(parent_fd)
+        assert after.identity is not None
+        return after.identity
+    finally:
+        os.close(parent_fd)
+
+
+def _sync_composed_tree(directory_fd: int) -> None:
+    """Make independently copied payload bytes durable before publication."""
+    for name in os.listdir(directory_fd):
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISLNK(info.st_mode):
+            continue
+        flags = _DIRECTORY_FLAGS if stat.S_ISDIR(info.st_mode) else _REGULAR_FLAGS
+        fd = os.open(name, flags, dir_fd=directory_fd)
+        try:
+            if _file_identity(info) != _file_identity(os.fstat(fd)):
+                raise BootstrapError("composed stage changed during sync")
+            if stat.S_ISDIR(info.st_mode):
+                _sync_composed_tree(fd)
+            elif stat.S_ISREG(info.st_mode):
+                os.fsync(fd)
+            else:
+                raise BootstrapError("composed stage contains a special file")
+        finally:
+            os.close(fd)
+    os.fsync(directory_fd)
 
 
 def protonup_argv(repo_root: Path, cache_root: Path) -> tuple[str, ...]:
@@ -985,7 +1115,9 @@ def inspect_existing_fm(path: Path, manifest: BootstrapManifest) -> ToolDisposit
         if marker_info is not None:
             if not stat.S_ISREG(marker_info.st_mode):
                 raise BootstrapError("existing compatibility tool conflicts")
-            _read_identity(root_fd, require_recorded_targets=False)
+            _read_identity(
+                root_fd, require_recorded_targets=False, allow_composed=False
+            )
         return ToolDisposition.ADOPTED
     except BootstrapError as error:
         if str(error) == "existing compatibility tool conflicts":
@@ -1019,9 +1151,7 @@ def inspect_fm(path: Path, manifest: BootstrapManifest) -> ToolInspection:
             )
             _vdf_identity(vdf, _FM_NAME)
             try:
-                marker_info = os.stat(
-                    _MARKER, dir_fd=root_fd, follow_symlinks=False
-                )
+                marker_info = os.stat(_MARKER, dir_fd=root_fd, follow_symlinks=False)
             except FileNotFoundError:
                 return ToolIdentity(
                     _FM_NAME,
@@ -1032,7 +1162,9 @@ def inspect_fm(path: Path, manifest: BootstrapManifest) -> ToolInspection:
                 )
             if not stat.S_ISREG(marker_info.st_mode):
                 raise BootstrapError("existing compatibility tool conflicts")
-            return _read_identity(root_fd, require_recorded_targets=False)
+            return _read_identity(
+                root_fd, require_recorded_targets=False, allow_composed=False
+            )
 
         identity = current_identity()
         tree_sha256 = _tree_digest(root_fd)
@@ -1130,6 +1262,7 @@ def publish_fm(stage: Path, destination: Path) -> PublishedToolRecord:
             published_digest,
         )
         os.fsync(target_parent_fd)
+        os.fsync(source_parent_fd)
         named_fd: int | None = None
         try:
             try:

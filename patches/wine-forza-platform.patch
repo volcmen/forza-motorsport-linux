@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+--- a/dlls/windows.gaming.input/provider.c
++++ b/dlls/windows.gaming.input/provider.c
+@@ -177,8 +177,8 @@
+     if (FAILED(hr = IGameControllerProvider_get_HardwareVendorId( &impl->IGameControllerProvider_iface, &vid ))) return hr;
+     if (FAILED(hr = IGameControllerProvider_get_HardwareProductId( &impl->IGameControllerProvider_iface, &pid ))) return hr;
+ 
+-    /* CW-Bug-Id: #23185 Emulate Steam Input native hooks for native SDL */
+-    if (vid == 0x28de && pid == 0x11ff)
++    /* Physical XInput devices also need the stable provider identifier.
++     * The XI_ path validation below still rejects non-XInput devices. */
+     {
+         const WCHAR *tmp;
+         char serial[256];
+--- a/dlls/mountmgr.sys/device.c
++++ b/dlls/mountmgr.sys/device.c
+@@ -1592,6 +1592,31 @@
+ 
+         break;
+     }
++    case StorageDeviceTrimProperty:
++    {
++        DEVICE_TRIM_DESCRIPTOR *d = irp->AssociatedIrp.SystemBuffer;
++
++        if (irpsp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(STORAGE_DESCRIPTOR_HEADER))
++            status = STATUS_INVALID_PARAMETER;
++        else
++        {
++            if (irpsp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(*d))
++            {
++                d->Version = d->Size = sizeof(*d);
++                irp->IoStatus.Information = sizeof(STORAGE_DESCRIPTOR_HEADER);
++            }
++            else
++            {
++                /* Match the existing Forza storage compatibility override. */
++                memset( d, 0, sizeof(*d) );
++                d->Version = d->Size = sizeof(*d);
++                d->TrimEnabled = TRUE;
++                irp->IoStatus.Information = sizeof(*d);
++            }
++            status = STATUS_SUCCESS;
++        }
++        break;
++    }
+     case StorageDeviceSeekPenaltyProperty:
+     {
+         DEVICE_SEEK_PENALTY_DESCRIPTOR *d = irp->AssociatedIrp.SystemBuffer;
+--- a/include/ntddstor.h
++++ b/include/ntddstor.h
+@@ -260,6 +260,12 @@
+     UCHAR                       AdditionalParameters[1];
+ } STORAGE_PROPERTY_QUERY, *PSTORAGE_PROPERTY_QUERY;
+ 
++typedef struct _DEVICE_TRIM_DESCRIPTOR {
++    DWORD Version;
++    DWORD Size;
++    BOOLEAN TrimEnabled;
++} DEVICE_TRIM_DESCRIPTOR, *PDEVICE_TRIM_DESCRIPTOR;
++
+ typedef struct _DEVICE_SEEK_PENALTY_DESCRIPTOR {
+     DWORD                       Version;
+     DWORD                       Size;

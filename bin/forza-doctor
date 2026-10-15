@@ -15,6 +15,7 @@ else
 fi
 
 steam_root="$data_root/Steam"
+library_root=$steam_root
 prefix_root="$steam_root/steamapps/compatdata/$app_id/pfx/drive_c"
 runtime_root="$home_root/.local"
 patcher="$runtime_root/libexec/forza-motorsport-linux/patch-known-build"
@@ -23,6 +24,8 @@ systemctl_bin=${FORZA_SYSTEMCTL:-systemctl}
 busctl_bin=${FORZA_BUSCTL:-busctl}
 df_bin=${FORZA_DF:-df}
 failed=0
+composed_wgi=''
+composed_mountmgr=''
 
 report() {
     local state=$1 check=$2 detail=$3
@@ -58,6 +61,7 @@ report_directory() {
 }
 
 has_kde_secret_service_provider() {
+    local service_name=${1:-org.freedesktop.secrets}
     local candidate='' check_executable data_dir executable line name='' exec=''
     local active_section=0 invalid_key=0 name_count=0 exec_count=0 section_count=0
     local -a data_dirs=("$data_root")
@@ -71,9 +75,9 @@ has_kde_secret_service_provider() {
         done
     fi
     for data_dir in "${data_dirs[@]}"; do
-        if [[ -e $data_dir/dbus-1/services/org.freedesktop.secrets.service ||
-            -L $data_dir/dbus-1/services/org.freedesktop.secrets.service ]]; then
-            candidate="$data_dir/dbus-1/services/org.freedesktop.secrets.service"
+        if [[ -e $data_dir/dbus-1/services/$service_name.service ||
+            -L $data_dir/dbus-1/services/$service_name.service ]]; then
+            candidate="$data_dir/dbus-1/services/$service_name.service"
             break
         fi
     done
@@ -106,7 +110,7 @@ has_kde_secret_service_provider() {
         esac
     done <"$candidate"
     ((section_count == 1 && name_count == 1 && exec_count == 1 && !invalid_key)) || return 1
-    [[ $name == org.freedesktop.secrets ]] || return 1
+    [[ $name == "$service_name" ]] || return 1
     if ! executable=$(
         python3 - "$exec" <<'PY'
 import shlex
@@ -133,7 +137,19 @@ PY
 }
 
 inspect_target() {
-    local target=$1 state
+    local target=$1 state expected=''
+    case "${target##*/}" in
+        windows.gaming.input.dll) expected=$composed_wgi ;;
+        mountmgr.sys) expected=$composed_mountmgr ;;
+    esac
+    if [[ -n $expected ]]; then
+        if [[ -f $target && ! -L $target ]] && state=$(sha256sum -- "$target") && [[ ${state%% *} == "$expected" ]]; then
+            printf 'patched\n'
+        else
+            printf 'unknown\n'
+        fi
+        return
+    fi
     if [[ ! -x $patcher || ! -f $manifest ]]; then
         printf 'unknown\n'
         return
@@ -177,7 +193,7 @@ report_known_builds() {
 
 report_disk_space() {
     local available_kb
-    available_kb=$("$df_bin" -Pk "$steam_root" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    available_kb=$("$df_bin" -Pk "$library_root" 2>/dev/null | awk 'NR == 2 { print $4 }')
     if [[ ! $available_kb =~ ^[0-9]+$ ]]; then
         report FAIL 'current free disk space' unavailable
     elif ((available_kb >= 104857600)); then
@@ -189,14 +205,138 @@ report_disk_space() {
     fi
 }
 
-report_file 'Steam AppID manifest' "$steam_root/steamapps/appmanifest_$app_id.acf"
+# A composed installation records the actual Steam library and prefix. Read only
+# private, checksum-bound plans; these hashes never authorize binary patching.
+if [[ -e $home_root/.local/state/forza-motorsport-linux/bootstrap-v2/active.json ||
+    -L $home_root/.local/state/forza-motorsport-linux/bootstrap-v2/active.json ]]; then
+    if composed_paths=$(
+        python3 - "$home_root" "$manifest" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tomllib
+
+def unique(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate record key")
+        value[key] = item
+    return value
+
+def read(path, private=True):
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        file = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        try:
+            info = os.fstat(file)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_size > 262144
+                or (private and stat.S_IMODE(info.st_mode) != 0o600)):
+                raise ValueError("unsafe record metadata")
+            return os.read(file, 262145)
+        finally:
+            os.close(file)
+    finally:
+        os.close(fd)
+
+def record(path):
+    return json.loads(read(path), object_pairs_hook=unique)
+
+def digest(value):
+    data = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    return hashlib.sha256(data).hexdigest()
+
+def binding(value):
+    path = Path(value["path"])
+    if not path.is_absolute() or ".." in path.parts or any(ord(c) < 32 for c in str(path)):
+        raise ValueError("invalid recorded path")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid() or (info.st_dev, info.st_ino) != (value["device"], value["inode"]):
+            raise ValueError("recorded directory changed")
+    finally:
+        os.close(fd)
+    return path
+
+try:
+    home = Path(sys.argv[1])
+    base = home / ".local/state/forza-motorsport-linux/bootstrap-v2"
+    active = record(base / "active.json")
+    if set(active) != {"schema", "transaction_id"} or type(active["schema"]) is not int or active["schema"] != 2:
+        raise ValueError("invalid active record")
+    token = active["transaction_id"]
+    if not isinstance(token, str) or re.fullmatch(r"[a-f0-9]{24}", token) is None:
+        raise ValueError("invalid transaction identity")
+    transaction = base / token
+    state = record(transaction / "state.json")
+    if state["schema"] != 2 or state["transaction_id"] != token:
+        raise ValueError("invalid parent identity")
+    if state["phase"] == "ROLLED_BACK":
+        raise SystemExit(0)
+    if state["phase"] not in {"INSTALLING_FINISH", "READY_TO_ATTEMPT"}:
+        raise ValueError("composed Finish is incomplete")
+    known = tomllib.loads(read(Path(sys.argv[2]), private=False).decode())["composed"]
+    if state["manifest_sha256"] != known["manifest_sha256"]:
+        raise ValueError("unrecognized composed release")
+    prepare = record(transaction / "prepare-plan.json")
+    finish = record(transaction / "finish-plan.json")
+    if (digest(prepare) != state["prepare_plan_sha256"] or digest(finish) != state["finish_plan_sha256"]
+        or prepare["manifest_sha256"] != state["manifest_sha256"]
+        or finish["manifest_sha256"] != state["manifest_sha256"] or finish["transaction_id"] != token):
+        raise ValueError("recorded plan changed")
+    roots = prepare["bindings"]
+    if binding(roots["home"]) != home:
+        raise ValueError("recorded home changed")
+    steam, library = binding(roots["steam"]), binding(roots["library"])
+    prefix = binding(finish["prefix"])
+    if binding(finish["system32"]) != prefix / "drive_c/windows/system32":
+        raise ValueError("recorded prefix changed")
+    for key in ("windows_gaming_input_sha256", "mountmgr_sha256"):
+        if re.fullmatch(r"[a-f0-9]{64}", known[key]) is None:
+            raise ValueError("invalid read-only module hash")
+    for value in (steam, library, prefix / "drive_c", known["windows_gaming_input_sha256"], known["mountmgr_sha256"]):
+        print(value)
+except (OSError, ValueError, KeyError, TypeError) as error:
+    print(f"composed records: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+    ); then
+        if [[ -n $composed_paths ]]; then
+            mapfile -t composed_values <<<"$composed_paths"
+            steam_root=${composed_values[0]}
+            library_root=${composed_values[1]}
+            prefix_root=${composed_values[2]}
+            composed_wgi=${composed_values[3]}
+            composed_mountmgr=${composed_values[4]}
+            report PASS 'composed installation records' 'reviewed plans and directory identities'
+        fi
+    else
+        report FAIL 'composed installation records' 'incomplete, changed, or unsafe'
+    fi
+fi
+
+report_file 'Steam AppID manifest' "$library_root/steamapps/appmanifest_$app_id.acf"
 report_directory "$tool_name directory" "$steam_root/compatibilitytools.d/$tool_name"
 report_executable 'Xodus service binary' "$runtime_root/libexec/xodus-forza/xodus-service"
 report_file 'user-supplied xgameruntime.dll.threading' "$prefix_root/windows/system32/xgameruntime.dll.threading"
 
 if "$busctl_bin" --user --quiet status org.freedesktop.secrets >/dev/null 2>&1; then
     report PASS 'Secret Service' 'D-Bus owner is available'
-elif has_kde_secret_service_provider; then
+elif has_kde_secret_service_provider || has_kde_secret_service_provider org.kde.secretservicecompat; then
     report PASS 'Secret Service' 'activatable KDE provider is available'
 else
     report FAIL 'Secret Service' 'no owner or activatable KDE provider'

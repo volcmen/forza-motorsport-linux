@@ -981,6 +981,8 @@ def setup_fixture(tmp_path: Path, *, input_kind: str = "source") -> dict[str, ob
 def run_tool(
     fixture: dict[str, object], operation: str, *extra: str, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
+    if "--user-only" in extra:
+        extra = (*extra, "--parent-transaction", "d" * 24, "--parent-manifest-sha256", "e" * 64)
     result = subprocess.run(
         [str(TOOL), operation, *fixture["common"], *extra],  # type: ignore[list-item]
         env=fixture["env"],  # type: ignore[arg-type]
@@ -1239,6 +1241,117 @@ def test_install_and_rollback_preserve_hash_mode_and_old_manifest(tmp_path: Path
         ]  # type: ignore[index,operator]
     assert (fixture["user_root"] / MANIFEST).read_bytes() == fixture["old_manifest"]  # type: ignore[operator]
     assert "state=rolled_back" in run_tool(fixture, "status").stdout
+
+
+def test_user_only_transaction_preserves_read_only_tool_through_rollback(
+    tmp_path: Path,
+):
+    fixture = setup_fixture(tmp_path, input_kind="bundle")
+    compat = fixture["compat_root"]
+    for path in sorted(compat.rglob("*"), reverse=True):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    compat.chmod(0o555)
+    before = tree_snapshot(compat)
+    try:
+        full_plan = lock_and_plan(fixture)
+        scoped_plan = lock_and_plan(fixture, "--user-only")
+        assert scoped_plan != full_plan
+        rejected = run_tool(
+            fixture, "install", "--user-only", "--plan-sha256", full_plan, check=False
+        )
+        assert rejected.returncode != 0
+        run_tool(fixture, "install", "--user-only", "--plan-sha256", scoped_plan)
+        journal_path = next(fixture["evidence"].parent.glob("*/journal.json"))
+        journal = json.loads(journal_path.read_text())
+        assert journal["version"] == 3
+        assert journal["scope"] == "user"
+        assert journal["roots"] == {"user": str(fixture["user_root"])}
+        assert journal["parent"] == {"transaction_id": "d" * 24, "manifest_sha256": "e" * 64}
+        assert all(item["destination_root"] == "user" for item in journal["artifacts"])
+        assert tree_snapshot(compat) == before
+        run_tool(fixture, "rollback")
+        assert tree_snapshot(compat) == before
+        for relative in PAYLOADS:
+            assert (fixture["user_root"] / relative).read_bytes() == fixture[
+                "old_user"
+            ][relative]
+        assert (fixture["user_root"] / MANIFEST).read_bytes() == fixture["old_manifest"]
+    finally:
+        compat.chmod(0o755)
+        for path in compat.rglob("*"):
+            if path.is_dir():
+                path.chmod(0o755)
+
+
+def test_accepted_user_only_transaction_cannot_restore_a_wine_runtime(tmp_path: Path):
+    fixture = setup_fixture(tmp_path)
+    before = tree_snapshot(fixture["compat_root"])
+    plan = lock_and_plan(fixture, "--user-only")
+    run_tool(fixture, "install", "--user-only", "--plan-sha256", plan)
+    run_tool(fixture, "accept")
+    journal_path = next(fixture["evidence"].parent.glob("*/journal.json"))
+    journal_before = journal_path.read_bytes()
+    failed = run_tool(fixture, "restore-runtime", check=False)
+    assert failed.returncode != 0
+    assert "no Wine runtime to restore" in failed.stderr
+    assert journal_path.read_bytes() == journal_before
+    assert tree_snapshot(fixture["compat_root"]) == before
+
+
+@pytest.mark.parametrize("change", ("legacy-version", "legacy-roles", "scope", "parent", "tool-root"))
+def test_user_only_recovery_rejects_reinterpreted_journal(tmp_path: Path, change: str):
+    fixture = setup_fixture(tmp_path)
+    plan = lock_and_plan(fixture, "--user-only")
+    run_tool(fixture, "install", "--user-only", "--plan-sha256", plan)
+    journal_path = next(fixture["evidence"].parent.glob("*/journal.json"))
+    journal = json.loads(journal_path.read_text())
+    if change == "legacy-version":
+        journal["version"] = 2
+    elif change == "legacy-roles":
+        journal["artifacts"][-1]["role"] = "xgameruntime-pe64"
+    elif change == "scope":
+        journal["scope"] = "all"
+    elif change == "parent":
+        journal["parent"]["transaction_id"] = "../escape"
+    else:
+        journal["roots"]["compat-tool"] = str(fixture["compat_root"])
+    journal_path.write_text(json.dumps(journal))
+    before = tree_snapshot(fixture["compat_root"])
+    failed = run_tool(fixture, "rollback", check=False)
+    assert failed.returncode != 0
+    assert "journal" in failed.stderr or "legacy transaction" in failed.stderr
+    assert tree_snapshot(fixture["compat_root"]) == before
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        f"{operation}:{role}"
+        for operation in ("stage-write", "backup-rename", "install-rename")
+        for role in TRANSACTION_ROLES
+        if role not in {"xgameruntime-pe64", "xgameruntime-unix64"}
+    ],
+)
+def test_user_only_crash_recovery_never_writes_the_tool(tmp_path: Path, boundary: str):
+    fixture = setup_fixture(tmp_path)
+    before = tree_snapshot(fixture["compat_root"])
+    plan = lock_and_plan(fixture, "--user-only")
+    fixture["env"].update(
+        {
+            "FORZA_RUNTIME_INTERRUPT_AT": boundary,
+            "FORZA_RUNTIME_INTERRUPT_MODE": "crash",
+        }
+    )
+    interrupted = run_tool(
+        fixture, "install", "--user-only", "--plan-sha256", plan, check=False
+    )
+    assert interrupted.returncode == 99
+    assert tree_snapshot(fixture["compat_root"]) == before
+    fixture["env"].pop("FORZA_RUNTIME_INTERRUPT_AT")
+    fixture["env"].pop("FORZA_RUNTIME_INTERRUPT_MODE")
+    run_tool(fixture, "rollback")
+    assert_original_install_restored(fixture)
+    assert tree_snapshot(fixture["compat_root"]) == before
 
 
 def test_failed_manager_reload_keeps_recovery_launcher_until_retry(tmp_path: Path):
@@ -1746,3 +1859,16 @@ def test_existing_transaction_is_bound_to_its_original_roots(tmp_path: Path):
     assert failed.returncode != 0
     assert "root arguments" in failed.stderr.lower()
     assert "state=installed" in run_tool(fixture, "status").stdout
+
+
+@pytest.mark.parametrize("kind", ["source", "bundle"])
+def test_composed_profile_cannot_authorize_a_full_runtime_plan(tmp_path, kind):
+    fixture = setup_fixture(tmp_path, input_kind=kind)
+    before = tree_snapshot(fixture["compat_root"])
+    rejected = run_tool(
+        fixture, "plan", "--runtime-profile", "composed-preview-v1", check=False
+    )
+    assert rejected.returncode != 0
+    assert "user-only bundle plan" in rejected.stderr
+    assert tree_snapshot(fixture["compat_root"]) == before
+    assert not fixture["evidence"].exists()

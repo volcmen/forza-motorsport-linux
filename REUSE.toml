@@ -16,6 +16,7 @@ path = [
     "evidence/**",
     "justfile",
     "manifests/**",
+    "patches/**",
     "pyproject.toml",
     "scripts/**",
     "tests/**",
