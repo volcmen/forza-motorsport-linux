@@ -190,6 +190,59 @@ def test_missing_steamos_gui_dependencies_are_reported(layout, monkeypatch):
     assert {name for name, state in native.items() if state == "FAIL"} == missing
 
 
+@pytest.mark.skipif(os.getuid() == 0, reason="root bypasses directory write permissions")
+def test_unwritable_game_is_reported_without_changing_permissions_or_files(layout):
+    env, steam = layout
+    game = install(steam)
+    original_mode = game.stat().st_mode
+    payload = game / "game.bin"
+    payload.write_bytes(b"preserve the installed game")
+    game.chmod(0o555)
+    try:
+        result = check.inspect_platform(env)
+        access = next(
+            row for row in result["checks"] if row["check"] == "game directory access"
+        )
+        assert access["state"] == "FAIL"
+        assert game.stat().st_mode & 0o777 == 0o555
+        assert list(game.iterdir()) == [payload]
+        assert payload.read_bytes() == b"preserve the installed game"
+        assert env["HOME"] not in json.dumps(result)
+    finally:
+        game.chmod(original_mode)
+    result = check.inspect_platform(env)
+    assert next(
+        row["state"]
+        for row in result["checks"]
+        if row["check"] == "game directory access"
+    ) == "PASS"
+
+
+def test_free_space_uses_game_filesystem_when_library_is_on_another_mount(
+    layout, monkeypatch
+):
+    env, steam = layout
+    game = install(steam)
+    gib = 1024**3
+    usage_type = type(shutil.disk_usage(steam))
+
+    def disk_usage(path):
+        free = 7 if path == game else 100
+        return usage_type(200 * gib, (200 - free) * gib, free * gib)
+
+    monkeypatch.setattr(check.shutil, "disk_usage", disk_usage)
+    result = check.inspect_platform(env)
+    space = {
+        row["check"]: (row["state"], row["detail"])
+        for row in result["checks"]
+        if "free space" in row["check"]
+    }
+    assert space == {
+        "game filesystem free space": ("WARN", "7 GiB available"),
+        "Steam tools free space": ("PASS", "100 GiB available"),
+    }
+
+
 def test_setup_platform_check_works_without_uv_or_writes_to_checkout(tmp_path):
     root = Path(__file__).parents[1]
     checkout = tmp_path / "checkout"
