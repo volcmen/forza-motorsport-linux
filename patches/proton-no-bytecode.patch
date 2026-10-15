@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Apply to GE-Proton11-3 before building the complete Forza tool.
+# Preserve exact integrity checks: prevent new executable caches instead of ignoring them.
+diff --git a/proton b/proton
+--- a/proton
++++ b/proton
+@@ -1,4 +1,11 @@
+ #!/usr/bin/env python3
+ 
++# The published Forza tool is immutable; caches belong outside its payload.
++# Set this before importing any tool-local modules, including filelock.
++import sys
++sys.dont_write_bytecode = True
++import os
++os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
++
+ #script to launch Wine with the correct environment
+ 

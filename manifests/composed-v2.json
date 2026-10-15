@@ -1,0 +1,39 @@
+{
+  "app_id": "2440510",
+  "archive": {
+    "expected_root": "GE-Proton11-3-FM",
+    "filename": "GE-Proton11-3-FM-composed-preview.tar.gz",
+    "sha256": "59792b23cfc40474764c379c4c91c255781afe8fc949f5aa614b012034784b76",
+    "size": 535060917
+  },
+  "base_release": "GE-Proton11-3",
+  "flatpak": {
+    "app_id": "io.github.volcmen.ForzaXodus",
+    "branch": "preview",
+    "commit": "6f9e61dec27206b8aa16d12d78d7e6efc1ad01b143d54e6ac52271c3bfae13bf",
+    "runtime": "org.gnome.Platform/x86_64/50",
+    "sha256": "6fe9f55eb3f0bb3d0581081c125fba67c2133eb95e16150d2fa36aa56737f9b0",
+    "size": 4859264,
+    "tested_runtime_commit": "0bd5091046708e64bc882e8349877cfbae713f6a1e2d0487a5f10af820a2d792"
+  },
+  "ge_revision": "8c8003f7f5473d883fbe1bc7ac070c79955754e8",
+  "managed_targets": {
+    "files/lib/wine/x86_64-unix/xgameruntime.so": "e52c132d2e719e1515266259b6816198f7603812b451833b76bc0da57b68901c",
+    "files/lib/wine/x86_64-windows/mountmgr.sys": "ce6bf99ba7f411becd2cd2157a783ed0251ed88e436f519304ef39638fa58d80",
+    "files/lib/wine/x86_64-windows/windows.gaming.input.dll": "7f8f7dba81cab6857eb4660d7901ed76d36cca61f1490b6fd84f47b33d2ef97d",
+    "files/lib/wine/x86_64-windows/xgameruntime.dll": "6c4dbedca0b01cbf1fa917634a50a163e0b0a19a818fba50b88b26fe1d05f67e"
+  },
+  "marker_sha256": "49230355004c6e54d5390fedef6ed9050aac20ae50db9ab52a934106593d73ff",
+  "patches": {
+    "proton-no-bytecode.patch": "27f427552468e2818a4959394c70ee24e2174a5393af135fb2a107c39b77c7ae",
+    "wine-forza-platform.patch": "484e7687e265f727854da7813587bcda6a04dc69bc6d519cb8c269a4e3c10265"
+  },
+  "payload_sha256": "9aac5a22d1c8596c3d78a5a734ba4dcc3580d3054f8543dae1661f9c6e9c7ed8",
+  "profile": "fm-composed-v1",
+  "schema": 2,
+  "sdk_image": "registry.gitlab.steamos.cloud/proton/steamrt4/sdk/x86_64@sha256:97526b794ce1a9bed5f891084462260b3a02399569f7438a3a57b5a253001db9",
+  "source_date_epoch": 1792022400,
+  "status": "candidate",
+  "tool_name": "GE-Proton11-3-FM",
+  "wine_revision": "3ecd0e8a9b8e7e0a754b09595d1aa70c9b1e1301"
+}

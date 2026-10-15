@@ -296,6 +296,32 @@ write_v2_runtime_transaction() {
     chmod 600 -- "$root/$transaction/journal.json"
 }
 
+write_v3_runtime_transaction() {
+    write_v2_runtime_transaction "$1"
+    python3 - "$FORZA_RUNTIME_TEST_USER_ROOT" <<'PYTEST'
+import json
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+p = root / ".local/state/forza-motorsport-linux/runtime-transactions/aaaaaaaaaaaaaaaaaaaaaaaa/journal.json"
+v = json.loads(p.read_text())
+v.update(version=3, scope="user", roots={"user": str(root)},
+         parent={"transaction_id": "d" * 24, "manifest_sha256": "e" * 64})
+p.write_text(json.dumps(v))
+base = root / ".local/state/forza-motorsport-linux/bootstrap-v2"
+transaction = base / ("d" * 24)
+transaction.mkdir(parents=True, exist_ok=True, mode=0o700)
+active = base / "active.json"
+active.write_text(json.dumps({"schema": 2, "transaction_id": "d" * 24}))
+active.chmod(0o600)
+state = transaction / "state.json"
+state.write_text(json.dumps({"schema": 2, "transaction_id": "d" * 24,
+    "manifest_sha256": "e" * 64, "phase": "READY_TO_ATTEMPT",
+    "prepare_plan_sha256": "a" * 64, "finish_plan_sha256": "b" * 64}))
+state.chmod(0o600)
+PYTEST
+}
+
 write_runtime_journal() {
     local journal=$1
     local root="$FORZA_RUNTIME_TEST_USER_ROOT/.local/state/forza-motorsport-linux/runtime-transactions"
@@ -425,6 +451,53 @@ test_refuses_v2_unfinished_runtime_transactions_before_service_start() {
         run_launcher_capturing_stderr /usr/bin/true
         assert_eq "$status" 1 || return 1
         assert_contains "$output" "requires recovery ($transaction_state)" || return 1
+        assert_log_not_contains 'start xodus-forza.service' || return 1
+        tear_down
+        set_up
+    done
+}
+
+test_v3_runtime_state_blocks_recovery_and_allows_installed_validation() {
+    local transaction_state
+    for transaction_state in prepared installing rolling_back recovery_required; do
+        write_v3_runtime_transaction "$transaction_state"
+        run_launcher_capturing_stderr /usr/bin/true
+        assert_eq "$status" 1 || return 1
+        assert_contains "$output" "requires recovery ($transaction_state)" || return 1
+        assert_log_not_contains 'start xodus-forza.service' || return 1
+    done
+    write_v3_runtime_transaction installed
+    run_launcher /usr/bin/true
+    assert_eq "$status" 0 || return 1
+    assert_log_contains 'start xodus-forza.service'
+}
+
+test_v3_runtime_state_rejects_missing_parent_binding() {
+    write_v2_runtime_transaction installed
+    local journal="$FORZA_RUNTIME_TEST_USER_ROOT/.local/state/forza-motorsport-linux/runtime-transactions/aaaaaaaaaaaaaaaaaaaaaaaa/journal.json"
+    sed -i 's/"version":2/"version":3/' "$journal"
+    run_launcher_capturing_stderr /usr/bin/true
+    assert_eq "$status" 1 || return 1
+    assert_contains "$output" 'v3 schema is invalid' || return 1
+    assert_log_not_contains 'start xodus-forza.service'
+}
+
+test_v3_runtime_requires_completed_private_parent() {
+    local change state_path
+    for change in unfinished missing mode symlink; do
+        write_v3_runtime_transaction installed
+        state_path="$FORZA_RUNTIME_TEST_USER_ROOT/.local/state/forza-motorsport-linux/bootstrap-v2/dddddddddddddddddddddddd/state.json"
+        case "$change" in
+            unfinished) sed -i 's/READY_TO_ATTEMPT/INSTALLING_FINISH/' "$state_path" ;;
+            missing) rm -- "$state_path" ;;
+            mode) chmod 644 -- "$state_path" ;;
+            symlink)
+                mv -- "$state_path" "$state_path.saved"
+                ln -s -- "$state_path.saved" "$state_path"
+                ;;
+        esac
+        run_launcher_capturing_stderr /usr/bin/true
+        assert_eq "$status" 1 || return 1
         assert_log_not_contains 'start xodus-forza.service' || return 1
         tear_down
         set_up

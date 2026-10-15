@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Package the pinned GUI binaries for SteamOS without installing a host app."""
+
+import argparse
+import datetime
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from forza_bootstrap.artifacts import verify_bundle_root
+from forza_bootstrap.manifest import load_bootstrap_manifest
+
+APP = "io.github.volcmen.ForzaXodus"
+RUNTIME = "org.gnome.Platform/x86_64/50"
+EPOCH = 1792022400
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--bundle-root", type=Path, required=True)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="new output directory; existing paths are refused",
+    )
+    args = parser.parse_args()
+    repository = Path(__file__).resolve().parents[1]
+    manifest = load_bootstrap_manifest(repository / "manifests/bootstrap-v1.toml")
+    source = args.bundle_root.resolve(strict=True)
+    verify_bundle_root(source, manifest)
+    output = args.output.absolute()
+    output.mkdir(mode=0o700)  # Never overwrite an earlier package or host application.
+    build = output / "build"
+    binary_dir = build / "files/bin"
+    binary_dir.mkdir(parents=True)
+    desktop_dir = build / "files/share/applications"
+    desktop_dir.mkdir(parents=True)
+    license_dir = build / "files/share/licenses/forza-xodus"
+    license_dir.mkdir(parents=True)
+    shutil.copyfile(source / "licenses/xodus.txt", license_dir / "COPYING")
+    shutil.copyfile(source / "provenance/sources.json", license_dir / "sources.json")
+    for name in ("xodus-cli", "xodus-overlay"):
+        shutil.copyfile(source / "bin" / name, binary_dir / name)
+        (binary_dir / name).chmod(0o755)
+    (build / "metadata").write_text(
+        f"[Application]\nname={APP}\nruntime={RUNTIME}\ncommand=xodus-forza\n"
+    )
+    (binary_dir / "xodus-forza").write_text(
+        "#!/bin/sh\nset -eu\n"
+        'if [ "$#" -eq 0 ]; then set -- login; fi\n'
+        "# Activate the existing desktop wallet; never change its settings.\n"
+        'if [ "$1" != overlay ]; then\n'
+        "  owns_secrets() { gdbus call --session --dest org.freedesktop.DBus "
+        "--object-path /org/freedesktop/DBus --method org.freedesktop.DBus.NameHasOwner "
+        "org.freedesktop.secrets 2>/dev/null | grep -q true; }\n"
+        "  if ! owns_secrets; then\n"
+        "    gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus "
+        "--method org.freedesktop.DBus.StartServiceByName org.freedesktop.secrets 0 >/dev/null 2>&1 || "
+        "gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus "
+        "--method org.freedesktop.DBus.StartServiceByName org.kde.secretservicecompat 0 >/dev/null 2>&1 || true\n"
+        "  fi\n"
+        '  if ! owns_secrets; then printf "%s\\n" "Secret Service unavailable: enable the KWallet Secret Service interface in KDE settings." >&2; exit 1; fi\n'
+        "fi\n"
+        'case "$1" in\n'
+        '  login|forza-social|forza-invite|forza-join) exec /app/bin/xodus-cli "$@" ;;\n'
+        '  overlay) shift; exec /app/bin/xodus-overlay "$@" ;;\n'
+        '  *) printf "%s\\n" "Expected login, overlay, forza-social, forza-invite or forza-join" >&2; exit 2 ;;\n'
+        "esac\n"
+    )
+    (binary_dir / "xodus-forza").chmod(0o755)
+    (desktop_dir / f"{APP}.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=Forza Xodus Login\n"
+        "Exec=xodus-forza login\nCategories=Game;\nTerminal=false\n"
+    )
+    subprocess.run(
+        [
+            "flatpak",
+            "build-finish",
+            "--share=network",
+            "--share=ipc",
+            "--socket=wayland",
+            "--socket=fallback-x11",
+            "--device=dri",
+            "--device=input",
+            "--talk-name=org.freedesktop.secrets",
+            "--talk-name=org.kde.secretservicecompat",
+            "--own-name=io.xodus.ForzaSocial",
+            "--filesystem=xdg-run/xodus.sock:ro",
+            str(build),
+        ],
+        check=True,
+    )
+    timestamp = datetime.datetime.fromtimestamp(EPOCH, datetime.UTC).isoformat()
+    repo = output / "repository"
+    subprocess.run(
+        [
+            "flatpak",
+            "build-export",
+            f"--timestamp={timestamp}",
+            str(repo),
+            str(build),
+            "preview",
+        ],
+        check=True,
+    )
+    bundle = output / "forza-xodus-preview.flatpak"
+    subprocess.run(
+        ["flatpak", "build-bundle", str(repo), str(bundle), APP, "preview"], check=True
+    )
+    # Recheck inputs after packaging so a concurrent replacement cannot be endorsed.
+    verify_bundle_root(source, manifest)
+    for name in ("xodus-cli", "xodus-overlay"):
+        expected = next(
+            item.sha256 for item in manifest.artifacts if item.logical_name == name
+        )
+        if hashlib.sha256((binary_dir / name).read_bytes()).hexdigest() != expected:
+            raise RuntimeError("packaged binary changed during the build")
+    receipt = {
+        "schema": 1,
+        "app_id": APP,
+        "branch": "preview",
+        "runtime": RUNTIME,
+        "source_date_epoch": EPOCH,
+        "bootstrap_manifest_sha256": manifest.sha256,
+        "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
+        "size": bundle.stat().st_size,
+        "permissions": (build / "metadata").read_text(),
+        "status": "candidate; account and physical Steam Deck validation required",
+    }
+    (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    print(bundle)
+
+
+if __name__ == "__main__":
+    main()

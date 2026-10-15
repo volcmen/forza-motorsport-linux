@@ -24,6 +24,7 @@ print_help() {
         '' \
         'Hybrid bootstrap:' \
         '  ./setup platform-check [--json] Read-only Arch/SteamOS and native Steam diagnostics' \
+        '  ./setup composed --help         Experimental complete-tool setup for Arch/SteamOS' \
         '  ./setup bootstrap              Prepare or resume the hybrid bootstrap' \
         '  ./setup bootstrap --check      Inspect durable state and managed paths; bootstrap --check is read-only' \
         '  ./setup bootstrap --rollback   Roll back the composed bootstrap transaction' \
@@ -239,6 +240,10 @@ run_install() {
 }
 
 case "${1:-}" in
+    composed)
+        shift
+        exec "$ROOT/scripts/forza-composed" "$@"
+        ;;
     bootstrap | snapshot | compare | platform-check)
         command=$1
         shift

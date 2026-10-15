@@ -17,3 +17,9 @@ edits = [
   { offset = 0x6b3f, before = "83f8070f85b0020000", after = "83e80783f80177b690" },
   { offset = 0x6f84, before = "c7460800000000", after = "803e080f944608" },
 ]
+
+# Read-only recognition for Doctor. These are not binary patch rules.
+[composed]
+manifest_sha256 = "1c6441d8fabf3e220fe0f82d6b17d26d73c7c336b0c5932e13eab90ab8895a2d"
+windows_gaming_input_sha256 = "7f8f7dba81cab6857eb4660d7901ed76d36cca61f1490b6fd84f47b33d2ef97d"
+mountmgr_sha256 = "ce6bf99ba7f411becd2cd2157a783ed0251ed88e436f519304ef39638fa58d80"
