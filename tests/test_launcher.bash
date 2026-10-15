@@ -196,6 +196,7 @@ stop_socket() {
 }
 start_xodus() {
     read_state
+    [[ $(<"$FAKE_SECRETS_STATE") == 1 ]] || return 69
     printf 'start xodus-forza.service\n' >> "$FAKE_LOG"
     [[ $state == active ]] && return 0
     if [[ ${FAKE_EXTERNAL_DURING_START:-0} == 1 && ! -e $FAKE_EXTERNAL_DURING_START_MARKER ]]; then
@@ -272,6 +273,37 @@ esac
 EOF
     chmod +x "$FAKE_SYSTEMCTL"
     export FORZA_SYSTEMCTL="$FAKE_SYSTEMCTL"
+
+    export FAKE_SECRETS_LOG="$TEST_ROOT/secrets.log"
+    export FAKE_SECRETS_STATE="$TEST_ROOT/secrets.state"
+    export FAKE_SECRETS_PROVIDER=org.freedesktop.secrets
+    export FAKE_SECRETS_QUERY_ERROR=0
+    export FAKE_SECRETS_NO_OWNER=0
+    : >"$FAKE_SECRETS_LOG"
+    printf '1\n' >"$FAKE_SECRETS_STATE"
+    export FORZA_BUSCTL="$TEST_ROOT/busctl"
+    cat >"$FORZA_BUSCTL" <<'EOF'
+#!/usr/bin/env bash
+set -u
+[[ ${1:-} == --user && ${2:-} == --timeout=5 && ${3:-} == call ]] || exit 64
+case "${7:-}" in
+    NameHasOwner)
+        [[ ${8:-} == s && ${9:-} == org.freedesktop.secrets ]] || exit 64
+        printf 'NameHasOwner\n' >>"$FAKE_SECRETS_LOG"
+        [[ $FAKE_SECRETS_QUERY_ERROR == 0 ]] || exit 1
+        if [[ $(<"$FAKE_SECRETS_STATE") == 1 ]]; then printf 'b true\n'; else printf 'b false\n'; fi
+        ;;
+    StartServiceByName)
+        [[ ${8:-} == su && ${10:-} == 0 ]] || exit 64
+        printf 'StartServiceByName %s\n' "${9:-}" >>"$FAKE_SECRETS_LOG"
+        [[ ${9:-} == "$FAKE_SECRETS_PROVIDER" ]] || exit 1
+        [[ $FAKE_SECRETS_NO_OWNER == 1 ]] || printf '1\n' >"$FAKE_SECRETS_STATE"
+        printf 'u 1\n'
+        ;;
+    *) exit 64 ;;
+esac
+EOF
+    chmod +x "$FORZA_BUSCTL"
 }
 
 write_runtime_transaction() {
@@ -919,6 +951,68 @@ test_completes_kwallet_pam_only_for_an_existing_socket() {
     assert_log_contains 'start plasma-kwallet-pam.service'
 }
 
+test_preserves_an_active_secret_service() {
+    run_launcher /usr/bin/true
+    assert_eq "$status" 0 || return 1
+    ! rg -q StartServiceByName "$FAKE_SECRETS_LOG" || fail 'active provider was activated again'
+}
+
+test_activates_standard_secret_service_before_xodus() {
+    printf '0\n' >"$FAKE_SECRETS_STATE"
+    run_launcher /usr/bin/true
+    assert_eq "$status" 0 || return 1
+    rg -Fq 'StartServiceByName org.freedesktop.secrets' "$FAKE_SECRETS_LOG" || return 1
+    ! rg -q org.kde.secretservicecompat "$FAKE_SECRETS_LOG" || return 1
+    assert_log_contains 'start xodus-forza.service'
+}
+
+test_activates_existing_kde_provider_after_a_cold_start() {
+    printf '0\n' >"$FAKE_SECRETS_STATE"
+    export FAKE_SECRETS_PROVIDER=org.kde.secretservicecompat
+    run_launcher /usr/bin/true
+    assert_eq "$status" 0 || return 1
+    rg -Fq 'StartServiceByName org.freedesktop.secrets' "$FAKE_SECRETS_LOG" || return 1
+    rg -Fq 'StartServiceByName org.kde.secretservicecompat' "$FAKE_SECRETS_LOG" || return 1
+    assert_eq "$(<"$FAKE_SECRETS_STATE")" 1 || return 1
+    assert_log_contains 'stop xodus-forza.service'
+}
+
+test_refuses_unavailable_secret_service_before_reservation() {
+    printf '0\n' >"$FAKE_SECRETS_STATE"
+    export FAKE_SECRETS_PROVIDER=unavailable
+    run_launcher_capturing_stderr touch "$TEST_ROOT/game-ran"
+    assert_eq "$status" 1 || return 1
+    assert_contains "$output" 'Secret Service unavailable' || return 1
+    assert_log_not_contains 'start xodus-forza.service' || return 1
+    assert_path_absent "$FAKE_PENDING_TOKEN" || return 1
+    assert_path_absent "$TEST_ROOT/game-ran"
+}
+
+test_refuses_secret_service_query_failure_without_activation() {
+    export FAKE_SECRETS_QUERY_ERROR=1
+    run_launcher_capturing_stderr /usr/bin/true
+    assert_eq "$status" 1 || return 1
+    assert_contains "$output" 'cannot query Secret Service' || return 1
+    assert_log_not_contains 'start xodus-forza.service' || return 1
+    ! rg -q StartServiceByName "$FAKE_SECRETS_LOG" || fail 'activated provider after failed query'
+}
+
+test_requires_secret_service_ownership_after_activation() {
+    printf '0\n' >"$FAKE_SECRETS_STATE"
+    export FAKE_SECRETS_NO_OWNER=1
+    run_launcher_capturing_stderr /usr/bin/true
+    assert_eq "$status" 1 || return 1
+    assert_contains "$output" 'Secret Service unavailable' || return 1
+    assert_log_not_contains 'start xodus-forza.service'
+}
+
+test_reuses_xodus_without_activating_a_secret_service() {
+    activate_preexisting_service
+    run_launcher /usr/bin/true
+    assert_eq "$status" 0 || return 1
+    [[ ! -s $FAKE_SECRETS_LOG ]] || fail 'modified provider for an unowned service'
+}
+
 test_stop_failure_does_not_mask_game_status() {
     export FAKE_STOP_STATUS=77
     run_launcher /usr/bin/bash -c 'exit 42'
@@ -978,6 +1072,13 @@ for test_name in \
     test_forwards_term_and_reaps_the_game_child \
     test_forwards_int_and_reaps_the_game_child \
     test_completes_kwallet_pam_only_for_an_existing_socket \
+    test_preserves_an_active_secret_service \
+    test_activates_standard_secret_service_before_xodus \
+    test_activates_existing_kde_provider_after_a_cold_start \
+    test_refuses_unavailable_secret_service_before_reservation \
+    test_refuses_secret_service_query_failure_without_activation \
+    test_requires_secret_service_ownership_after_activation \
+    test_reuses_xodus_without_activating_a_secret_service \
     test_stop_failure_does_not_mask_game_status; do
     run_test "$test_name"
 done
