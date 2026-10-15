@@ -4,6 +4,7 @@ set -u
 
 service_name=xodus-forza.service
 systemctl_bin=${FORZA_SYSTEMCTL:-systemctl}
+busctl_bin=${FORZA_BUSCTL:-busctl}
 runtime_dir=${XDG_RUNTIME_DIR:-}
 started_here=0
 started_invocation_id=
@@ -23,6 +24,43 @@ service_is_inactive() {
 
 service_invocation_id() {
     "$systemctl_bin" --user show --property=InvocationID --value "$service_name"
+}
+
+secret_service_has_owner() {
+    local owner
+    owner=$("$busctl_bin" --user --timeout=5 call org.freedesktop.DBus \
+        /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner \
+        s org.freedesktop.secrets 2>/dev/null) || return 2
+    case "$owner" in
+        'b true') return 0 ;;
+        'b false') return 1 ;;
+        *) return 2 ;;
+    esac
+}
+
+ensure_secret_service() {
+    local provider owner_status
+    secret_service_has_owner && return 0
+    owner_status=$?
+    if ((owner_status != 1)); then
+        printf 'error: cannot query Secret Service on the user session bus\n' >&2
+        return 1
+    fi
+    # Use the desktop's existing provider. SteamOS KDE exposes its activator
+    # under the compatibility name, even though it owns the standard name.
+    for provider in org.freedesktop.secrets org.kde.secretservicecompat; do
+        "$busctl_bin" --user --timeout=5 call org.freedesktop.DBus \
+            /org/freedesktop/DBus org.freedesktop.DBus StartServiceByName \
+            su "$provider" 0 >/dev/null 2>&1 || true
+        secret_service_has_owner && return 0
+        owner_status=$?
+        if ((owner_status != 1)); then
+            printf 'error: cannot query Secret Service on the user session bus\n' >&2
+            return 1
+        fi
+    done
+    printf 'error: Secret Service unavailable; enable your desktop wallet Secret Service interface and retry\n' >&2
+    return 1
 }
 
 token_file_matches() {
@@ -397,6 +435,7 @@ else
         printf 'error: cannot determine whether %s is active\n' "$service_name" >&2
         exit 1
     fi
+    ensure_secret_service || exit 1
     if [[ -S $socket_path ]]; then
         rm -f -- "$socket_path"
     fi

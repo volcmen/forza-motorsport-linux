@@ -2,8 +2,10 @@
 
 This record identifies the experimental v0.3.0-preview.1 artifacts. It supersedes
 artifact-readiness claims in the earlier test-build record, without changing its
-historical measurements. Account sign-in, an actual Steam game handoff, and
-physical Steam Deck gameplay remain unverified.
+historical measurements. At artifact-build time, account sign-in, an actual Steam
+game handoff, and physical Steam Deck gameplay were unverified. The later
+[real-account VM test](steamos-real-account-test-2026-10-15.md) records sign-in,
+game startup attempts, and their remaining limits.
 
 ## Inputs
 
