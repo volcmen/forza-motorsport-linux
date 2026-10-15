@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forza_bootstrap.artifacts import verify_bundle_root
-from forza_bootstrap.manifest import load_bootstrap_manifest
+from forza_bootstrap.manifest import load_composed_bundle_manifest
 
 APP = "io.github.volcmen.ForzaXodus"
 RUNTIME = "org.gnome.Platform/x86_64/50"
@@ -33,7 +33,7 @@ def main():
     )
     args = parser.parse_args()
     repository = Path(__file__).resolve().parents[1]
-    manifest = load_bootstrap_manifest(repository / "manifests/bootstrap-v1.toml")
+    manifest = load_composed_bundle_manifest(repository / "manifests/composed-bundle-v1.toml")
     source = args.bundle_root.resolve(strict=True)
     verify_bundle_root(source, manifest)
     output = args.output.absolute()

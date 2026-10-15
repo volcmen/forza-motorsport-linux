@@ -85,6 +85,11 @@ _APPROVED_SOURCES = (
         "a1548b1cf57371715d10b608bc81a77a188e40d4",
     ),
 )
+_COMPOSED_PROFILE = "composed-preview-v1"
+_APPROVED_COMPOSED_SOURCES = (
+    ("xodus", "https://github.com/volcmen/xodus", "850ec9477e00117960ca09ad38c6154acc56c16d"),
+    ("xgameruntime", "https://github.com/volcmen/wine-forza-motorsport", "3ecd0e8a9b8e7e0a754b09595d1aa70c9b1e1301"),
+)
 _APPROVED_BUILDER_BASE = (
     "docker.io/library/archlinux:base-devel@sha256:"
     "694da1fce635e3a14d90751941b08f02c500e8724682f7a00768e7152251ec34"
@@ -220,7 +225,9 @@ def _protonup(value: object) -> ProtonUpSpec:
     return ProtonUpSpec(version=version, project_relative=project_relative)
 
 
-def _sources(value: object, expected_revisions: Mapping[str, str]) -> tuple[SourceSpec, ...]:
+def _sources(
+    value: object, expected_revisions: Mapping[str, str], approved_sources=_APPROVED_SOURCES
+) -> tuple[SourceSpec, ...]:
     if not isinstance(value, list) or not value:
         raise BootstrapError("sources must be a non-empty array")
     sources: list[SourceSpec] = []
@@ -241,7 +248,7 @@ def _sources(value: object, expected_revisions: Mapping[str, str]) -> tuple[Sour
     if actual_revisions != dict(expected_revisions):
         raise BootstrapError("sources disagree with the active runtime profile")
     actual_sources = tuple((source.name, source.repository, source.revision) for source in sources)
-    if actual_sources != _APPROVED_SOURCES:
+    if actual_sources != approved_sources:
         raise BootstrapError("sources disagree with approved repository inputs")
     return tuple(sources)
 
@@ -303,7 +310,7 @@ def _artifacts(value: object) -> tuple[ArtifactSpec, ...]:
     return tuple(artifacts)
 
 
-def _runtime_profile(profile: str) -> Mapping[str, str]:
+def _runtime_profile(profile: str, *, composed: bool = False) -> Mapping[str, str]:
     try:
         data = tomllib.loads(_RUNTIME_PROFILE_PATH.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as error:
@@ -315,11 +322,13 @@ def _runtime_profile(profile: str) -> Mapping[str, str]:
     profiles = data["profiles"]
     if isinstance(version, bool) or version != 1 or not isinstance(active, str) or not isinstance(profiles, dict):
         raise BootstrapError("runtime profile manifest is invalid")
-    if profile != active:
+    if profile != (_COMPOSED_PROFILE if composed else active):
         raise BootstrapError("manifest profile disagrees with the active runtime profile")
     candidate = profiles.get(profile)
     if not isinstance(candidate, dict) or candidate.get("status") != "candidate":
         raise BootstrapError("runtime profile is not installable")
+    if composed and candidate.get("scope") != "user-only":
+        raise BootstrapError("composed runtime profile must be user-only")
     expected = {
         "xodus": candidate.get("xodus_revision"),
         "xgameruntime": candidate.get("xgameruntime_revision"),
@@ -330,7 +339,16 @@ def _runtime_profile(profile: str) -> Mapping[str, str]:
 
 
 def load_bootstrap_manifest(path: Path) -> BootstrapManifest:
-    """Load one complete, exact bootstrap trust manifest."""
+    """Load one complete, exact legacy bootstrap trust manifest."""
+    return _load_manifest(path, composed=False)
+
+
+def load_composed_bundle_manifest(path: Path) -> BootstrapManifest:
+    """Load the separate user-bundle profile without changing legacy recovery pins."""
+    return _load_manifest(path, composed=True)
+
+
+def _load_manifest(path: Path, *, composed: bool) -> BootstrapManifest:
     try:
         raw = path.read_bytes()
         data: Any = tomllib.loads(raw.decode("utf-8"))
@@ -353,7 +371,7 @@ def load_bootstrap_manifest(path: Path) -> BootstrapManifest:
     if host != _SUPPORTED_HOST:
         raise BootstrapError("unsupported host")
     profile = _string(root["profile"], "profile")
-    expected_revisions = _runtime_profile(profile)
+    expected_revisions = _runtime_profile(profile, composed=composed)
     ge = _download(root["ge"], "ge")
     if any(getattr(ge, field) != expected for field, expected in _APPROVED_GE.items()):
         raise BootstrapError("GE-Proton input disagrees with approved repository values")
@@ -365,7 +383,10 @@ def load_bootstrap_manifest(path: Path) -> BootstrapManifest:
         protonup=_protonup(root["protonup"]),
         ge=ge,
         bundle=_download(root["bundle"], "bundle"),
-        sources=_sources(root["sources"], expected_revisions),
+        sources=_sources(
+            root["sources"], expected_revisions,
+            _APPROVED_COMPOSED_SOURCES if composed else _APPROVED_SOURCES,
+        ),
         builder=_builder(root["builder"]),
         artifacts=_artifacts(root["artifacts"]),
         path=path,

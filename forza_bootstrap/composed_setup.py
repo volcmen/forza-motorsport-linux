@@ -38,7 +38,7 @@ from .coordinator import (
     _read_owned_regular,
     _validate_held_launcher_lock,
 )
-from .manifest import load_bootstrap_manifest
+from .manifest import load_composed_bundle_manifest
 from .model import BootstrapError, DownloadSpec, canonical_json, sha256_bytes
 from .platform_check import SteamLayout, discover_steam, duplicate_dll_groups
 from .safeio import (
@@ -123,6 +123,7 @@ def load_release(repository: Path) -> tuple[dict, str]:
         "patches",
         "flatpak",
         "archive",
+        "user_bundle_manifest_sha256",
     }
     if (
         not isinstance(value, dict)
@@ -134,7 +135,10 @@ def load_release(repository: Path) -> tuple[dict, str]:
         or value["status"] != "candidate"
         or value["tool_name"] != "GE-Proton11-3-FM"
         or value["base_release"] != "GE-Proton11-3"
-        or not all(_hash(value[key]) for key in ("payload_sha256", "marker_sha256"))
+        or not all(
+            _hash(value[key])
+            for key in ("payload_sha256", "marker_sha256", "user_bundle_manifest_sha256")
+        )
         or not isinstance(value["managed_targets"], dict)
         or set(value["managed_targets"])
         != set(_TARGETS) | {"files/lib/wine/x86_64-unix/xgameruntime.so"}
@@ -430,10 +434,12 @@ def prepare_plan(context: Context, archive: Path, bundle: Path) -> dict:
         raise BootstrapError(
             "Prepare requires 12 GiB free for private cache/recovery and 8 GiB on the Steam tool filesystem"
         )
-    legacy_manifest = load_bootstrap_manifest(
-        context.repository / "manifests/bootstrap-v1.toml"
+    user_bundle_manifest = load_composed_bundle_manifest(
+        context.repository / "manifests/composed-bundle-v1.toml"
     )
-    artifacts.verify_bundle_root(bundle, legacy_manifest)
+    if user_bundle_manifest.sha256 != context.release["user_bundle_manifest_sha256"]:
+        raise BootstrapError("composed user bundle manifest differs from the release")
+    artifacts.verify_bundle_root(bundle, user_bundle_manifest)
     if duplicate_dll_groups(context.layout.game_root):
         raise BootstrapError(
             "case-insensitive duplicate game DLLs require manual review"
@@ -445,7 +451,7 @@ def prepare_plan(context: Context, archive: Path, bundle: Path) -> dict:
         "archive": str(archive),
         "bundle": str(bundle),
         "helper_sha256": sha256_bytes(helper_data),
-        "legacy_manifest_sha256": legacy_manifest.sha256,
+        "user_bundle_manifest_sha256": user_bundle_manifest.sha256,
         "tool_destination": str(
             context.host.compatibility_tools / context.release["tool_name"]
         ),
@@ -503,10 +509,10 @@ def _prepare_locked(context: Context, state: dict, lease: int) -> dict:
     cache = context.host.cache_root / state["transaction_id"]
     ensure_private_directory(cache)
     bundle = cache / "user-bundle"
-    manifest = load_bootstrap_manifest(
-        context.repository / "manifests/bootstrap-v1.toml"
+    manifest = load_composed_bundle_manifest(
+        context.repository / "manifests/composed-bundle-v1.toml"
     )
-    if manifest.sha256 != plan["legacy_manifest_sha256"]:
+    if manifest.sha256 != plan["user_bundle_manifest_sha256"]:
         raise BootstrapError("recorded user bundle manifest changed")
     if not bundle.exists():
         artifacts.verify_bundle_root(Path(plan["bundle"]), manifest)
@@ -651,6 +657,7 @@ def _runtime_arguments(context: Context, state: dict) -> argparse.Namespace:
         xodus_build_dir=None,
         input_kind="bundle",
         user_only=True,
+        runtime_profile="composed-preview-v1",
         parent_transaction=state["transaction_id"],
         parent_manifest_sha256=context.manifest_sha256,
         adopt_unmanaged=False,
@@ -873,16 +880,18 @@ def _run_runtime(
             "--artifact-evidence-manifest",
             str(args.artifact_evidence_manifest),
         ]
-        if operation == "install":
+        if operation in {"install", "lock-evidence"}:
             argv += [
                 "--user-only",
+                "--runtime-profile",
+                args.runtime_profile,
                 "--parent-transaction",
                 state["transaction_id"],
                 "--parent-manifest-sha256",
                 context.manifest_sha256,
-                "--plan-sha256",
-                digest,
             ]
+        if operation == "install":
+            argv += ["--plan-sha256", digest]
         environment = {
             key: os.environ[key]
             for key in ("PATH", "DBUS_SESSION_BUS_ADDRESS")

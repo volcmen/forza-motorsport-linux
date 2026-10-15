@@ -39,6 +39,16 @@ def fixture(tmp_path, monkeypatch):
     (home / ".local/state/forza-motorsport-linux/install-manifest").unlink()
     repo = data["integration_source"]
     commit_fixture_profile(data)
+    profiles_path = repo / "manifests/runtime-profiles.toml"
+    profiles = tomllib.loads(profiles_path.read_text())
+    profile = profiles["profiles"]["legacy-v0.1"]
+    profiles_path.write_text(profiles_path.read_text() + (
+        '\n[profiles."composed-preview-v1"]\nstatus = "candidate"\nscope = "user-only"\n'
+        f'xodus_revision = "{profile["xodus_revision"]}"\n'
+        f'xgameruntime_revision = "{profile["xgameruntime_revision"]}"\n'
+    ))
+    git(repo, "add", "manifests/runtime-profiles.toml")
+    git(repo, "commit", "-qm", "add separate composed fixture profile")
     shutil.copy2(
         ROOT / "scripts/install-runtime-components",
         repo / "scripts/install-runtime-components",
@@ -48,10 +58,10 @@ def fixture(tmp_path, monkeypatch):
     git(repo, "commit", "-qm", "snapshot composed runtime helper")
     bundle = data["bundle_root"]
     document = json.loads((bundle / "bundle-manifest.json").read_bytes())
-    document["profile"] = "legacy-v0.1"
+    document["profile"] = "composed-preview-v1"
     manifest = replace(
         manifest_fixture(tmp_path),
-        profile="legacy-v0.1",
+        profile="composed-preview-v1",
         artifacts=tuple(ArtifactSpec(**record) for record in document["artifacts"]),
         sources=tuple(
             SourceSpec(name, f"https://example.invalid/{name}", revision)
@@ -69,7 +79,7 @@ def fixture(tmp_path, monkeypatch):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(entry.data)
             target.chmod(entry.mode)
-    monkeypatch.setattr(setup, "load_bootstrap_manifest", lambda _: manifest)
+    monkeypatch.setattr(setup, "load_composed_bundle_manifest", lambda _: manifest)
     steam = home / ".local/share/Steam"
     game = steam / "steamapps/common/ForzaFixture"
     game.mkdir(parents=True)
@@ -83,6 +93,7 @@ def fixture(tmp_path, monkeypatch):
         out.add(source, arcname="GE-Proton11-3-FM")
     archive.chmod(0o600)
     release = {
+        "user_bundle_manifest_sha256": manifest.sha256,
         "tool_name": "GE-Proton11-3-FM",
         "payload_sha256": digests[0],
         "marker_sha256": digests[1],
@@ -508,3 +519,11 @@ def test_steamos_gui_requires_reviewed_runtime_and_permission_policy(
             setup._gui_check(context)
     else:
         setup._gui_check(context)
+
+
+def test_prepare_rejects_a_bundle_manifest_outside_the_release(tmp_path, monkeypatch):
+    context, archive, bundle, _ = fixture(tmp_path, monkeypatch)
+    context.release["user_bundle_manifest_sha256"] = "0" * 64
+    with pytest.raises(BootstrapError, match="differs from the release"):
+        setup.prepare_plan(context, archive, bundle)
+    assert not context.host.state_root.exists()

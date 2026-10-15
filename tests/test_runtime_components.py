@@ -1859,3 +1859,16 @@ def test_existing_transaction_is_bound_to_its_original_roots(tmp_path: Path):
     assert failed.returncode != 0
     assert "root arguments" in failed.stderr.lower()
     assert "state=installed" in run_tool(fixture, "status").stdout
+
+
+@pytest.mark.parametrize("kind", ["source", "bundle"])
+def test_composed_profile_cannot_authorize_a_full_runtime_plan(tmp_path, kind):
+    fixture = setup_fixture(tmp_path, input_kind=kind)
+    before = tree_snapshot(fixture["compat_root"])
+    rejected = run_tool(
+        fixture, "plan", "--runtime-profile", "composed-preview-v1", check=False
+    )
+    assert rejected.returncode != 0
+    assert "user-only bundle plan" in rejected.stderr
+    assert tree_snapshot(fixture["compat_root"]) == before
+    assert not fixture["evidence"].exists()

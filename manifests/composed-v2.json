@@ -10,10 +10,10 @@
   "flatpak": {
     "app_id": "io.github.volcmen.ForzaXodus",
     "branch": "preview",
-    "commit": "6f9e61dec27206b8aa16d12d78d7e6efc1ad01b143d54e6ac52271c3bfae13bf",
+    "commit": "3be904e7171998b0a30b8c54d820c96ff0c3c3dba914824418d403f72c48b49c",
     "runtime": "org.gnome.Platform/x86_64/50",
-    "sha256": "6fe9f55eb3f0bb3d0581081c125fba67c2133eb95e16150d2fa36aa56737f9b0",
-    "size": 4859264,
+    "sha256": "a6c6257f4334ae65425371427f71141d46d4e13a2315e1337d0671fb67aaca61",
+    "size": 4809632,
     "tested_runtime_commit": "0bd5091046708e64bc882e8349877cfbae713f6a1e2d0487a5f10af820a2d792"
   },
   "ge_revision": "8c8003f7f5473d883fbe1bc7ac070c79955754e8",
@@ -35,5 +35,6 @@
   "source_date_epoch": 1792022400,
   "status": "candidate",
   "tool_name": "GE-Proton11-3-FM",
+  "user_bundle_manifest_sha256": "350bf5318f366130f856aaaed7efe713da25ea82dc2e6f39eb31854cbc050be6",
   "wine_revision": "3ecd0e8a9b8e7e0a754b09595d1aa70c9b1e1301"
 }
