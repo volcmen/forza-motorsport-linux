@@ -1152,6 +1152,28 @@ def production_preflight_fixture(
     return replace(fixture.context, operations=None, probe=probe), calls
 
 
+def test_fresh_stock_ge_bootstrap_stops_before_confirmation_or_writes(tmp_path):
+    context, _calls = production_preflight_fixture(tmp_path)
+    context = replace(
+        context,
+        manifest=replace(
+            context.manifest,
+            ge=replace(
+                context.manifest.ge,
+                sha256="861c2edc8d40d051fb1e7a692deb953be52bd339c46d90f2b7dde50ddad91266",
+            ),
+        ),
+    )
+    before = tree_manifest(tmp_path)
+
+    def no_confirmation(_digest):
+        pytest.fail("a broken artifact must be rejected before confirmation")
+
+    with pytest.raises(BootstrapError, match="lacks required Forza Wine core fixes"):
+        prepare(context, no_confirmation)
+    assert tree_manifest(tmp_path) == before
+
+
 @pytest.mark.parametrize(
     ("blocker", "message"),
     (

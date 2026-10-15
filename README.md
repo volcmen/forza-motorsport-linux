@@ -19,9 +19,10 @@ instructions. The code and exact-version manifests stay in this repository.
 
 - **Steam edition only:** Forza Motorsport, AppID 2440510.
 - **Bootstrap target:** Arch Linux x86_64, native Steam, game in the primary library.
-- **Recommended route:** the experimental v0.2.0 bootstrap with a dedicated `GE-Proton11-3-FM`.
+- **Fresh installs are currently blocked:** v0.2.0 downloads stock GE-Proton, which lacks required FM Wine fixes. See [issue #7](https://github.com/volcmen/forza-motorsport-linux/issues/7) and the [Install status](https://github.com/volcmen/forza-motorsport-linux/wiki/Install).
+- **SteamOS / Steam Deck:** support is in development. Run `./setup platform-check` for read-only native Steam diagnostics, including additional libraries. See [Steam Deck](https://github.com/volcmen/forza-motorsport-linux/wiki/Steam-Deck) for current limits and validation status.
 - **Bring your own licensed Microsoft threading DLL.** Microsoft binaries are not distributed.
-- **Tested in-game:** the maintainer confirmed v0.2.0 on one system. The detailed dated matrix covers v0.1; see [Evidence](https://github.com/volcmen/forza-motorsport-linux/wiki/Evidence-and-history).
+- **Tested in-game:** the maintainer's existing custom FM setup worked on one desktop. That historical result does not establish fresh v0.2 bootstrap or Steam Deck success. The detailed dated matrix covers v0.1; see [Evidence](https://github.com/volcmen/forza-motorsport-linux/wiki/Evidence-and-history).
 - **Incoming invite notifications are not supported.** Explicit Xbox Invite/Join is a separate feature.
 
 This is a community compatibility setup, not official Proton support or a
