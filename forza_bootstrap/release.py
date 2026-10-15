@@ -343,8 +343,11 @@ def inspect_release_bundle(
 def render_bootstrap_manifest(bundle: ReleaseBundle, builder_image: str) -> bytes:
     """Render the reviewed production values as deterministic TOML."""
     lines = [
+        # These are output text, not license annotations for this Python file.
+        # REUSE-IgnoreStart
         "# SPDX-FileCopyrightText: 2026 Forza Motorsport Linux tools contributors",
         "# SPDX-License-Identifier: GPL-3.0-or-later",
+        # REUSE-IgnoreEnd
         "",
         "schema = 1",
         'app_id = "2440510"',
