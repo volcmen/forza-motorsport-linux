@@ -59,8 +59,54 @@ disk replaced the 9P game-folder mount at the same guest-visible path. All 5,294
 copied files, totaling 145,746,575,472 bytes, matched their source SHA-256 hashes.
 The existing prefix, tool, service payload, and diagnostic options were retained.
 The third attempt again produced a white game window, with no menu after more
-than seven minutes of observation. Moving the game to local ext4 did not resolve
-the observed startup blocker.
+than seven minutes of observation. A later check found that the ext4 root
+directory itself was root-owned and unwritable by the guest user, despite the
+copied files matching. The corrected storage control is recorded below.
+
+### Additional verification and controlled comparisons
+
+Steam's first official integrity check stopped with `Install folder not writable`.
+Only the isolated ext4 filesystem's root directory ownership was corrected to the
+guest user; this was not a recursive permission change. Steam then completed
+`Verifying Installed` on build 18920732 between 16:39:46 and 16:43:34 UTC, ending
+with `result No Error`.
+
+A sixth game launch used this verified, writable game directory and the original
+quiet diagnostic settings, with the default synchronization backend restored.
+It again remained at a white window for more than five minutes without a menu.
+Closing the game window eventually exited the game and stopped its owned Xodus
+service without forced termination. Thus the directory permission correction
+enabled Steam validation but did not resolve the observed game startup blocker.
+
+Two intervening diagnostic attempts and a filename audit established narrower
+facts:
+
+- A recursive audit found no case-insensitive sibling-name collisions in the
+  copied game or the prefix's `system32` and `syswow64` directories. No DLLs were
+  renamed or removed.
+- Targeted GDK tracing reached the preferred UDP-port result function, three
+  URL security-information result calls, and certificate-verification calls.
+  These are observed function entries, not proof of successful HRESULTs, all
+  asynchronous queues completing, or a completed Xbox user flow.
+- Setting only `PROTON_NO_NTSYNC=1` relative to that traced run changed the active
+  backend from NTSYNC to fsync, confirmed by both the log and sampled wait stacks.
+  The white window persisted. The override and extra tracing were removed for
+  the final verified-files run; neither is proposed as a fix.
+- Repeated native stack samples found a busy thread yielding through
+  `NtYieldExecution`. In the final run, reading only saved instruction addresses
+  and loader metadata resolved its `SwitchToThread` caller to the game executable
+  at RVA `0x629ad3` for build 18920732. The main thread was waiting. This localizes
+  an observed wait; it does not identify the missing completion or its cause.
+
+The source readiness diagnostic now checks read/write/search access to the actual
+game directory without writing a probe file, and measures free space on that
+directory's filesystem instead of assuming it shares the library root's mount.
+Regression tests cover an unwritable directory without altering its files or
+permissions and separate game/library free-space results. In the real guest, the
+candidate reported game access available, 20 GiB free on the game filesystem
+(warning), and 34 GiB at the Steam tools root. Other platform warnings/failures
+remain distinct from these scoped results. The tagged preview predates this
+diagnostic refinement.
 
 ## Reboot exposed a launcher defect
 
@@ -107,6 +153,14 @@ pixel was `64,127,191,255` against an expected `64,128,191,255` with one-unit
 tolerance, and the blue window was visible in the guest capture. A host control
 also passed and exited normally. The VM probe runner needed timeout cleanup;
 full probe lifecycle success is not claimed.
+
+A follow-up probe added flushed markers around each cleanup operation. In the
+guest, the last marker was the entry to `IDXGISwapChain::Release`; it did not
+return before the 50-second runner timeout. A control that moved window
+destruction after swap-chain release stopped at the same call. Both probes still
+passed the fence, readback and presentation checks. This identifies an unresolved
+probe cleanup failure in the tested graphics stack, not the cause of the game's
+startup wait.
 
 Basic Vulkan and Direct3D rendering therefore work in this VM. That does not
 prove Forza-specific rendering, its startup dependencies, or sustained stability.

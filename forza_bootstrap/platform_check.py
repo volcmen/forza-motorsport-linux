@@ -286,6 +286,14 @@ def inspect_platform(env: Mapping[str, str]) -> dict:
             if layout.library_root == layout.steam_root
             else "additional (including microSD)",
         )
+        accessible = os.access(layout.game_root, os.R_OK | os.W_OK | os.X_OK)
+        report(
+            "PASS" if accessible else "FAIL",
+            "game directory access",
+            "read/write/search allowed for current user; no write probe performed"
+            if accessible
+            else "Steam needs read/write/search access; review directory ownership and mount options",
+        )
         count = len(layout.prefix_candidates)
         report(
             "PASS" if count == 1 else "WARN" if count == 0 else "FAIL",
@@ -305,7 +313,7 @@ def inspect_platform(env: Mapping[str, str]) -> dict:
             else "none in the game directory",
         )
         for name, path in (
-            ("game library free space", layout.library_root),
+            ("game filesystem free space", layout.game_root),
             ("Steam tools free space", layout.steam_root),
         ):
             free_gib = shutil.disk_usage(path).free // (1024**3)
