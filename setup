@@ -13,7 +13,8 @@ usage() {
         "usage: $0 [check|status|rollback|steam-options|uninstall]" \
         "       $0 bootstrap [OPTIONS]" \
         "       $0 snapshot [OPTIONS]" \
-        "       $0 compare [OPTIONS]" >&2
+        "       $0 compare [OPTIONS]" \
+        "       $0 platform-check [--json]" >&2
     exit 64
 }
 
@@ -22,6 +23,7 @@ print_help() {
         'Guided setup for an experimental, source-only Forza Motorsport Linux integration.' \
         '' \
         'Hybrid bootstrap:' \
+        '  ./setup platform-check [--json] Read-only Arch/SteamOS and native Steam diagnostics' \
         '  ./setup bootstrap              Prepare or resume the hybrid bootstrap' \
         '  ./setup bootstrap --check      Inspect durable state and managed paths; bootstrap --check is read-only' \
         '  ./setup bootstrap --rollback   Roll back the composed bootstrap transaction' \
@@ -237,7 +239,7 @@ run_install() {
 }
 
 case "${1:-}" in
-    bootstrap | snapshot | compare)
+    bootstrap | snapshot | compare | platform-check)
         command=$1
         shift
         exec "$BOOTSTRAP" "$command" "$@"

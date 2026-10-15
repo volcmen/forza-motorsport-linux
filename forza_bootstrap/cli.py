@@ -66,6 +66,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     compare.add_argument("--before")
     compare.add_argument("--after")
 
+    platform_check = commands.add_parser("platform-check")
+    platform_check.add_argument("--json", action="store_true")
+
     return parser.parse_args(argv)
 
 
@@ -220,6 +223,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run a parsed command, without claiming an unavailable command succeeded."""
     arguments = parse_args(argv)
     try:
+        if arguments.command == "platform-check":
+            from .platform_check import main as platform_main
+
+            return platform_main(json_output=arguments.json)
         if arguments.command == "snapshot":
             output_snapshot(_capture_current_snapshot(), arguments.output, sys.stdout)
             return 0

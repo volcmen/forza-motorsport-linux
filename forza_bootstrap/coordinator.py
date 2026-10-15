@@ -903,6 +903,19 @@ def inspect_prepare(
 
     destination = host.compatibility_tools / _FM_NAME
     tool = inspect_fm(destination, context.manifest)
+    # The v0.2 artifact is stock GE, while the reviewed FM layout needs Wine
+    # core fixes and different binaries (issue #7). Stop before downloading or
+    # creating a journal; retain the old manifest for existing recovery records.
+    if (
+        tool.disposition is ToolDisposition.ABSENT
+        and context.manifest.ge.sha256
+        == "861c2edc8d40d051fb1e7a692deb953be52bd339c46d90f2b7dde50ddad91266"
+    ):
+        raise BootstrapError(
+            "fresh bootstrap is unavailable: the pinned stock GE-Proton11-3 "
+            "lacks required Forza Wine core fixes. A reviewed custom FM build "
+            "is required; see the wiki Install page and issues #7/#8"
+        )
     required = max(
         _MIN_PREPARE_BYTES,
         3 * (context.manifest.ge.size + context.manifest.bundle.size),
