@@ -12,8 +12,8 @@ service integration.
 **[Open the wiki →](https://github.com/volcmen/forza-motorsport-linux/wiki)**
 
 Start with **[Install](https://github.com/volcmen/forza-motorsport-linux/wiki/Install)**, then **[Play and verify](https://github.com/volcmen/forza-motorsport-linux/wiki/Play-and-verify)**.
-The wiki walks through one recommended setup path with checkpoints and recovery
-instructions. The code and exact-version manifests stay in this repository.
+The wiki tracks installation status, SteamOS investigation, checkpoints, and
+recovery. The code and exact-version manifests stay in this repository.
 
 ## Before you start
 
@@ -46,4 +46,4 @@ guarantee for every system. Follow the wiki's requirements before running setup.
 
 [Contributing](.github/CONTRIBUTING.md) ·
 [Security policy](.github/SECURITY.md) ·
-[Repository security review](evidence/security-audit-2026-09-05.md)
+[Repository security review](evidence/security-audit-2026-10-15.md)
