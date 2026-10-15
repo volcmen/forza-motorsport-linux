@@ -700,6 +700,35 @@ def _gui_check(context: Context) -> None:
         raise BootstrapError(
             "install the reviewed Forza Xodus preview Flatpak for this user before Finish"
         )
+    runtime = context.probe.runner(
+        ["flatpak", "info", "--user", "--show-commit", expected["runtime"]],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    if (
+        runtime.returncode != 0
+        or runtime.stdout.strip() != expected["tested_runtime_commit"]
+    ):
+        raise BootstrapError(
+            "GNOME runtime differs from the tested deployment; qualify the update before changing the preview manifest"
+        )
+    # Global and application overrides can silently broaden the reviewed bundle.
+    # Never remove overrides or downgrade a shared runtime as an installer fix.
+    for scope in ("--user", "--system"):
+        for app in ([], [expected["app_id"]]):
+            overrides = context.probe.runner(
+                ["flatpak", "override", scope, "--show", *app],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=20,
+            )
+            if overrides.returncode != 0 or overrides.stdout.strip():
+                raise BootstrapError(
+                    "Flatpak overrides differ from the reviewed permission policy; review them explicitly before Finish"
+                )
 
 
 def finish_plan(

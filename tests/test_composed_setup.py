@@ -475,3 +475,36 @@ def test_complete_flow_uses_additional_library_and_prefix(tmp_path, monkeypatch)
     assert setup.status(context)["phase"] == "READY_TO_ATTEMPT"
     assert setup.rollback(context, lambda _: "ROLLBACK")["phase"] == "ROLLED_BACK"
     assert target.is_dir()
+
+
+@pytest.mark.parametrize("drift", [None, "runtime", "override"])
+def test_steamos_gui_requires_reviewed_runtime_and_permission_policy(
+    tmp_path, monkeypatch, drift
+):
+    context, _, _, _ = fixture(tmp_path, monkeypatch)
+    release, _ = setup.load_release(ROOT)
+
+    def runner(argv, **kwargs):
+        if "info" in argv:
+            value = (
+                release["flatpak"]["tested_runtime_commit"]
+                if argv[-1] == release["flatpak"]["runtime"]
+                else release["flatpak"]["commit"]
+            )
+            if drift == "runtime" and argv[-1] == release["flatpak"]["runtime"]:
+                value = "a" * 64
+        else:
+            value = "[Context]\nfilesystems=home;\n" if drift == "override" else ""
+        return subprocess.CompletedProcess(argv, 0, value, "")
+
+    context = replace(
+        context,
+        release=release,
+        host=replace(context.host, os_id="steamos"),
+        probe=replace(context.probe, runner=runner),
+    )
+    if drift:
+        with pytest.raises(BootstrapError, match="runtime differs|overrides differ"):
+            setup._gui_check(context)
+    else:
+        setup._gui_check(context)

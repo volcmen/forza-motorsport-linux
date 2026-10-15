@@ -300,6 +300,7 @@ write_v3_runtime_transaction() {
     write_v2_runtime_transaction "$1"
     python3 - "$FORZA_RUNTIME_TEST_USER_ROOT" <<'PYTEST'
 import json
+import hashlib
 import sys
 from pathlib import Path
 root = Path(sys.argv[1])
@@ -319,6 +320,45 @@ state.write_text(json.dumps({"schema": 2, "transaction_id": "d" * 24,
     "manifest_sha256": "e" * 64, "phase": "READY_TO_ATTEMPT",
     "prepare_plan_sha256": "a" * 64, "finish_plan_sha256": "b" * 64}))
 state.chmod(0o600)
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+paths = {
+    "launcher-gate": ".local/bin/forza-linux",
+    "doctor": ".local/bin/forza-doctor",
+    "known-build-patcher": ".local/libexec/forza-motorsport-linux/patch-known-build",
+    "supported-builds": ".local/share/forza-motorsport-linux/supported-builds.toml",
+    "xodus-service": ".local/libexec/xodus-forza/xodus-service",
+    "xodus-cli": ".local/libexec/xodus-forza/xodus-cli",
+    "xodus-overlay": ".local/libexec/xodus-forza/xodus-overlay",
+    "systemd-unit": ".config/systemd/user/xodus-forza.service",
+    "user-install-manifest": ".local/state/forza-motorsport-linux/install-manifest",
+}
+artifacts = []
+installed = []
+for role, relative in paths.items():
+    target = root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"launcher fixture only\n")
+    mode = 0o600 if role == "user-install-manifest" else 0o644 if role in {"supported-builds", "systemd-unit"} else 0o755
+    target.chmod(mode)
+    sha = hashlib.sha256(target.read_bytes()).hexdigest()
+    installed.append({"role": role, "installed_sha256": sha, "installed_mode": mode})
+    if role != "user-install-manifest":
+        artifacts.append({"role": role, "source_sha256": sha, "target_mode": mode, "destination_root": "user", "destination_relative": relative})
+    else:
+        user_manifest = {"installed_sha256": sha, "installed_mode": mode}
+runtime = {"version": 3, "scope": "user", "parent": v["parent"], "roots": v["roots"], "artifacts": artifacts, "user_manifest": user_manifest}
+prepare = {"schema": 2, "manifest_sha256": "e" * 64}
+finish = {"schema": 2, "manifest_sha256": "e" * 64, "transaction_id": "d" * 24, "runtime": {"document": runtime, "sha256": digest(runtime)}}
+for name, value in (("prepare-plan.json", prepare), ("finish-plan.json", finish)):
+    record = transaction / name
+    record.write_text(json.dumps(value))
+    record.chmod(0o600)
+value = json.loads(state.read_text())
+value.update(prepare_plan_sha256=digest(prepare), finish_plan_sha256=digest(finish))
+state.write_text(json.dumps(value))
+v.update(plan_sha256=digest(runtime), artifacts=installed)
+p.write_text(json.dumps(v))
 PYTEST
 }
 
@@ -502,6 +542,25 @@ test_v3_runtime_requires_completed_private_parent() {
         tear_down
         set_up
     done
+}
+
+test_v3_runtime_refuses_changed_payload_before_service_start() {
+    write_v3_runtime_transaction installed
+    printf 'changed\n' >"$FORZA_RUNTIME_TEST_USER_ROOT/.local/libexec/xodus-forza/xodus-service"
+    run_launcher_capturing_stderr /usr/bin/true
+    assert_eq "$status" 1 || return 1
+    assert_contains "$output" 'composed installed file changed' || return 1
+    assert_log_not_contains 'start xodus-forza.service'
+}
+
+test_v3_runtime_refuses_changed_finish_plan_before_service_start() {
+    write_v3_runtime_transaction installed
+    local plan="$FORZA_RUNTIME_TEST_USER_ROOT/.local/state/forza-motorsport-linux/bootstrap-v2/dddddddddddddddddddddddd/finish-plan.json"
+    sed -i 's/"schema": 2/"schema": 1/' "$plan"
+    run_launcher_capturing_stderr /usr/bin/true
+    assert_eq "$status" 1 || return 1
+    assert_contains "$output" 'composed parent and child plans differ' || return 1
+    assert_log_not_contains 'start xodus-forza.service'
 }
 
 test_refuses_malformed_v2_runtime_transactions_before_service_start() {
