@@ -3,8 +3,11 @@
 Disabling both generations of Vulkan present-id/wait extensions allowed the
 isolated SteamOS VM to pass the earlier white window and reach Forza's title
 screen, Welcome Center, home menu, existing player profile, and settings.
-**A menu is not a gameplay result. Physical Steam Deck compatibility remains
-unverified.**
+With that workaround and Low/Off graphics settings, a later Free Play test
+rendered Brands Hatch, responded to keyboard driving input, and exited normally
+to Steam. **A completed race, measured performance, and physical Steam Deck
+compatibility remain unverified.** The separate Hakone benchmark did not finish
+loading.
 
 This follows the [real-account and verified-game test](steamos-real-account-test-2026-10-15.md).
 Private account data, licensed files, screenshots containing profile information,
@@ -123,14 +126,47 @@ Wine debugger process-list attempt timed out without obtaining a Windows stack;
 it did not establish a cause. The game again required termination after window
 close. Lowering these graphics settings alone did not resolve the observed stall.
 
-A final comparison added only `nodxr` to the existing `VKD3D_CONFIG`, retaining
-Low/Off and the four-extension presentation override. The process environment
+A further benchmark comparison added only `nodxr` to the existing `VKD3D_CONFIG`,
+retaining Low/Off and the four-extension presentation override. The process environment
 and configuration log confirmed that setting. The title screen rendered again.
 The benchmark started at 05:41:26 UTC, moved from the Hakone loading screen to a
 black screen, and had produced neither driving nor a score by 05:47:19 UTC. There
 were no graphics errors or device-loss messages. It again required SIGTERM after
 window close. `nodxr` was removed because this comparison did not establish a
 benefit.
+
+### Free Play driving and normal exit
+
+After removing `nodxr`, a fresh launch retained the four-extension presentation
+override and Low/Off settings. The actual game process environment confirmed
+that configuration. Free Play used the existing owned 2017 Acura NSX, Brands
+Hatch Indy Circuit, Circuit Race, Noon/Clear weather, one selected lap, and zero
+AI opponents. No car purchase or multiplayer session was involved.
+
+The event was accepted at 06:08:30 UTC. By 06:10:11 UTC, the circuit, car, and pit
+scene had rendered and offered Start Race. Starting it loaded the cockpit, track,
+mirrors, and race HUD. The following input observations were recorded by
+06:18:27 UTC:
+
+| Input | Observed response |
+| --- | --- |
+| Keyboard throttle (`W`) | Engine speed and track position changed; the captured HUD showed 14 km/h. |
+| Throttle plus left steering (`W` + `A`) | Heading and position changed; the captured HUD showed 23 km/h and an off-track indicator. |
+| Brake/reverse (`S`) | The later capture showed 0 km/h and reverse gear. |
+
+Pause → Exit → Quit Race returned to the Free Play menu; Back then returned to
+Home. Exit to Desktop returned to Steam's Play-ready library page. By 06:21:08 UTC,
+neither the game nor its owned Xodus service remained running, without window
+close, SIGTERM, or other forced termination. The session log contained no
+shader-identifier errors or `VK_ERROR_DEVICE_LOST` messages. SteamOS read-only
+mode remained enabled.
+
+This establishes track loading, a short drive with keyboard input, menu return,
+and normal shutdown in the recorded VM configuration. The selected lap was not
+completed, and no benchmark score or frame-rate measurement was collected. The
+successful Brands Hatch Free Play session does not resolve the separate Hakone
+benchmark failures or identify whether track, mode, or another difference caused
+those failures.
 
 The VM was left with the presentation workaround and Low/Off settings, with
 Steam available, no game process, and no owned Xodus service left running. The
@@ -145,13 +181,15 @@ A fresh build in the pinned, network-disabled SDK container passed with
 `-Wall -Wextra -Werror` and no compiler output. Only source is published.
 Repository privacy/policy checks passed (20 tests), as did REUSE and whitespace
 checks. The installed guest Doctor returned exit 0 with eight passes and the
-existing warning for less than 100 GiB free. These checks do not replace a
-completed game session.
+existing warning for less than 100 GiB free. These checks supplement the limited
+runtime observations above.
 
 ## Remaining limits
 
-The presentation control establishes a working probe lifecycle and a real game
-menu/profile in this specific VM. It does not establish completed driving,
-sustained rendering, benchmark performance, new-save persistence, token refresh,
-or explicit Invite/Join. Physical Deck Gaming Mode, AMD graphics, controls,
-microSD behavior, suspend/resume, and performance still require hardware tests.
+The presentation control establishes a working probe lifecycle; real-game tests
+establish repeat menu/profile loading and a short Free Play drive with normal
+exit in this specific VM. A completed lap/race, long-session graphics stability,
+benchmark performance, new-save persistence across relaunch, token refresh, and
+explicit Invite/Join remain unverified. Physical Deck Gaming Mode, AMD graphics,
+controls, microSD behavior, suspend/resume, and performance still require hardware
+tests.
