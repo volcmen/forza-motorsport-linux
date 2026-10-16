@@ -4,6 +4,12 @@ Microsoft sign-in completed and its Xodus wallet records survived a VM reboot.
 Real Forza launches reached a white game window without reaching the menu.
 **Gameplay and physical Steam Deck compatibility remain unverified.**
 
+**2026-10-16 follow-up:** a scoped Venus presentation override subsequently
+reached the real game's menu and loaded the existing player profile. See the
+[new test record](steamos-venus-presentation-test-2026-10-16.md) for the controlled
+graphics comparison and remaining game-loading limits. The observations below
+describe the earlier attempts without that override.
+
 This follows the earlier [controlled installer/runtime qualification](composed-preview-validation-2026-10-15.md).
 The account, licensed game, threading DLL, prefix, wallet, and raw logs remain
 private. This record contains no account identifiers or authentication material.
