@@ -825,6 +825,7 @@ def test_container_output_publication_never_adopts_or_replaces(tmp_path: Path) -
     stage.chmod(0o733)
     source = stage / BUNDLE_NAME
     source.write_bytes(b"container bytes")
+    source.chmod(0o644)
     destination = output / BUNDLE_NAME
     destination.write_bytes(b"preserve")
 
