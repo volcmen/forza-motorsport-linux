@@ -47,6 +47,34 @@ and Wine/Windows conformance tests. The private-helper harness and historical
 Forza fallback results below do not replace those tests. No Wine upstream merge
 or new physical-controller validation is claimed.
 
+### Public API test preparation, 2026-10-17
+
+The [test-only upstream patch](upstream-tests.patch) applies to official Wine
+`7298a818b79446bae153b8d5aa27235ab3703bf9`. It exercises
+`IRawGameController2::NonRoamableId` through controller enumeration: nonempty
+identities, stability across repeated calls, and distinct identities for
+different connected controllers. It uses no private provider helper and does
+not assume Wine's chosen string format. The current upstream stub is marked
+`todo_wine`; machines without controllers explicitly skip the identity checks.
+The patch retains Wine's LGPL-2.1-or-later license.
+
+The modified test compiled and linked with Clang/LLD using the existing Wine
+build headers and import libraries. Through the freshly installed preview in
+the SteamOS VM, the executable returned 0: **60 tests, zero failures, one skip**.
+That skip was the entire controller-dependent identity check: no controller was
+connected. This validates the executable and ordinary API checks, not the new
+identity assertions or native Windows behavior. The older standalone Wine build
+still failed before test dispatch with `kernel32.dll` status `c0000135`.
+
+Microsoft's [documented identity contract](https://learn.microsoft.com/en-us/uwp/api/windows.gaming.input.rawgamecontroller.nonroamableid?view=winrt-28000)
+also requires application and machine scoping, and persistence while the same
+controller uses the same USB port, including across reboots. The existing
+compatibility helper encodes VID/PID and a device-instance string without
+application scoping. It therefore needs a broader implementation and native
+comparison before an upstream implementation submission. This test patch covers
+only enumeration-time behavior; cross-application and reboot tests remain open.
+No upstream acceptance or Windows/controller result is claimed.
+
 ## Source change
 
 The final range from the canonical base changes exactly these files:

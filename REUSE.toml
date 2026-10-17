@@ -24,3 +24,9 @@ path = [
 ]
 SPDX-FileCopyrightText = "2026 volcmen"
 SPDX-License-Identifier = "GPL-3.0-or-later"
+
+[[annotations]]
+path = ["patches/wine-controller/upstream-tests.patch"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 volcmen"
+SPDX-License-Identifier = "LGPL-2.1-or-later"

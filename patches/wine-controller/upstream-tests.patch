@@ -1,0 +1,85 @@
+diff --git a/dlls/windows.gaming.input/tests/input.c b/dlls/windows.gaming.input/tests/input.c
+index 5f2244d..3268736 100644
+--- a/dlls/windows.gaming.input/tests/input.c
++++ b/dlls/windows.gaming.input/tests/input.c
+@@ -270,6 +270,71 @@ static const IEventHandler_RawGameControllerVtbl controller_event_handler_vtbl =
+     controller_event_handler_Invoke,
+ };
+ 
++static void test_NonRoamableId( IVectorView_RawGameController *controllers, UINT32 count )
++{
++    IRawGameController2 *controller2;
++    IRawGameController *controller;
++    HSTRING *ids, repeated;
++    UINT32 i, j;
++    INT32 comparison;
++    HRESULT hr;
++
++    if (!count)
++    {
++        skip("No controllers connected; NonRoamableId requires a controller.\n");
++        return;
++    }
++    ids = calloc( count, sizeof(*ids) );
++    ok(!!ids, "Failed to allocate controller identities.\n");
++    if (!ids) return;
++
++    for (i = 0; i < count; ++i)
++    {
++        winetest_push_context("controller %u", i);
++        hr = IVectorView_RawGameController_GetAt( controllers, i, &controller );
++        ok(hr == S_OK, "GetAt returned %#lx.\n", hr);
++        if (FAILED(hr)) goto next;
++        hr = IRawGameController_QueryInterface( controller, &IID_IRawGameController2, (void **)&controller2 );
++        IRawGameController_Release( controller );
++        if (hr == E_NOINTERFACE)
++        {
++            win_skip("IRawGameController2 is unavailable.\n");
++            goto next;
++        }
++        ok(hr == S_OK, "QueryInterface returned %#lx.\n", hr);
++        if (FAILED(hr)) goto next;
++
++        hr = IRawGameController2_get_NonRoamableId( controller2, &ids[i] );
++        todo_wine ok(hr == S_OK, "NonRoamableId returned %#lx.\n", hr);
++        if (SUCCEEDED(hr))
++        {
++            ok(WindowsGetStringLen( ids[i] ) > 0, "Expected a nonempty controller identity.\n");
++            repeated = NULL;
++            hr = IRawGameController2_get_NonRoamableId( controller2, &repeated );
++            ok(hr == S_OK, "Repeated NonRoamableId returned %#lx.\n", hr);
++            if (SUCCEEDED(hr))
++            {
++                comparison = 123;
++                hr = WindowsCompareStringOrdinal( ids[i], repeated, &comparison );
++                ok(hr == S_OK && !comparison, "Identity changed between calls, hr %#lx.\n", hr);
++            }
++            WindowsDeleteString( repeated );
++            for (j = 0; j < i; ++j)
++            {
++                if (!ids[j]) continue;
++                comparison = 0;
++                hr = WindowsCompareStringOrdinal( ids[i], ids[j], &comparison );
++                ok(hr == S_OK && comparison, "Controllers %u and %u share an identity, hr %#lx.\n", i, j, hr);
++            }
++        }
++        IRawGameController2_Release( controller2 );
++next:
++        winetest_pop_context();
++    }
++    for (i = 0; i < count; ++i) WindowsDeleteString( ids[i] );
++    free( ids );
++}
++
+ static void test_RawGameController(void)
+ {
+     static const WCHAR *controller_name = L"Windows.Gaming.Input.RawGameController";
+@@ -340,6 +405,8 @@ static void test_RawGameController(void)
+     ok(hr == S_OK, "IVectorView_RawGameController_get_Size failed, hr %#lx\n", hr);
+     ok(size != 0xdeadbeef, "IVectorView_RawGameController_get_Size returned %u\n", size);
+ 
++    if (SUCCEEDED(hr) && size != 0xdeadbeef) test_NonRoamableId( controllers, size );
++
+     hr = IVectorView_RawGameController_GetMany(controllers, size, 1, &controller, &size);
+     ok(hr == E_BOUNDS, "IVectorView_RawGameController_GetMany failed, hr %#lx\n", hr);
+     ok(size == 0, "IVectorView_RawGameController_GetMany returned count %u\n", size);
