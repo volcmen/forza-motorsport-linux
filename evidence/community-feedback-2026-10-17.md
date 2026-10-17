@@ -22,6 +22,7 @@ posts at review time. No replies or reactions were posted during this review.
 | [FluffGlitter, issue #8](https://github.com/volcmen/forza-motorsport-linux/issues/8) and [PR #9](https://github.com/volcmen/forza-motorsport-linux/pull/9) | Fresh-install retries, runtime modes/transactions, mutable tool contents, and the wrong disk-space target. | PR #9 already fixes the retry/mode/child-transaction defects. PR #16 supplies a separate composed workflow with complete immutable tool publication and user-only Finish. Fixed the remaining Doctor disk check in this review: use the verified game directory for composed installs, or `steamapps` for legacy bind-mounted layouts. |
 | [FluffGlitter, issue #7 follow-up](https://github.com/volcmen/forza-motorsport-linux/issues/7#issuecomment-6072891753) | Resolved the splash hang by removing a pair of DLL names differing only by case; reported AMD resets with ray tracing. | The current platform diagnostic and composed Prepare already detect top-level DLL name collisions without deleting files. The Wiki records this specific cause. The graphics report remains contributor evidence; it does not justify a global ray-tracing override. |
 | [FluffGlitter, PR #9 validation](https://github.com/volcmen/forza-motorsport-linux/pull/9) | shfmt 3.14 rejected two files despite older formatting checks passing. | Reproduced with the official 3.14.0 binary: arithmetic negation in Doctor and a here-document in the setup test. Formatted both and pinned the same checksum-verified formatter in CI. |
+| [Weather-OS, Wine fork PR #4](https://github.com/xodus-gaming/wine/pull/4#issuecomment-5576290488) | Asked for the physical-controller fix to go to Wine upstream first, with the fork as a possible fallback. | Current Wine still has the `NonRoamableId` stub, but its base differs from this Proton-derived patch. Corrected stale publication claims in the controller/storage records and documented the required upstream adaptation and conformance tests. Upstream submission remains open. |
 
 The older hash/submodule comparison request in
 [issue #7](https://github.com/volcmen/forza-motorsport-linux/issues/7#issuecomment-5985778977)
@@ -41,6 +42,15 @@ reports about other artifacts/environments. They do not change this project's
 download pins or establish supported Debian/physical Deck behavior. The later
 mirror packaging discussion also reinforces preserving Wine's symlinks; the
 project's composed archive verifier already checks their targets.
+
+The maintainer's [Wine controller PR #4](https://github.com/xodus-gaming/wine/pull/4)
+and [storage PR #5](https://github.com/xodus-gaming/wine/pull/5) remain open at
+`ddd302d` and `a7719bd`; the storage PR has no public replies or reviews.
+[Xodus social issue #94](https://github.com/xodus-gaming/xodus/issues/94)
+has no reply after the maintainer's proposal. The
+[controller record](../patches/wine-controller/README.md#upstream-review-checked-2026-10-17)
+links the current Wine source comparison. No external discussion was closed,
+and no upstream submission or maintainer acceptance is claimed.
 
 ## Threading suggestion: what the source establishes
 
