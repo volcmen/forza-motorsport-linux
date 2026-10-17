@@ -72,6 +72,13 @@ recorded Forza sessions used the licensed DLL; no current DLL-free game session
 has been qualified. Upstream source/tests support further investigation, not
 removal of the installation requirement or an unreviewed runtime/protocol swap.
 
+The [later preview 2 local test](preview-2-validation-2026-10-17.md#dll-free-comparison)
+disabled native threading DLL loading in the actual game process without changing
+the installed file. The builtin warning appeared, then the game exited before
+the title screen. Its standalone API tests still passed. That follow-up is
+separate from the initial source review above and does not qualify DLL-free
+Forza or remove the licensed-DLL requirement.
+
 ## Diagnostic and verification changes
 
 - Doctor measures the game filesystem using the game directory identity already

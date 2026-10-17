@@ -69,6 +69,65 @@ The [upstream controller test patch and semantic review](../patches/wine-control
 are preparatory work. Native Windows, connected-controller assertions,
 cross-application identity and reboot persistence remain unverified.
 
+## Real-game follow-up
+
+The installed candidate launched the licensed game through Steam, loaded the
+saved account/profile and entered Free Play. The scoped Venus presentation
+override from the [October 16 test](steamos-venus-presentation-test-2026-10-16.md)
+was retained; this is not a physical-GPU default. The native threading DLL was
+confirmed in the actual game process's mappings.
+
+A one-lap Brands Hatch Indy Circuit event used the owned 2017 Acura NSX, noon,
+clear weather and no AI opponents. Braking and steering were temporarily set to
+Fully Assisted and throttle to Assisted to exercise a complete lap. The race
+rendered and advanced, then stalled with the lap timer at **00:46.858**. Repeated
+captures showed the same frame; Escape did not produce the pause menu. A complete
+race was not achieved. A private debugger sample found a busy thread in
+`NtYieldExecution` and the main thread waiting through `linux_wait_objs`;
+the Xodus service remained active and no GPU reset appeared in the guest kernel
+journal. These observations do not identify the cause. Terminating only the
+stalled game returned Steam to Play and the owned service became inactive.
+
+A controlled retry added only `PROTON_NO_NTSYNC=1`. The actual process had that
+setting, no `WINENTSYNC`, and `WINEFSYNC=1`; Proton logged `fsync: up and running`.
+The native threading DLL remained mapped. Sign-in, shaders and the menu loaded,
+but the same car/event settings did not finish loading within three minutes
+(11:51:51–11:54:54 UTC). A sample again found a busy `NtYieldExecution` thread,
+with the main thread now in `fsync_wait_objects`. This comparison did not solve
+the failure and does not justify a default synchronization change. The game was
+stopped and the owned service again became inactive.
+
+### DLL-free comparison
+
+The [Reddit threading suggestion](community-feedback-2026-10-17.md#threading-suggestion-what-the-source-establishes)
+was tested against the shipped Wine/runtime, not substituted with a different
+upstream tree. A process-scoped Wine override disabled loading
+`xgameruntime.dll.threading` while retaining `xgameruntime=b`; the installed
+licensed file and recovery records were left intact. Native ntsync and the
+existing Venus settings were restored, with DLL-load tracing enabled.
+
+The actual game process had the disabling override and **no native threading
+DLL mapping**. The log identified builtin `xgameruntime.dll`, and its warning
+confirmed that the game requested the builtin XThreading fallback. After the
+warning was acknowledged, the game exited before reaching the title screen
+(the guest recorded `SIGABRT`);
+Steam returned to Play and the owned service became inactive. No successful
+DLL-free game launch is claimed, and the installer requirement remains.
+
+The standalone XGameRuntime executable then ran through the installed launcher
+with the same native-DLL disabling override: **26 tests, zero failures, one
+optional invite-relay skip**, exit 0. Its task-queue/async assertions passing does
+not establish Forza compatibility. This result applies to the preview's pinned
+runtime, not all newer upstream XThreading implementations.
+
+A native-threading control retained the same DLL tracing. Its native DLL mapping
+was confirmed and it advanced to shader optimization, but it also exited before
+the menu. Consequently, these traced runs do not isolate the cause of either
+exit or prove that the missing native DLL caused it. All experimental launch
+overrides were then removed and the original Steam launch-options string was
+restored exactly. A further untraced launch also exited early, so the isolated
+VM was powered off and restarted before cleanup.
+
 ## Release input checks
 
 All five release packages matched the original published `SHA256SUMS`. The
