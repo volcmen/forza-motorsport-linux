@@ -47,6 +47,7 @@ EOF
 printf 'df %s\n' "$*" >> "$FAKE_LOG"
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
 printf '/dev/test 999999999 0 %s 0%% /\n' "${FORZA_FAKE_DISK_KB:-209715200}"
+exit "${FORZA_FAKE_DF_STATUS:-0}"
 EOF
     chmod +x -- "$FAKE_BIN/busctl" "$FAKE_BIN/systemctl" "$FAKE_BIN/df"
     export FORZA_BUSCTL="$FAKE_BIN/busctl" FORZA_SYSTEMCTL="$FAKE_BIN/systemctl" FORZA_DF="$FAKE_BIN/df"
@@ -113,6 +114,7 @@ set_up() {
     export FORZA_FAKE_TOOL_CONTROLLER_STATE=patched FORZA_FAKE_PREFIX_CONTROLLER_STATE=patched
     export FORZA_FAKE_TOOL_MOUNTMGR_STATE=patched FORZA_FAKE_PREFIX_MOUNTMGR_STATE=patched
     export FORZA_FAKE_DISK_KB=209715200
+    export FORZA_FAKE_DF_STATUS=0
     write_fake_commands
     make_ready_installation
 }
@@ -141,6 +143,7 @@ test_ready_installation_reports_each_check_and_does_not_mutate() {
     assert_contains "$output" 'PASS xodus-forza.service disabled state'
     assert_contains "$output" 'PASS controller and mountmgr known-build states'
     assert_contains "$output" 'PASS current free disk space'
+    assert_contains "$(cat -- "$FAKE_LOG")" "df -Pk -- $TEST_ROOT/.local/share/Steam/steamapps"
     assert_log_not_contains 'start'
     assert_log_not_contains 'enable'
     assert_log_not_contains 'stop'
@@ -416,6 +419,15 @@ test_free_disk_space_has_pass_warn_and_fail_thresholds() {
     tear_down
 }
 
+test_failed_df_does_not_report_success_from_partial_output() {
+    set_up
+    export FORZA_FAKE_DF_STATUS=1
+    run_doctor
+    assert_eq "$?" 1
+    assert_contains "$output" 'FAIL current free disk space: unavailable'
+    tear_down
+}
+
 run_test() {
     ((tests_run += 1))
     current_test_failed=0
@@ -441,6 +453,7 @@ run_test test_secret_service_rejects_additional_structural_negatives
 run_test test_service_states_accept_only_non_enabled_runnable_units
 run_test test_per_target_known_build_states_reject_mixed_and_unknown
 run_test test_free_disk_space_has_pass_warn_and_fail_thresholds
+run_test test_failed_df_does_not_report_success_from_partial_output
 
 printf '%s tests run, %s failed\n' "$tests_run" "$tests_failed"
 exit "$status"

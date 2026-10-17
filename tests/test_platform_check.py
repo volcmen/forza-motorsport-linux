@@ -165,7 +165,8 @@ def test_report_is_redacted_and_never_claims_deck_playability(layout, monkeypatc
     monkeypatch.setattr(check, "_query", lambda argv: calls.append(argv) or True)
     result = check.inspect_platform(env)
     assert result["gameplay"] == "unverified"
-    assert result["installer_support"] == "blocked-pending-custom-proton"
+    assert result["profile"] == "composed"
+    assert result["installer_support"] == "experimental-composed-preview"
     assert env["HOME"] not in json.dumps(result)
     assert not any(check["state"] == "FAIL" for check in result["checks"])
     assert calls == [
@@ -174,20 +175,54 @@ def test_report_is_redacted_and_never_claims_deck_playability(layout, monkeypatc
     ]
 
 
-def test_missing_steamos_gui_dependencies_are_reported(layout, monkeypatch):
+def test_legacy_profile_still_requires_native_gui_dependencies(layout, monkeypatch):
     env, steam = layout
     install(steam)
     missing = {"libwebkit2gtk-4.1.so.0", "libadwaita-1.so.0"}
     monkeypatch.setattr(
         check, "_system_library_present", lambda name: name not in missing
     )
-    result = check.inspect_platform(env)
+    result = check.inspect_platform(env, profile="legacy")
     native = {
         row["check"]: row["state"]
         for row in result["checks"]
         if row["check"] in check.NATIVE_LIBRARIES
     }
     assert {name for name, state in native.items() if state == "FAIL"} == missing
+    assert result["installer_support"] == "blocked-pending-custom-proton"
+    assert any(row["check"] == "fresh bootstrap" for row in result["checks"])
+    assert not any(row["check"] == "flatpak" for row in result["checks"])
+
+
+def test_composed_profile_uses_flatpak_instead_of_native_gui_libraries(layout, monkeypatch):
+    env, steam = layout
+    install(steam)
+    monkeypatch.setattr(check.platform, "freedesktop_os_release", lambda: {"ID": "steamos"})
+    monkeypatch.setattr(check.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(check.shutil, "which", lambda command: "/usr/bin/" + command)
+    monkeypatch.setattr(check, "_system_library_present", lambda name: name in check.SERVICE_LIBRARIES)
+    monkeypatch.setattr(check, "_query", lambda argv: True)
+    result = check.inspect_platform(env)
+    rows = {row["check"]: row for row in result["checks"]}
+    assert not any(row["state"] == "FAIL" for row in rows.values())
+    assert rows["flatpak"]["state"] == "PASS"
+    assert set(check.GUI_LIBRARIES).isdisjoint(rows)
+    assert "fresh bootstrap" not in rows
+    assert rows["composed preview"]["state"] == "WARN"
+    assert "Finish verifies" in rows["composed preview"]["detail"]
+    assert result["gameplay"] == "unverified"
+
+
+def test_composed_profile_reports_missing_flatpak_and_native_service_library(layout, monkeypatch):
+    env, steam = layout
+    install(steam)
+    monkeypatch.setattr(check.shutil, "which", lambda command: None if command == "flatpak" else command)
+    monkeypatch.setattr(check, "_system_library_present", lambda name: name != "libssl.so.3")
+    result = check.inspect_platform(env)
+    rows = {row["check"]: row["state"] for row in result["checks"]}
+    assert rows["flatpak"] == "FAIL"
+    assert rows["libssl.so.3"] == "FAIL"
+    assert rows["libdbus-1.so.3"] == "PASS"
 
 
 @pytest.mark.skipif(os.getuid() == 0, reason="root bypasses directory write permissions")
@@ -243,7 +278,8 @@ def test_free_space_uses_game_filesystem_when_library_is_on_another_mount(
     }
 
 
-def test_setup_platform_check_works_without_uv_or_writes_to_checkout(tmp_path):
+@pytest.mark.parametrize("profile", ["composed", "legacy"])
+def test_setup_platform_check_works_without_uv_or_writes_to_checkout(tmp_path, profile):
     root = Path(__file__).parents[1]
     checkout = tmp_path / "checkout"
     home = tmp_path / "empty-home"
@@ -257,7 +293,7 @@ def test_setup_platform_check_works_without_uv_or_writes_to_checkout(tmp_path):
     shutil.copy2(root / "setup", checkout / "setup")
     shutil.copy2(root / "scripts/forza-bootstrap", checkout / "scripts/forza-bootstrap")
     completed = subprocess.run(
-        [str(checkout / "setup"), "platform-check", "--json"],
+        [str(checkout / "setup"), "platform-check", "--json", "--profile", profile],
         env={
             **os.environ,
             "HOME": str(home),
@@ -271,5 +307,6 @@ def test_setup_platform_check_works_without_uv_or_writes_to_checkout(tmp_path):
     assert completed.returncode == 1
     result = json.loads(completed.stdout)
     assert result["scope"] == "read-only platform diagnostics"
+    assert result["profile"] == profile
     assert list(home.iterdir()) == []
     assert list(checkout.rglob("__pycache__")) == []

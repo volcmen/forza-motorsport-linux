@@ -16,13 +16,20 @@ verification records with the code. Do not reintroduce a duplicate guide folder.
 
 ## Work on the code
 
-Use Python 3.11 or newer, `uv`, `just`, ShellCheck, shfmt, ripgrep, and systemd's
+Use Python 3.11 or newer, `uv`, `just`, ShellCheck, **shfmt 3.14.0**, ripgrep, and systemd's
 unit verifier. From a development checkout:
 
 ```bash
 uv sync --locked --group dev
 just verify
 ```
+
+Match the formatter version used by CI: shfmt 3.14 changed formatting around
+arithmetic negation and here-documents. An older distribution package can report
+different results. CI downloads the official Linux x86_64 release and verifies
+its pinned SHA-256 before making it executable; the version and digest are in
+[verify.yml](workflows/verify.yml). Keep local tools on your user or project PATH.
+The Verify workflow also supports manual runs from GitHub Actions.
 
 Tests use synthetic inputs and temporary roots. The unit verifier needs an
 executable at the unit's declared service path; CI provides a harmless stub in

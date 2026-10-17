@@ -14,7 +14,7 @@ usage() {
         "       $0 bootstrap [OPTIONS]" \
         "       $0 snapshot [OPTIONS]" \
         "       $0 compare [OPTIONS]" \
-        "       $0 platform-check [--json]" >&2
+        "       $0 platform-check [--json] [--profile composed|legacy]" >&2
     exit 64
 }
 
@@ -23,7 +23,7 @@ print_help() {
         'Guided setup for an experimental, source-only Forza Motorsport Linux integration.' \
         '' \
         'Hybrid bootstrap:' \
-        '  ./setup platform-check [--json] Read-only Arch/SteamOS and native Steam diagnostics' \
+        '  ./setup platform-check [--json] Read-only composed-preview prerequisites (use --profile legacy for v0.2)' \
         '  ./setup composed --help         Experimental complete-tool setup for Arch/SteamOS' \
         '  ./setup bootstrap              Prepare or resume the hybrid bootstrap' \
         '  ./setup bootstrap --check      Inspect durable state and managed paths; bootstrap --check is read-only' \

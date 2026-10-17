@@ -411,9 +411,8 @@ def test_release_rejects_invalid_provenance(tmp_path, key, value):
         setup.load_release(tmp_path)
 
 
-def test_doctor_recognizes_composed_modules_and_rejects_changed_records(
-    tmp_path, monkeypatch
-):
+@pytest.fixture
+def composed_doctor(tmp_path, monkeypatch):
     context, state, _, _, _ = ready_fixture(tmp_path, monkeypatch)
     manifest = context.host.user_root / PAYLOADS[3]
     values = context.release["managed_targets"]
@@ -428,7 +427,10 @@ def test_doctor_recognizes_composed_modules_and_rejects_changed_records(
     systemctl.chmod(0o755)
     df = tmp_path / "doctor-df"
     df.write_text(
-        "#!/bin/sh\nprintf 'Filesystem Blocks Used Available Capacity Mounted\\nfixture 999999999 0 209715200 0%% /\\n'\n"
+        "#!/usr/bin/env python3\nimport sys\n"
+        f"available = 209715200 if sys.argv[1:] == ['-Pk', '--', {str(context.layout.game_root)!r}] else 1024\n"
+        "print('Filesystem Blocks Used Available Capacity Mounted')\n"
+        "print(f'fixture 999999999 0 {available} 0% /')\n"
     )
     df.chmod(0o755)
     env = {
@@ -448,15 +450,35 @@ def test_doctor_recognizes_composed_modules_and_rejects_changed_records(
             check=False,
         )
 
+    return context, state, doctor
+
+
+def test_doctor_recognizes_composed_modules_and_checks_actual_game_filesystem(composed_doctor):
+    context, state, doctor = composed_doctor
     result = doctor()
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS composed installation records" in result.stdout
     assert "PASS controller and mountmgr known-build states" in result.stdout
+    assert "PASS current free disk space" in result.stdout
+    assert str(context.layout.game_root) not in result.stdout
     plan_path = setup._transaction(context, state) / "finish-plan.json"
     plan_path.chmod(0o644)
     result = doctor()
     assert result.returncode == 1
     assert "FAIL composed installation records" in result.stdout
+    assert "FAIL current free disk space: unavailable" in result.stdout
+
+
+def test_doctor_rejects_replaced_game_directory_before_disk_check(composed_doctor):
+    context, _, doctor = composed_doctor
+    game = context.layout.game_root
+    game.rename(game.with_name("preserved-game"))
+    game.mkdir()
+    result = doctor()
+    assert result.returncode == 1
+    assert "FAIL composed installation records" in result.stdout
+    assert "FAIL current free disk space: unavailable" in result.stdout
+    assert "PASS current free disk space" not in result.stdout
 
 
 def test_complete_flow_uses_additional_library_and_prefix(tmp_path, monkeypatch):
