@@ -355,6 +355,61 @@ def test_licensed_journal_cannot_redirect_parent_rollback(tmp_path, monkeypatch)
     assert all((context.host.user_root / path).exists() for path in PAYLOADS)
 
 
+def test_rollback_after_game_replacement_preserves_both_game_trees(tmp_path, monkeypatch):
+    context, _state, tool, prefix, _ = ready_fixture(tmp_path, monkeypatch)
+    game = context.layout.game_root
+    (game / "original-content").write_bytes(b"original game")
+    original = game.with_name("original-game")
+    game.rename(original)
+    game.mkdir()
+    (game / "replacement-content").write_bytes(b"replacement game")
+
+    with pytest.raises(BootstrapError, match="host or Prepare plan changed"):
+        setup.status(context)
+    assert setup.rollback(context, lambda _: "ROLLBACK")["phase"] == "ROLLED_BACK"
+    assert not tool.exists()
+    assert prefix.is_dir()
+    assert all(not (context.host.user_root / path).exists() for path in PAYLOADS)
+    assert (game / "replacement-content").read_bytes() == b"replacement game"
+    assert (original / "original-content").read_bytes() == b"original game"
+
+
+def test_finish_still_rejects_replaced_game_directory(tmp_path, monkeypatch):
+    context, archive, bundle, _ = fixture(tmp_path, monkeypatch)
+    state = setup.prepare(context, archive, bundle, lambda digest: digest)
+    tool = context.host.compatibility_tools / "GE-Proton11-3-FM"
+    steam_checkpoint(context, tool)
+    game = context.layout.game_root
+    game.rename(game.with_name("original-game"))
+    game.mkdir()
+    with pytest.raises(BootstrapError, match="host or Prepare plan changed"):
+        setup.finish(context, private_dll(tmp_path), lambda digest: digest)
+    assert setup.load_active(context) == state
+    assert all(not (context.host.user_root / path).exists() for path in PAYLOADS)
+
+
+@pytest.mark.parametrize("root", ["home", "steam", "library", "game"])
+def test_rollback_still_rejects_changed_writable_root_binding(tmp_path, monkeypatch, root):
+    context, state, tool, prefix, _ = ready_fixture(tmp_path, monkeypatch)
+    original = setup._bindings
+
+    def changed_binding(actual_context):
+        result = original(actual_context)
+        result[root] = {
+            **result[root],
+            "path": result[root]["path"] + "-different",
+            "inode": result[root]["inode"] + 1,
+        }
+        return result
+
+    monkeypatch.setattr(setup, "_bindings", changed_binding)
+    with pytest.raises(BootstrapError, match="host or Prepare plan changed"):
+        setup.rollback(context, lambda _: "ROLLBACK")
+    assert setup.load_active(context) == state
+    assert tool.is_dir() and prefix.is_dir()
+    assert all((context.host.user_root / path).exists() for path in PAYLOADS)
+
+
 def test_rollback_resumes_after_child_completed(tmp_path, monkeypatch):
     context, _state, tool, prefix, _ = ready_fixture(tmp_path, monkeypatch)
     original = setup.licensed.rollback_threading_copy

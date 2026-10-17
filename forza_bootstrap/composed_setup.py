@@ -471,12 +471,23 @@ def _publication_args(context: Context, state: dict) -> tuple:
     )
 
 
-def _validate_prepare_binding(context: Context, state: dict) -> dict:
+def _validate_prepare_binding(
+    context: Context, state: dict, *, rollback_only: bool = False
+) -> dict:
     plan = _read(_transaction(context, state) / "prepare-plan.json")
+    bindings = _bindings(context)
+    recorded = plan.get("bindings")
+    if rollback_only and isinstance(recorded, dict):
+        # Recovery never writes to the game directory. A remounted or replaced
+        # game at the same path must not strand the independently verified tool,
+        # prefix and user files. Keep every writable-root binding mandatory.
+        game = recorded.get("game")
+        if isinstance(game, dict) and game.get("path") == bindings["game"]["path"]:
+            bindings["game"] = game
     if (
         sha256_bytes(canonical_json(plan)) != state["prepare_plan_sha256"]
         or plan.get("manifest_sha256") != context.manifest_sha256
-        or plan.get("bindings") != _bindings(context)
+        or recorded != bindings
         or plan.get("tool_destination") != str(_publication_args(context, state)[4])
     ):
         raise BootstrapError("composed host or Prepare plan changed")
@@ -1083,7 +1094,7 @@ def rollback(context: Context, confirm: Callable[[str], str]) -> dict:
                 raise BootstrapError("no composed transaction exists")
             if state["phase"] == "ROLLED_BACK":
                 return state
-            _validate_prepare_binding(context, state)
+            _validate_prepare_binding(context, state, rollback_only=True)
             if confirm("ROLLBACK") != "ROLLBACK":
                 raise BootstrapError("rollback was not confirmed")
             transaction = _transaction(context, state)

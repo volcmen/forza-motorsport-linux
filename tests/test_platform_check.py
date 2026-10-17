@@ -189,7 +189,7 @@ def test_legacy_profile_still_requires_native_gui_dependencies(layout, monkeypat
         if row["check"] in check.NATIVE_LIBRARIES
     }
     assert {name for name, state in native.items() if state == "FAIL"} == missing
-    assert result["installer_support"] == "blocked-pending-custom-proton"
+    assert result["installer_support"] == "retired-legacy-bootstrap"
     assert any(row["check"] == "fresh bootstrap" for row in result["checks"])
     assert not any(row["check"] == "flatpak" for row in result["checks"])
 

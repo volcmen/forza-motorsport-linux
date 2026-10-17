@@ -912,9 +912,10 @@ def inspect_prepare(
         == "861c2edc8d40d051fb1e7a692deb953be52bd339c46d90f2b7dde50ddad91266"
     ):
         raise BootstrapError(
-            "fresh bootstrap is unavailable: the pinned stock GE-Proton11-3 "
-            "lacks required Forza Wine core fixes. A reviewed custom FM build "
-            "is required; see the wiki Install page and issues #7/#8"
+            "the v0.2 fresh bootstrap is retired: the pinned stock GE-Proton11-3 "
+            "lacks required Forza Wine core fixes. Use './setup composed --help' "
+            "and the wiki Install guide for a new installation. Existing v0.2 "
+            "transactions retain their original status, resume and rollback commands"
         )
     required = max(
         _MIN_PREPARE_BYTES,
