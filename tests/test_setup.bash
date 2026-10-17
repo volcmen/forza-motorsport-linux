@@ -287,10 +287,11 @@ test_rollback_stops_on_a_relative_compat_tool_path() {
         FORZA_INSTALL_ROOT="$USER_ROOT" \
         FORZA_SETUP_XODUS_BUILD_DIR="$XODUS_BUILD" \
         FORZA_SETUP_XGAMERUNTIME_BUILD_DIR="$XGAMERUNTIME_BUILD" \
-        "$FIXTURE_ROOT/setup" rollback <<EOF >/dev/null 2>&1; then
+        "$FIXTURE_ROOT/setup" rollback <<EOF >/dev/null 2>&1
 relative
 ROLLBACK
 EOF
+    then
         fail 'rollback accepted a relative compatibility-tool path'
         tear_down
         return 1

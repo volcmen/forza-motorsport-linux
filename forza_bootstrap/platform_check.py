@@ -21,17 +21,20 @@ from .proton import _parse_vdf, _VdfToken
 
 APP_ID = "2440510"
 MAX_VDF_BYTES = 4 * 1024 * 1024
-# Direct dependencies of the pinned v0.2 native applications. Presence is a
+# Selected dependencies of the native service and legacy GUI. Presence is a
 # prerequisite, not proof that every transitive dependency or symbol resolves.
-NATIVE_LIBRARIES = (
+SERVICE_LIBRARIES = (
     "libdbus-1.so.3",
     "libssl.so.3",
     "libcrypto.so.3",
+)
+GUI_LIBRARIES = (
     "libgtk-4.so.1",
     "libadwaita-1.so.0",
     "libSDL3.so.0",
     "libwebkit2gtk-4.1.so.0",
 )
+NATIVE_LIBRARIES = SERVICE_LIBRARIES + GUI_LIBRARIES
 
 
 @dataclass(frozen=True)
@@ -219,7 +222,9 @@ def _system_library_present(name: str) -> bool:
     return (Path("/usr/lib") / name).is_file()
 
 
-def inspect_platform(env: Mapping[str, str]) -> dict:
+def inspect_platform(env: Mapping[str, str], *, profile: str = "composed") -> dict:
+    if profile not in {"composed", "legacy"}:
+        raise BootstrapError("unknown diagnostic profile")
     checks: list[dict[str, str]] = []
 
     def report(state: str, name: str, detail: str) -> None:
@@ -244,14 +249,18 @@ def inspect_platform(env: Mapping[str, str]) -> dict:
         "Python",
         "3.11 or newer required",
     )
-    for command in ("bash", "systemctl", "busctl", "flock"):
+    commands = ("bash", "systemctl", "busctl", "flock")
+    if profile == "composed":
+        commands += ("flatpak",)
+    for command in commands:
         available = shutil.which(command) is not None
         report(
             "PASS" if available else "FAIL",
             command,
             "available" if available else "missing",
         )
-    for library in NATIVE_LIBRARIES:
+    libraries = NATIVE_LIBRARIES if profile == "legacy" else SERVICE_LIBRARIES
+    for library in libraries:
         present = _system_library_present(library)
         report(
             "PASS" if present else "FAIL",
@@ -328,11 +337,18 @@ def inspect_platform(env: Mapping[str, str]) -> dict:
             else "Steam metadata or paths are unavailable"
         )
         report("FAIL", "native Steam layout", detail)
-    report(
-        "WARN",
-        "fresh bootstrap",
-        "v0.2 stock GE acquisition is not a complete FM build; see issues #7 and #8",
-    )
+    if profile == "legacy":
+        report(
+            "WARN",
+            "fresh bootstrap",
+            "v0.2 stock GE acquisition is not a complete FM build; see issues #7 and #8",
+        )
+    else:
+        report(
+            "WARN",
+            "composed preview",
+            "complete custom Proton and preview Flatpak required; composed Finish verifies the app/runtime pins; see Install",
+        )
     report(
         "WARN",
         "Steam Deck gameplay",
@@ -341,14 +357,19 @@ def inspect_platform(env: Mapping[str, str]) -> dict:
     return {
         "schema": 1,
         "scope": "read-only platform diagnostics",
-        "installer_support": "blocked-pending-custom-proton",
+        "profile": profile,
+        "installer_support": (
+            "experimental-composed-preview"
+            if profile == "composed"
+            else "blocked-pending-custom-proton"
+        ),
         "gameplay": "unverified",
         "checks": checks,
     }
 
 
-def main(*, json_output: bool = False) -> int:
-    result = inspect_platform(os.environ)
+def main(*, json_output: bool = False, profile: str = "composed") -> int:
+    result = inspect_platform(os.environ, profile=profile)
     if json_output:
         print(json.dumps(result, sort_keys=True))
     else:

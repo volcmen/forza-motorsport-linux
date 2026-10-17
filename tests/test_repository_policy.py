@@ -169,10 +169,12 @@ def test_verify_workflow_installs_just_before_running_the_gate():
 
 def test_verify_workflow_installs_ripgrep_for_bash_assertions():
     workflow = (ROOT / ".github/workflows/verify.yml").read_text()
-    install_tools = "sudo apt-get install --yes shellcheck shfmt systemd ripgrep"
+    install_tools = next(
+        line for line in workflow.splitlines()
+        if line.strip().startswith("sudo apt-get install ") and "ripgrep" in line.split()
+    )
     gate = "run: just verify"
 
-    assert install_tools in workflow
     assert workflow.index(install_tools) < workflow.index(gate)
 
 
@@ -300,6 +302,20 @@ def test_development_lock_excludes_vulnerable_pytest_versions():
     package = next(item for item in lock["package"] if item["name"] == "pytest")
     assert Version(package["version"]) >= Version("9.0.3")
     assert "uv sync --locked --group dev" in (ROOT / ".github/workflows/verify.yml").read_text()
+
+
+def test_ci_checks_pinned_formatter_before_installing_or_running_it():
+    import re
+
+    workflow = (ROOT / ".github/workflows/verify.yml").read_text()
+    assert re.search(r'SHFMT_VERSION: "\d+\.\d+\.\d+"', workflow)
+    assert re.search(r'SHFMT_SHA256: "[a-f0-9]{64}"', workflow)
+    assert 'https://github.com/mvdan/sh/releases/download/' in workflow
+    check = workflow.index('sha256sum --check --strict')
+    install = workflow.index('install -Dm755 "$RUNNER_TEMP/shfmt"')
+    gate = workflow.index('run: just verify')
+    assert check < install < gate
+    assert 'sudo apt-get install --yes shellcheck shfmt' not in workflow
 
 
 def test_security_reporting_and_license_are_discoverable():

@@ -16,6 +16,7 @@ fi
 
 steam_root="$data_root/Steam"
 library_root=$steam_root
+disk_root="$library_root/steamapps"
 prefix_root="$steam_root/steamapps/compatdata/$app_id/pfx/drive_c"
 runtime_root="$home_root/.local"
 patcher="$runtime_root/libexec/forza-motorsport-linux/patch-known-build"
@@ -109,7 +110,7 @@ has_kde_secret_service_provider() {
                 ;;
         esac
     done <"$candidate"
-    ((section_count == 1 && name_count == 1 && exec_count == 1 && !invalid_key)) || return 1
+    ((section_count == 1 && name_count == 1 && exec_count == 1 && ! invalid_key)) || return 1
     [[ $name == "$service_name" ]] || return 1
     if ! executable=$(
         python3 - "$exec" <<'PY'
@@ -193,8 +194,10 @@ report_known_builds() {
 
 report_disk_space() {
     local available_kb
-    available_kb=$("$df_bin" -Pk "$library_root" 2>/dev/null | awk 'NR == 2 { print $4 }')
-    if [[ ! $available_kb =~ ^[0-9]+$ ]]; then
+    if [[ -z $disk_root ]] || ! available_kb=$(
+        set -o pipefail
+        "$df_bin" -Pk -- "$disk_root" 2>/dev/null | awk 'NR == 2 { print $4 }'
+    ) || [[ ! $available_kb =~ ^[0-9]+$ ]]; then
         report FAIL 'current free disk space' unavailable
     elif ((available_kb >= 104857600)); then
         report PASS 'current free disk space' 'at least 100 GiB available'
@@ -302,13 +305,14 @@ try:
     if binding(roots["home"]) != home:
         raise ValueError("recorded home changed")
     steam, library = binding(roots["steam"]), binding(roots["library"])
+    game = binding(roots["game"])
     prefix = binding(finish["prefix"])
     if binding(finish["system32"]) != prefix / "drive_c/windows/system32":
         raise ValueError("recorded prefix changed")
     for key in ("windows_gaming_input_sha256", "mountmgr_sha256"):
         if re.fullmatch(r"[a-f0-9]{64}", known[key]) is None:
             raise ValueError("invalid read-only module hash")
-    for value in (steam, library, prefix / "drive_c", known["windows_gaming_input_sha256"], known["mountmgr_sha256"]):
+    for value in (steam, library, prefix / "drive_c", known["windows_gaming_input_sha256"], known["mountmgr_sha256"], game):
         print(value)
 except (OSError, ValueError, KeyError, TypeError) as error:
     print(f"composed records: {error}", file=sys.stderr)
@@ -322,9 +326,11 @@ PY
             prefix_root=${composed_values[2]}
             composed_wgi=${composed_values[3]}
             composed_mountmgr=${composed_values[4]}
+            disk_root=${composed_values[5]}
             report PASS 'composed installation records' 'reviewed plans and directory identities'
         fi
     else
+        disk_root=''
         report FAIL 'composed installation records' 'incomplete, changed, or unsafe'
     fi
 fi

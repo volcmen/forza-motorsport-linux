@@ -3,6 +3,7 @@ name: verify
 on:
   pull_request:
   push:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,7 +29,18 @@ jobs:
       - name: Install shell tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes shellcheck shfmt systemd ripgrep
+          sudo apt-get install --yes shellcheck systemd ripgrep
+      - name: Install pinned shell formatter
+        env:
+          SHFMT_VERSION: "3.14.0"
+          SHFMT_SHA256: "fe42021c7272ef2d67ea36cbc3031683c625d0badec733ef3a57b567246a0b66"
+        run: |
+          curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 \
+            "https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/shfmt_v${SHFMT_VERSION}_linux_amd64" \
+            --output "$RUNNER_TEMP/shfmt"
+          printf '%s  %s\n' "$SHFMT_SHA256" "$RUNNER_TEMP/shfmt" | sha256sum --check --strict
+          install -Dm755 "$RUNNER_TEMP/shfmt" "$RUNNER_TEMP/forza-tools/shfmt"
+          echo "$RUNNER_TEMP/forza-tools" >> "$GITHUB_PATH"
       - name: Provide executable target for unit verification
         run: install -Dm755 /bin/true "$HOME/.local/libexec/xodus-forza/xodus-service"
       - name: Install Python verification tools

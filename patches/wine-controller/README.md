@@ -16,9 +16,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
 | Final local commit | `ddd302d97c6008d79ea4f3e3ad56014cb548e514` |
 | Evidence date | 2026-09-02 |
 
-The compatibility branch is planned and local. It has not been pushed or
-published, so the branch name and commit identifiers below are provenance
-records, not public download or fetch locations.
+At the 2026-09-02 evidence date, this compatibility branch was local and
+unpublished. It was subsequently published as
+[xodus-gaming/wine PR #4](https://github.com/xodus-gaming/wine/pull/4), still open
+at the same final commit when checked on 2026-10-17. The build and runtime
+observations below remain historical; publication does not change their results.
 
 The cumulative local commit sequence is:
 
@@ -30,6 +32,20 @@ The cumulative local commit sequence is:
    `windows.gaming.input: keep NRID helper private`
 
 No Wine binary is stored in this repository.
+
+### Upstream review, checked 2026-10-17
+
+[Weather-OS requested upstream Wine submission first](https://github.com/xodus-gaming/wine/pull/4#issuecomment-5576290488),
+with the Xodus fork as a possible fallback if upstream declines. This is a routing
+request, not approval or a request to remove the physical-controller fix.
+
+Wine's [current provider implementation](https://github.com/wine-mirror/wine/blob/7298a818b79446bae153b8d5aa27235ab3703bf9/dlls/windows.gaming.input/provider.c#L144)
+still returns `E_NOTIMPL` for `NonRoamableId`. Unlike the Xodus/Proton base of this
+PR, it has no Steam virtual-controller implementation in that method. Upstream
+submission therefore needs adaptation to that base, review of identity semantics,
+and Wine/Windows conformance tests. The private-helper harness and historical
+Forza fallback results below do not replace those tests. No Wine upstream merge
+or new physical-controller validation is claimed.
 
 ## Source change
 

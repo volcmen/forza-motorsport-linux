@@ -17,9 +17,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
 | Final local commit | `a7719bd8d0719e5ea6061387db020fa6a6b39d27` |
 | Evidence date | 2026-09-02 |
 
-The compatibility branch is planned and local. It has not been pushed or
-published, so the branch name and commit identifiers are provenance records,
-not public download or fetch locations.
+At the 2026-09-02 evidence date, this compatibility branch was local and
+unpublished. It was subsequently published as
+[xodus-gaming/wine PR #5](https://github.com/xodus-gaming/wine/pull/5), still open
+at the same final commit when checked on 2026-10-17, with no public review or
+conversation replies. The build and runtime observations below retain their
+original dates and limits.
 
 The local commits are:
 

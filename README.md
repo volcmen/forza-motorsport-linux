@@ -33,6 +33,7 @@ guarantee for every system. Follow the wiki's requirements before running setup.
 | Task | Guide |
 | --- | --- |
 | Install and configure Steam | [Install](https://github.com/volcmen/forza-motorsport-linux/wiki/Install) |
+| Check SteamOS prerequisites and test limits | [Steam Deck and SteamOS](https://github.com/volcmen/forza-motorsport-linux/wiki/Steam-Deck) |
 | Drive, invite, and check a session | [Play and verify](https://github.com/volcmen/forza-motorsport-linux/wiki/Play-and-verify) |
 | Diagnose a problem | [Troubleshooting](https://github.com/volcmen/forza-motorsport-linux/wiki/Troubleshooting) |
 | Resume, roll back, or uninstall | [Recovery](https://github.com/volcmen/forza-motorsport-linux/wiki/Recovery) |
@@ -47,3 +48,4 @@ guarantee for every system. Follow the wiki's requirements before running setup.
 [Contributing](.github/CONTRIBUTING.md) ·
 [Security policy](.github/SECURITY.md) ·
 [Repository security review](evidence/security-audit-2026-10-15.md)
+· [Community feedback and fixes](evidence/community-feedback-2026-10-17.md)

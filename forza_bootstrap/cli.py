@@ -68,6 +68,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     platform_check = commands.add_parser("platform-check")
     platform_check.add_argument("--json", action="store_true")
+    platform_check.add_argument(
+        "--profile", choices=("composed", "legacy"), default="composed",
+        help="prerequisites for the composed preview (default) or legacy native setup",
+    )
 
     return parser.parse_args(argv)
 
@@ -226,7 +230,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "platform-check":
             from .platform_check import main as platform_main
 
-            return platform_main(json_output=arguments.json)
+            return platform_main(json_output=arguments.json, profile=arguments.profile)
         if arguments.command == "snapshot":
             output_snapshot(_capture_current_snapshot(), arguments.output, sys.stdout)
             return 0
