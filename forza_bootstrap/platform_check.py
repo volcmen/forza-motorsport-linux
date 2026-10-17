@@ -341,7 +341,7 @@ def inspect_platform(env: Mapping[str, str], *, profile: str = "composed") -> di
         report(
             "WARN",
             "fresh bootstrap",
-            "v0.2 stock GE acquisition is not a complete FM build; see issues #7 and #8",
+            "v0.2 fresh downloads are retired; use setup composed for a new installation and preserve existing recovery records",
         )
     else:
         report(
@@ -361,7 +361,7 @@ def inspect_platform(env: Mapping[str, str], *, profile: str = "composed") -> di
         "installer_support": (
             "experimental-composed-preview"
             if profile == "composed"
-            else "blocked-pending-custom-proton"
+            else "retired-legacy-bootstrap"
         ),
         "gameplay": "unverified",
         "checks": checks,

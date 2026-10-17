@@ -22,10 +22,12 @@ print_help() {
     printf '%s\n' \
         'Guided setup for an experimental, source-only Forza Motorsport Linux integration.' \
         '' \
-        'Hybrid bootstrap:' \
+        'New installations (experimental composed preview):' \
         '  ./setup platform-check [--json] Read-only composed-preview prerequisites (use --profile legacy for v0.2)' \
         '  ./setup composed --help         Experimental complete-tool setup for Arch/SteamOS' \
-        '  ./setup bootstrap              Prepare or resume the hybrid bootstrap' \
+        '' \
+        'Legacy v0.2 bootstrap (fresh downloads retired; retain recovery records):' \
+        '  ./setup bootstrap              Resume an existing hybrid bootstrap' \
         '  ./setup bootstrap --check      Inspect durable state and managed paths; bootstrap --check is read-only' \
         '  ./setup bootstrap --rollback   Roll back the composed bootstrap transaction' \
         '  ./setup snapshot               Capture the finite scope; prints redacted JSON; --output writes private evidence' \
